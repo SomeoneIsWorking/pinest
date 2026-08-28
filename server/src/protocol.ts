@@ -75,7 +75,7 @@ export interface SessionSnapshot {
 export type ServerMessage =
   | { type: "authed" }
   | { type: "error"; message: string; sessionId?: string }
-  | { type: "state"; online: boolean; hostname: string; sessions: SessionSnapshot[]; registry: SessionRow[] }
+  | { type: "state"; online: boolean; hostname: string; sessions: SessionSnapshot[]; registry: SessionRow[]; tunnelUrl?: string | null; tunnelProvider?: string | null }
   | { type: "session_list"; sessions: SessionRow[] }
   | { type: "session_deleted"; sessionId: string; deleted: boolean }
   | { type: "history"; sessionId: string; history: HistoryItem[] }
@@ -99,4 +99,5 @@ export type ClientCommand =
   | { type: "list_models"; sessionId?: string }
   | { type: "get_history"; sessionId?: string }
   | { type: "list_paths"; prefix?: string; id?: string }
+  | { type: "set_compact_threshold"; thresholdTokens: number }
   | { type: "reload" };

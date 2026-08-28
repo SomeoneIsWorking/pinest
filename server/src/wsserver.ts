@@ -123,8 +123,12 @@ export class WSServer {
   async startTunnel(preferred?: string): Promise<string | null> {
     this.tunnel = await startProviderTunnel({ port: this.port, preferred });
     this.tunnelUrl = this.tunnel?.url ?? null;
+    if (this.tunnel) this.tunnel.onDead = () => this.tunnelOnDead?.();
     return this.tunnel?.provider ?? null;
   }
+
+  /** Called when the active tunnel process dies (auto-restart hook). */
+  tunnelOnDead?: () => void;
 
   /** Restart the tunnel with a new preferred provider. Returns provider|null. */
   async restartTunnel(preferred?: string): Promise<string | null> {

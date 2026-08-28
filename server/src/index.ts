@@ -128,7 +128,22 @@ function stateMessage(): ServerMessage {
     // Durable registry rows (incl. not-running sessions). Old clients ignore
     // this field; new clients merge it with `sessions` for the full list.
     registry: _registry?.all() ?? [],
+    // So the app can show (and the user can verify) the live tunnel endpoint.
+    tunnelUrl: _ws?.tunnelUrl ?? null,
+    tunnelProvider: _ws?.tunnel?.provider ?? null,
   };
+}
+
+/** Context usage enriched with the effective auto-compact threshold. */
+function enrichedContextUsage(): Record<string, unknown> | undefined {
+  try {
+    const u = (_ctx as any)?.getContextUsage?.() as any;
+    if (!u) return undefined;
+    const at = loadConfig().compactAtTokens;
+    return { ...u, compactAt: at };
+  } catch {
+    return undefined;
+  }
 }
 
 function broadcastState(): void {
@@ -255,6 +270,7 @@ async function bootstrap(): Promise<void> {
     removeSession,
     broadcast: (msg) => broadcast(msg as ServerMessage),
     embedImages,
+    compactAtTokens: (): number | undefined => loadConfig().compactAtTokens,
   }, _registry);
 
   // Start WebSocket server + tunnel
@@ -265,6 +281,10 @@ async function bootstrap(): Promise<void> {
   });
   _ws.on("command", (cmd) => { void handleCommand(cmd); });
   _ws.setStateProvider(stateMessage);
+  _ws.tunnelOnDead = () => {
+    debug("[remote-code] tunnel died — restarting");
+    void _ws?.restartTunnel(loadConfig().tunnelProvider).then(() => publishPresence(true));
+  };
   await _ws.start();
 
   // Presence: publish IMMEDIATELY (url may be null until the tunnel lands)
@@ -301,7 +321,7 @@ async function bootstrap(): Promise<void> {
   // Register this interactive session
   const initModel = _ctx?.model;
   const initThinking = (_ctx as any)?.getThinkingLevel?.() ?? "off";
-  const initCtx = _ctx?.getContextUsage?.();
+  const initCtx = enrichedContextUsage();
   const hostPiSessionPath: string | null = (_ctx?.sessionManager as any)?.getSessionFile?.()
     ?? (_ctx?.sessionManager as any)?.sessionFile ?? null;
   const hostName = deriveSessionName(process.cwd(), process.env.RC_NAME || process.env.PINEST_NAME);
@@ -363,6 +383,7 @@ async function handleCommand(cmd: ClientCommand): Promise<void> {
     }
     if (cmd.type === "session_resume") return await resumeSession(cmd);
     if (cmd.type === "session_delete") return await deleteSession(cmd);
+    if (cmd.type === "set_compact_threshold") return setCompactThreshold(cmd);
     if (cmd.type === "reload") {
       queueReload();
       return;
@@ -410,6 +431,14 @@ async function resumeSession(cmd: Extract<ClientCommand, { type: "session_resume
     cwd: row.cwd,
     name: row.name,
   });
+  broadcastState();
+}
+
+async function setCompactThreshold(cmd: Extract<ClientCommand, { type: "set_compact_threshold" }>): Promise<void> {
+  const t = Math.floor(cmd.thresholdTokens);
+  if (!Number.isFinite(t) || t < 1_000) throw new Error("threshold must be >= 1000 tokens");
+  saveConfig({ compactAtTokens: t });
+  debug(`[remote-code] auto-compact threshold set to ${t} tokens`);
   broadcastState();
 }
 
@@ -499,7 +528,11 @@ async function setModel(cmd: Extract<ClientCommand, { type: "model_set" }>): Pro
     const m = reg?.find?.(cmd.provider, cmd.modelId);
     if (!m) throw new Error(`model ${cmd.provider}/${cmd.modelId} not found`);
     _pi?.setModel?.(m);
-    upsertSession(_sessionId, { model: `${cmd.provider}/${cmd.modelId}`, modelName: m.name });
+    upsertSession(_sessionId, {
+      model: `${cmd.provider}/${cmd.modelId}`,
+      modelName: m.name,
+      contextUsage: enrichedContextUsage(),
+    });
   } catch (e) { debug("[remote-code] setModel:", (e as Error).message); }
 }
 
@@ -579,8 +612,8 @@ function bridge(pi: ExtensionAPI): void {
     if (_currentTurnId) _currentTurnId = null;
     _streamingText = "";
     _status = "idle";
-    const ctxUsage = (_ctx as any)?.getContextUsage?.();
-    upsertSession(_sessionId, { streamingText: null, status: "idle", contextUsage: ctxUsage });
+    upsertSession(_sessionId, { streamingText: null, status: "idle", contextUsage: enrichedContextUsage() });
+    maybeAutoCompactHost();
     // Send updated history so the completed message sticks
     getInteractiveHistory().then((h) => broadcast({ type: "history", sessionId: _sessionId, history: h }));
   });
@@ -617,6 +650,23 @@ function bridge(pi: ExtensionAPI): void {
         try { _ui?.setStatus?.("pinest:url", `offline — ${reason}`); } catch { /* */ }
       });
   });
+
+  // Auto-compact the host session when the context crosses the threshold
+  // (remote-code config, live-changeable — no pi settings reload needed).
+  let _hostCompacting = false;
+  const maybeAutoCompactHost = (): void => {
+    if (_hostCompacting) return;
+    const at = loadConfig().compactAtTokens;
+    if (!at) return;
+    const usage = enrichedContextUsage() as any;
+    if (!usage?.tokens || usage.tokens < at) return;
+    _hostCompacting = true;
+    debug(`[remote-code] auto-compacting host session (${usage.tokens} >= ${at} tokens)`);
+    Promise.resolve((_ctx as any)?.compact?.())
+      .catch((e: unknown) => debug("[remote-code] auto-compact failed:", (e as Error).message))
+      .finally(() => { _hostCompacting = false; });
+  };
+  pi.on("agent_settled", () => maybeAutoCompactHost());
 
   // Reload tears this instance down; the re-imported instance bootstraps
   // fresh (ws server, tunnel, registry reload). Spawned sessions were parked
