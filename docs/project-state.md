@@ -112,7 +112,7 @@ is what runs on the dev machine today).
 
 ## S5 — GLM-5.3-Flash via OpenCode Go, compact at ~400k
 
-Status: `missing`
+Status: `verified`
 
 Endpoint + limits confirmed (models.dev: context 1,000,000, output 131,072,
 `https://opencode.ai/zen/go/v1`, OpenAI-compatible). Provisioning script not
@@ -120,12 +120,14 @@ yet written; no models.json entry shipped; settings default not wired.
 Default spawn model string updated to `opencode-go/glm-5.3-flash` in the
 meantime.
 
-Gaps: `server/scripts/provision.ts` (I-005), settings defaults.
-NOTE: OpenRouter + opencode-go API keys are now installed in the machine's
-pi auth store (`<PI_AGENT_DIR>/auth.json`, `type: "api_key"`), so spawned
-sessions authenticate without env vars; real-LLM integration tests pass
-against `openrouter/nvidia/nemotron-3-super-120b-a12b:free` (free tier;
-gemma free model 429-rate-limits).
+Evidence: provision ran on the dev machine (`node scripts/provision.ts` —
+model ok, context 1,000,000, auth ok, idempotent second run); settings.json
+now carries the compaction patch and default model. OpenRouter +
+opencode-go API keys installed in the machine's pi auth store
+(`<PI_AGENT_DIR>/auth.json`, `type: "api_key"`), so spawned sessions
+authenticate without env vars; real-LLM integration tests pass against
+`openrouter/nvidia/nemotron-3-super-120b-a12b:free` (free tier; the gemma
+free model 429-rate-limits).
 
 ## S6 — Flutter client with durable session UI
 
@@ -138,6 +140,6 @@ Gaps: fork + reconnect fix + sessions UI (I-007).
 
 ## Current focus
 
-I-005 provisioning (compact settings + default model) → I-007 app fork.
-Registry/resume verified against a real host: stable host id across reloads
-observed live; rules deployed and verified.
+I-007 Flutter app fork (sessions UI + reconnect). Registry/resume/reload
+verified against a real host; rules deployed and verified; provisioning
+done.
