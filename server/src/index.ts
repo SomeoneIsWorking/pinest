@@ -29,6 +29,7 @@ import { ReloadWatcher } from "./reload.ts";
 import { resolveThinkingLevel, reportThinkingLevel } from "./thinking.ts";
 import { Type } from "typebox";
 import type { SessionRow, SessionSnapshot, ClientCommand, ServerMessage } from "./protocol.ts";
+import { installCrashReporter } from "./crash.ts";
 
 const REGISTRY_PATH = process.env.RC_REGISTRY_PATH
   || join(homedir(), ".pi", "agent", "remote-code", "sessions.json");
@@ -70,6 +71,8 @@ let _watcher: ReloadWatcher | null = null; // ReloadWatcher
 
 // In-memory session snapshots (the live view; registry is the durable view)
 const _sessions = new Map<string, SessionSnapshot>();
+
+installCrashReporter();
 
 // ── Footer UI ───────────────────────────────────────────────────────────────
 let _ui: any = null;
