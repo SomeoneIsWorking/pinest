@@ -138,7 +138,24 @@ PiNest's app forked to `app/` (dead code not carried): reconnect fix landed
 (`SessionHistorySheet`: registry-only sessions with resume/delete), spawn
 default model `opencode-go/glm-5.3-flash`, and `firebase_options.dart`
 checked in (public web config — pinest gitignored it, breaking fresh
-clones). Verified with `flutter analyze` (0 issues) and `flutter build web`.
+clones). Verified with `flutter analyze` (0 issues) and `flutter build web`,
+and deployed to `pinest-app.web.app` (deploy verified by string-match in the
+served `main.dart.js`).
+
+First real-user test against the deployed app surfaced and fixed four
+defects: (1) the host `model_set` updated the label without awaiting or
+checking `ExtensionAPI.setModel`'s boolean — the session stayed on
+kimi-k2.6 (262,144 window) while the badge claimed GLM; now awaits,
+throws on refusal, and the error reaches the app. (2) Context usage only
+reached a session's tab on that session's events; `Supervisor.refreshUsage()`
+now overlays live status + usage (with `compactAt`) for every live session
+on each state broadcast. (3) Thinking "Default" is opencode-semantics
+(`src/thinking.ts`): omit the reasoning override so the provider default
+applies — for models whose `thinkingLevelMap.off` is null (glm-5.3-flash)
+pi's "off" is wire-identical and is reported as `default`; explicit-off
+models fall back to "medium". (4) The badge now names the model and the
+auto-compact threshold so label/window mismatches are self-evident;
+threshold editable in Settings (`set_compact_threshold`).
 
 Gaps: run against the live host from an actual phone; hosted (RestImpl)
 backend not yet exercised by a real browser sign-in; stream deltas
