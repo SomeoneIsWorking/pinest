@@ -5,7 +5,9 @@ import '../services/agent_service.dart';
 /// Spawn dialog — path autocomplete via server query (the web app can't read
 /// the local filesystem, so we ask the extension to list matching dirs).
 class SpawnDialog extends StatefulWidget {
-  const SpawnDialog({super.key});
+  final String? initialModel;
+
+  const SpawnDialog({super.key, this.initialModel});
 
   @override
   State<SpawnDialog> createState() => _SpawnDialogState();
@@ -15,13 +17,16 @@ class _SpawnDialogState extends State<SpawnDialog> {
   final _formKey = GlobalKey<FormState>();
   final _cwdController = TextEditingController();
   final _nameController = TextEditingController();
-  final _modelController = TextEditingController(text: 'opencode-go/glm-5.3-flash');
+  late final TextEditingController _modelController;
   List<String> _suggestions = [];
   bool _loading = false;
 
   @override
   void initState() {
     super.initState();
+    _modelController = TextEditingController(
+      text: widget.initialModel ?? 'opencode-go/glm-5.3-flash',
+    );
     _cwdController.addListener(_onChanged);
     // Trigger initial suggestions (show home dir contents)
     _onChanged();
@@ -58,13 +63,19 @@ class _SpawnDialogState extends State<SpawnDialog> {
       if (result != null) {
         // Only show if the input hasn't changed since the query
         if (_cwdController.text == input) {
-          setState(() { _suggestions = result; _loading = false; });
+          setState(() {
+            _suggestions = result;
+            _loading = false;
+          });
         }
         return;
       }
     }
     if (mounted && _cwdController.text == input) {
-      setState(() { _suggestions = []; _loading = false; });
+      setState(() {
+        _suggestions = [];
+        _loading = false;
+      });
     }
   }
 
@@ -90,8 +101,11 @@ class _SpawnDialogState extends State<SpawnDialog> {
                     suffixIcon: _loading
                         ? const Padding(
                             padding: EdgeInsets.all(10),
-                            child: SizedBox(width: 18, height: 18,
-                                child: CircularProgressIndicator(strokeWidth: 2)),
+                            child: SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
                           )
                         : null,
                   ),
@@ -114,12 +128,19 @@ class _SpawnDialogState extends State<SpawnDialog> {
                         return ListTile(
                           dense: true,
                           leading: const Icon(Icons.folder, size: 18),
-                          title: Text(path,
-                              style: const TextStyle(fontFamily: 'monospace', fontSize: 13)),
+                          title: Text(
+                            path,
+                            style: const TextStyle(
+                              fontFamily: 'monospace',
+                              fontSize: 13,
+                            ),
+                          ),
                           onTap: () {
                             _cwdController.text = path;
-                            _cwdController.selection = TextSelection.fromPosition(
-                                TextPosition(offset: path.length));
+                            _cwdController.selection =
+                                TextSelection.fromPosition(
+                                  TextPosition(offset: path.length),
+                                );
                           },
                         );
                       },

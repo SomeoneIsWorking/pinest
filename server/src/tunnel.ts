@@ -97,6 +97,25 @@ const cloudflaredProvider: TunnelProvider = {
   },
 };
 
+export async function readNgrokApiUrl(
+  port: number,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string | null> {
+  try {
+    const res = await fetchImpl("http://127.0.0.1:4040/api/tunnels");
+    if (!res.ok) return null;
+    const data = await res.json() as {
+      tunnels?: Array<{ public_url?: unknown; config?: { addr?: unknown } }>;
+    };
+    const expected = "http://localhost:" + port;
+    const tunnel = data.tunnels?.find((candidate) =>
+      candidate.config?.addr === expected && typeof candidate.public_url === "string");
+    return typeof tunnel?.public_url === "string" ? tunnel.public_url : null;
+  } catch {
+    return null;
+  }
+}
+
 // ── Provider: ngrok (needs binary + authtoken) ─────────────────────────────
 const ngrokProvider: TunnelProvider = {
   name: "ngrok",
@@ -107,34 +126,51 @@ const ngrokProvider: TunnelProvider = {
     return new Promise<TunnelHandle>((resolve, reject) => {
       let settled = false;
       let timer: NodeJS.Timeout | undefined;
+      let poll: NodeJS.Timeout | undefined;
       const done = <T,>(fn: (v: T) => void) => (v: T): void => {
-        if (!settled) { settled = true; clearTimeout(timer); fn(v); }
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          clearInterval(poll);
+          fn(v);
+        }
       };
       let stopped = false;
       const proc = spawn("ngrok", [
         "http", String(port), "--log=stdout", "--log-format=logfmt",
       ], { stdio: ["ignore", "pipe", "pipe"] });
+      const fail = (error: Error): void => {
+        try { proc.kill(); } catch { /* already exited */ }
+        done(reject)(error as unknown as void);
+      };
       timer = setTimeout(
-        () => done(reject)(new Error("ngrok timeout (no URL after 30s)") as unknown as void), 30000);
-      proc.on("error", done((err) => reject(new Error(`ngrok spawn failed: ${err.message}`))));
+        () => fail(new Error("ngrok timeout (no URL after 30s)")), 30000);
+      proc.on("error", (err) => fail(new Error("ngrok spawn failed: " + err.message)));
+      const acceptUrl = (url: string): void => {
+        debug(`[remote-code] ngrok tunnel: ${url}`);
+        const handle: TunnelHandle = {
+          url,
+          stop: () => { stopped = true; try { proc.kill(); } catch { /* */ } },
+        };
+        proc.once("exit", () => {
+          if (!stopped) handle.onDead?.();
+        });
+        done(resolve)(handle);
+      };
       const onLine = (line: string): void => {
         // ngrok logfmt: ... url="https://xxxx.ngrok-free.app"
-        const m = line.match(/url="(https:\/\/[^"]+ngrio[^"]*)"/i)
+        const m = line.match(/url="(https:\/\/[^"]+ngrok[^"]*)"/i)
           || line.match(/(https:\/\/[a-z0-9-]+\.ngrok(?:-free)?\.app)/i);
-        if (m) {
-          debug(`[remote-code] ngrok tunnel: ${m[1]}`);
-          const handle: TunnelHandle = {
-            url: m[1] ?? "",
-            stop: () => { stopped = true; try { proc.kill(); } catch { /* */ } },
-          };
-          proc.once("exit", () => {
-            if (!stopped) handle.onDead?.();
-          });
-          done(resolve)(handle);
-        }
+        if (!settled && m?.[1]) acceptUrl(m[1]);
       };
       proc.stdout!.on("data", (d: Buffer) => d.toString().split("\n").forEach(onLine));
       proc.stderr!.on("data", (d: Buffer) => d.toString().split("\n").forEach(onLine));
+      // ngrok v3 may expose the endpoint through its local API without
+      // emitting a URL in the selected log format. Poll the API as the
+      // authoritative startup signal and match the forwarded local port.
+      poll = setInterval(() => {
+        void readNgrokApiUrl(port).then((url) => { if (url && !settled) acceptUrl(url); });
+      }, 250);
       proc.on("exit", () => done(reject)(new Error("ngrok exited before producing a URL") as unknown as void));
     });
   },

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/auth_service.dart';
 import '../services/agent_service.dart';
+import '../services/user_preferences.dart';
 import '../models/session.dart';
 import 'chat_screen.dart';
 import 'spawn_dialog.dart';
@@ -50,7 +51,11 @@ class _MainShellState extends State<MainShell> {
             _presenceDot(svc),
             IconButton(
               icon: _spawning
-                  ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
                   : const Icon(Icons.add),
               tooltip: 'New session',
               onPressed: _spawning ? null : () => _spawn(context, svc),
@@ -65,8 +70,10 @@ class _MainShellState extends State<MainShell> {
             ),
             IconButton(
               icon: const Icon(Icons.settings),
-              onPressed: () => Navigator.push(context,
-                  MaterialPageRoute(builder: (_) => const SettingsScreen())),
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const SettingsScreen()),
+              ),
             ),
             IconButton(
               icon: const Icon(Icons.logout),
@@ -77,7 +84,14 @@ class _MainShellState extends State<MainShell> {
               ? null
               : TabBar(
                   isScrollable: true,
-                  tabs: sessions.map((s) => _SessionTab(session: s)).toList(),
+                  tabs: sessions
+                      .map(
+                        (s) => _SessionTab(
+                          session: s,
+                          onEdit: () => _editSession(context, svc, s),
+                        ),
+                      )
+                      .toList(),
                   onTap: (i) => setState(() => _selectedId = sessions[i].id),
                 ),
         ),
@@ -85,14 +99,20 @@ class _MainShellState extends State<MainShell> {
             ? const _EmptySessions()
             : TabBarView(
                 children: sessions
-                    .map((s) => ChatScreen(sessionId: s.id, key: ValueKey(s.id)))
+                    .map(
+                      (s) => ChatScreen(sessionId: s.id, key: ValueKey(s.id)),
+                    )
                     .toList(),
               ),
       ),
     );
   }
 
-  Widget _narrow(BuildContext context, AgentService svc, List<Session> sessions) {
+  Widget _narrow(
+    BuildContext context,
+    AgentService svc,
+    List<Session> sessions,
+  ) {
     final selected = _selectedId != null
         ? sessions.where((s) => s.id == _selectedId).firstOrNull
         : null;
@@ -109,7 +129,11 @@ class _MainShellState extends State<MainShell> {
           _presenceDot(svc),
           IconButton(
             icon: _spawning
-                ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
                 : const Icon(Icons.add),
             tooltip: 'New session',
             onPressed: _spawning ? null : () => _spawn(context, svc),
@@ -124,6 +148,7 @@ class _MainShellState extends State<MainShell> {
             setState(() => _selectedId = id);
             Navigator.pop(context);
           },
+          onEdit: (s) => _editSession(context, svc, s),
         ),
       ),
       body: selected == null
@@ -148,47 +173,124 @@ class _MainShellState extends State<MainShell> {
   Future<void> _spawn(BuildContext context, AgentService svc) async {
     if (!svc.anyMachineOnline) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No online machine. Run pi with PiNest on your machine.')),
+        const SnackBar(
+          content: Text(
+            'No online machine. Run pi with PiNest on your machine.',
+          ),
+        ),
       );
       return;
     }
+    final preferences = context.read<UserPreferences>();
     final result = await showDialog<Map<String, dynamic>>(
       context: context,
-      builder: (_) => const SpawnDialog(),
+      builder: (_) =>
+          SpawnDialog(initialModel: preferences.lastModel),
     );
     if (result == null || (result['cwd'] as String?)?.isEmpty != false) return;
 
     final cwd = result['cwd'] as String;
+    final model = result['model'] as String?;
+    if (model != null && model.isNotEmpty) {
+      await preferences.saveModel(model);
+    }
     setState(() => _spawning = true);
-    final newId = await svc.spawnSession('',
-        cwd: cwd, name: result['name'] as String?, model: result['model'] as String?);
+    final newId = await svc.spawnSession(
+      '',
+      cwd: cwd,
+      name: result['name'] as String?,
+      model: model,
+    );
     // Wait for the new session to appear in the state doc (up to 15s).
     final deadline = DateTime.now().add(const Duration(seconds: 15));
     while (DateTime.now().isBefore(deadline)) {
       if (svc.sessions.any((s) => s.id == newId)) break;
       await Future.delayed(const Duration(milliseconds: 300));
     }
+    final created = svc.sessions.where((s) => s.id == newId).firstOrNull;
+    final lastThinking = preferences.lastThinking;
+    if (created != null && lastThinking != null) {
+      svc.setThinking(created, lastThinking);
+    }
     if (mounted) setState(() => _spawning = false);
+  }
+
+  Future<void> _editSession(
+    BuildContext context,
+    AgentService svc,
+    Session session,
+  ) async {
+    final controller = TextEditingController(text: session.name);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Edit session'),
+        content: SizedBox(
+          width: 460,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Workspace',
+                style: TextStyle(fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 4),
+              SelectableText(
+                session.cwd,
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  labelText: 'Session name',
+                  border: OutlineInputBorder(),
+                ),
+                onSubmitted: (value) => Navigator.pop(context, value.trim()),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name != null && name.trim().isNotEmpty && name.trim() != session.name) {
+      svc.renameSession(session, name.trim());
+    }
   }
 }
 
 class _SessionTab extends StatelessWidget {
   final Session session;
-  const _SessionTab({required this.session});
+  final VoidCallback onEdit;
+  const _SessionTab({required this.session, required this.onEdit});
 
   @override
   Widget build(BuildContext context) {
     final dot = session.isWorking
         ? Colors.orange
         : session.isOnline
-            ? Colors.green
-            : Colors.grey;
+        ? Colors.green
+        : Colors.grey;
     return Tab(
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           Container(
-            width: 8, height: 8,
+            width: 8,
+            height: 8,
             decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
           ),
           const SizedBox(width: 8),
@@ -198,6 +300,14 @@ class _SessionTab extends StatelessWidget {
               child: Icon(Icons.dns, size: 14, color: Colors.purple),
             ),
           Text(session.isHost ? '🖥 ${session.name}' : session.name),
+          const SizedBox(width: 2),
+          IconButton(
+            icon: const Icon(Icons.edit_outlined, size: 15),
+            tooltip: 'Edit session and workspace path',
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+            onPressed: onEdit,
+          ),
         ],
       ),
     );
@@ -208,8 +318,13 @@ class _SessionList extends StatelessWidget {
   final List<Session> sessions;
   final String? selectedId;
   final ValueChanged<String> onTap;
-  const _SessionList(
-      {required this.sessions, required this.selectedId, required this.onTap});
+  final ValueChanged<Session> onEdit;
+  const _SessionList({
+    required this.sessions,
+    required this.selectedId,
+    required this.onTap,
+    required this.onEdit,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -221,7 +336,9 @@ class _SessionList extends StatelessWidget {
         ...sessions.map((s) {
           final dot = s.isWorking
               ? Colors.orange
-              : s.isOnline ? Colors.green : Colors.grey;
+              : s.isOnline
+              ? Colors.green
+              : Colors.grey;
           return ListTile(
             selected: s.id == selectedId,
             leading: Row(
@@ -233,14 +350,24 @@ class _SessionList extends StatelessWidget {
                     child: Icon(Icons.dns, size: 16, color: Colors.purple),
                   ),
                 Container(
-                  width: 10, height: 10,
+                  width: 10,
+                  height: 10,
                   decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
                 ),
               ],
             ),
             title: Text(s.isHost ? '🖥 ${s.name} (host)' : s.name),
-            subtitle: Text(s.cwd,
-                maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11)),
+            subtitle: Text(
+              s.cwd,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 11),
+            ),
+            trailing: IconButton(
+              icon: const Icon(Icons.edit_outlined),
+              tooltip: 'Edit session and workspace path',
+              onPressed: () => onEdit(s),
+            ),
             onTap: () => onTap(s.id),
           );
         }),
@@ -259,21 +386,23 @@ class _EmptySessions extends StatelessWidget {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(svc.anyMachineOnline ? Icons.add_box : Icons.cloud_off,
-              size: 64, color: Colors.grey),
+          Icon(
+            svc.anyMachineOnline ? Icons.add_box : Icons.cloud_off,
+            size: 64,
+            color: Colors.grey,
+          ),
           const SizedBox(height: 16),
-          Text(svc.anyMachineOnline
-              ? 'No sessions yet'
-              : 'Supervisor offline'),
+          Text(svc.anyMachineOnline ? 'No sessions yet' : 'Supervisor offline'),
           const SizedBox(height: 8),
-          const Text('Tap + to spawn a new agent session.',
-              style: TextStyle(color: Colors.grey)),
+          const Text(
+            'Tap + to spawn a new agent session.',
+            style: TextStyle(color: Colors.grey),
+          ),
         ],
       ),
     );
   }
 }
-
 
 /// Durable sessions from the registry that are not currently running.
 /// Tap to resume; long-press (or trash icon) to delete.
@@ -290,41 +419,48 @@ class SessionHistorySheet extends StatelessWidget {
         children: [
           const Padding(
             padding: EdgeInsets.all(16),
-            child: Text('Session history',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            child: Text(
+              'Session history',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
           ),
           if (resumable.isEmpty)
             const Padding(
               padding: EdgeInsets.all(24),
-              child: Text('No past sessions on disk.',
-                  style: TextStyle(color: Colors.grey)),
+              child: Text(
+                'No past sessions on disk.',
+                style: TextStyle(color: Colors.grey),
+              ),
             )
           else
-            ...resumable.map((s) => ListTile(
-                  leading: const Icon(Icons.inventory_2_outlined),
-                  title: Text(s.isHost ? '${s.name} (host)' : s.name),
-                  subtitle: Text(
-                    '${s.cwd}\n${s.modelName ?? s.model ?? ''}',
-                    maxLines: 2, overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 11),
-                  ),
-                  isThreeLine: true,
-                  trailing: IconButton(
-                    icon: const Icon(Icons.delete_outline),
-                    tooltip: 'Delete (history kept on disk)',
-                    onPressed: () {
-                      svc.deleteSession(s.id);
-                      Navigator.pop(context);
-                    },
-                  ),
-                  onTap: () {
-                    svc.resumeSession(s.id);
+            ...resumable.map(
+              (s) => ListTile(
+                leading: const Icon(Icons.inventory_2_outlined),
+                title: Text(s.isHost ? '${s.name} (host)' : s.name),
+                subtitle: Text(
+                  '${s.cwd}\n${s.modelName ?? s.model ?? ''}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11),
+                ),
+                isThreeLine: true,
+                trailing: IconButton(
+                  icon: const Icon(Icons.delete_outline),
+                  tooltip: 'Delete (history kept on disk)',
+                  onPressed: () {
+                    svc.deleteSession(s.id);
                     Navigator.pop(context);
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('Resuming ${s.name}…')),
-                    );
                   },
-                )),
+                ),
+                onTap: () {
+                  svc.resumeSession(s.id);
+                  Navigator.pop(context);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Resuming ${s.name}…')),
+                  );
+                },
+              ),
+            ),
           const Divider(height: 1),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
