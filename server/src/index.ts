@@ -100,10 +100,10 @@ function renderFooter(): void {
 }
 
 // ── Session snapshot helpers ────────────────────────────────────────────────
-function upsertSession(id: string, snap: Partial<SessionSnapshot>): void {
+function upsertSession(id: string, snap: Partial<SessionSnapshot>, notify = true): void {
   const existing = _sessions.get(id) || { id, status: "idle" as const };
   _sessions.set(id, { ...existing, ...snap, id });
-  broadcastState();
+  if (notify) broadcastState();
 }
 
 function removeSession(id: string): void {
@@ -123,7 +123,9 @@ function broadcast(msg: ServerMessage): void {
 function stateMessage(): ServerMessage {
   // Cheap sync overlay so every tab carries live status + context usage,
   // not just whichever session last emitted an event.
-  _supervisor?.refreshUsage?.();
+  // The overlay updates the snapshots that this message will read. It must
+  // not broadcast while a state message is already being built.
+  _supervisor?.refreshUsage?.(false);
   return {
     type: "state",
     online: true,
@@ -270,7 +272,7 @@ async function bootstrap(): Promise<void> {
 
   // Create supervisor with WebSocket callbacks
   _supervisor = new Supervisor(uid, {
-    upsertSession: (id, snap) => upsertSession(id, snap),
+    upsertSession: (id, snap, notify) => upsertSession(id, snap, notify),
     removeSession,
     broadcast: (msg) => broadcast(msg as ServerMessage),
     embedImages,
