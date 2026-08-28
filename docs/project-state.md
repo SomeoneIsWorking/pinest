@@ -16,13 +16,16 @@ connect (now `setStateProvider`), host `cancel` silent no-op (abort lives on
 `ExtensionContext`), Firebase init moved off the import path (missing service
 account no longer crashes the pi host).
 
-Evidence: `cd server && npm test` — 146 tests, 0 fail; `npm run typecheck`
+Evidence: `cd server && npm test` — 149 tests, 0 fail; `npm run typecheck`
 clean. Real-host smoke (pi 0.84.3): `pi -e server/src/index.ts` loads the
 extension via jiti; `/rc-sessions` executes and answers the extension-UI
 select dialog (exit-0 vs exit-1 discriminator against a bogus command and
 the old /pinest-* names).
 The live host also survived a real `/pinest-spawn` after the state-broadcast
 recursion fix (I-009).
+
+Fatal uncaught exceptions and unhandled rejections now print their kind,
+message, and full stack to the Pi terminal before the host exits (I-010).
 
 Gaps: Firebase path exercised against the real project (needs service
 account key on the host machine).
