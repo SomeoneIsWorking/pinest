@@ -15,6 +15,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Session registry persistence (sessions.json on disk, atomic, corrupt-refusing) | `server` | `server/src/registry.ts` |
 | Hot-reload watcher (debounced file watch → reload trigger) | `server` | `server/src/reload.ts` |
 | Pure helpers (history shaping, model mapping, path completion) | `server` | `server/src/logic.ts` |
+| Thinking-level resolution ("Default" = omit reasoning override, opencode semantics) | `server` | `server/src/thinking.ts` |
 | Config (tunnel provider prefs; paths, env escapes) | `server` | `server/src/config.ts` |
 | TUI attach overlay (drive a headless session from the host TUI) | `server` | `server/src/attach-view.ts` |
 | Type shims for untyped deps | `server` | `server/src/types-shims.d.ts` |

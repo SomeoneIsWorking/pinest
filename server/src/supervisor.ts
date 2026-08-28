@@ -12,6 +12,7 @@ import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { mapModel, deriveSessionName, messagesToHistory } from "./logic.ts";
+import { resolveThinkingLevel, reportThinkingLevel } from "./thinking.ts";
 import type { SessionRegistry } from "./registry.ts";
 import type { SessionSnapshot, SessionRow } from "./protocol.ts";
 
@@ -216,11 +217,13 @@ export class Supervisor {
         case "model_set":
           await this.setModel(cmd, s);
           break;
-        case "thinking_set":
-          s.session.setThinkingLevel(cmd.level);
-          this.persistRow(cmd.sessionId, { thinkingLevel: cmd.level });
-          this.callbacks.upsertSession(cmd.sessionId, { thinkingLevel: cmd.level });
+        case "thinking_set": {
+          const r = resolveThinkingLevel((s.session as any).model, cmd.level);
+          s.session.setThinkingLevel(r.set);
+          this.persistRow(cmd.sessionId, { thinkingLevel: r.report });
+          this.callbacks.upsertSession(cmd.sessionId, { thinkingLevel: r.report });
           break;
+        }
         case "session_compact":
           await (s.session as any).compact();
           break;
@@ -281,7 +284,7 @@ export class Supervisor {
         s.status = "idle";
         s._streamingText = null;
         if (s.currentTurnId) s.currentTurnId = null;
-        this.callbacks.upsertSession(id, { status: "idle", contextUsage: this.contextUsage(s) });
+        this.callbacks.upsertSession(id, { status: "idle", contextUsage: this.usageWithCompactAt(s) });
         this.persistRow(id, { status: "idle" });
         this.maybeAutoCompact(id, s);
         // Send updated history
@@ -301,17 +304,50 @@ export class Supervisor {
     const m = await this.findModel(`${cmd.provider}/${cmd.modelId}`);
     if (!m) throw new Error(`model ${cmd.provider}/${cmd.modelId} not found`);
     await s.session.setModel(m);
+    // Read back what the session ACTUALLY holds — a switch that silently
+    // no-ops must not let the label drift from reality.
+    const actual = (s.session as any).model;
+    if (actual && `${actual.provider}/${actual.id}` !== `${cmd.provider}/${cmd.modelId}`) {
+      throw new Error(
+        `host switched to ${actual.provider}/${actual.id}, not ${cmd.provider}/${cmd.modelId}`,
+      );
+    }
     s.model = `${cmd.provider}/${cmd.modelId}`; s.modelName = m.name;
     this.persistRow(cmd.sessionId, { model: s.model, modelName: m.name });
     // Refresh the context usage NOW so the app's context badge reflects the
     // new model's window immediately (it used to lag until the next turn).
+    // "off" may also change meaning with the model — re-report the level.
     this.callbacks.upsertSession(cmd.sessionId, {
-      model: s.model, modelName: m.name, contextUsage: this.contextUsage(s),
+      model: s.model, modelName: m.name, contextUsage: this.usageWithCompactAt(s),
+      thinkingLevel: reportThinkingLevel(m, (s.session as any).thinkingLevel),
     });
   }
 
   private contextUsage(s: LiveSession): unknown {
     try { return (s.session as any).getContextUsage?.(); } catch { return undefined; }
+  }
+
+  /** Context usage enriched with the effective auto-compact threshold. */
+  private usageWithCompactAt(s: LiveSession): unknown {
+    const u = this.contextUsage(s) as Record<string, unknown> | undefined;
+    if (!u) return undefined;
+    return { ...u, compactAt: this.callbacks.compactAtTokens?.() ?? null };
+  }
+
+  /**
+   * Cheap sync overlay of live status + context usage for EVERY live session,
+   * called when a state message is built — so each app tab shows context
+   * immediately, not only after that session's next event. The usage carries
+   * the effective auto-compact threshold (compactAt) like the host's does.
+   */
+  refreshUsage(): void {
+    for (const [id, s] of this.sessions) {
+      const u = this.usageWithCompactAt(s);
+      this.callbacks.upsertSession(id, {
+        status: s.status === "working" ? "working" : "idle",
+        ...(u ? { contextUsage: u } : {}),
+      });
+    }
   }
 
   /** Auto-compact when the context crosses the configured threshold. */

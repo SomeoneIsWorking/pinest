@@ -370,8 +370,9 @@ class _ChatScreenState extends State<ChatScreen> {
   void _showThinking(BuildContext context, AgentService svc, Session s) {
     const levels = ['off', 'low', 'medium', 'high', 'max'];
     final current = s.thinkingLevel;
-    final defaultLevel = svc.defaultThinkingFor(s.id);
-    final onDefault = current == defaultLevel;
+    // "Default" = the model's own default: the server omits the reasoning
+    // override entirely (opencode semantics) and reports back 'default'.
+    final onDefault = current == 'default';
     showModalBottomSheet(
       context: context,
       builder: (_) => SafeArea(
@@ -386,15 +387,15 @@ class _ChatScreenState extends State<ChatScreen> {
             ListTile(
               leading: Icon(Icons.tune, size: 20,
                   color: onDefault ? Colors.purple : null),
-              title: Text('Default ($defaultLevel)'),
+              title: const Text('Default'),
               subtitle: const Text(
-                  'The level this session started with',
+                  "The model's own default (no override)",
                   style: TextStyle(fontSize: 11)),
               trailing: onDefault
                   ? const Icon(Icons.check, color: Colors.purple, size: 18)
                   : null,
               onTap: () {
-                svc.setThinkingDefault(s);
+                svc.setThinking(s, 'default');
                 Navigator.pop(context);
               },
             ),
