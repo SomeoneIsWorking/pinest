@@ -10,7 +10,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Extension bootstrap, WS command routing, host-session bridging, TUI slash commands, reload wiring | `server` | `server/src/index.ts` |
 | WS protocol contract (message/command unions) — keep in sync with the app fork | `server` | `server/src/protocol.ts` |
 | Authenticated WS server, tunnel lifecycle, per-connect state snapshot | `server` | `server/src/wsserver.ts`, `server/src/tunnel.ts` |
-| Firebase token verification, owner identity, browser login | `server` | `server/src/auth.ts` |
+| Firebase backends (HOSTED zero-config + ADMIN self-host), owner identity, browser login, presence publish | `server` | `server/src/auth.ts` |
 | Headless session spawn/resume/kill/route/stream (SDK sessions in-process) | `server` | `server/src/supervisor.ts` |
 | Session registry persistence (sessions.json on disk, atomic, corrupt-refusing) | `server` | `server/src/registry.ts` |
 | Hot-reload watcher (debounced file watch → reload trigger) | `server` | `server/src/reload.ts` |
@@ -20,7 +20,8 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Type shims for untyped deps | `server` | `server/src/types-shims.d.ts` |
 | Launcher (slim shim → `pi -e server/src/index.ts`) | repo root | `run.sh` |
 | Flutter client (chat, sessions, spawn, auth) | `app` | `app/lib/…` (forked from PiNest, not yet added) |
-| Provider entry (OpenCode Go / glm-5.3-flash), compact settings | user machine config | `<PI_AGENT_DIR>/models.json`, `settings.json` — to be provisioned by `server/scripts/provision.ts` (I-005) |
+| Provider entry (OpenCode Go / glm-5.3-flash), compact settings | user machine config | `<PI_AGENT_DIR>/models.json`, `settings.json` — to be provisioned by `server/scripts/provision.ts` (I-005); API keys live in `<PI_AGENT_DIR>/auth.json` (`type: "api_key"`) |
+| Hosted discovery rules (owner-writable presence doc) | repo root | `firestore.rules` — deploy to pinest-app (I-008) |
 
 ## Intended (not yet placed)
 

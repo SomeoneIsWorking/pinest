@@ -7,8 +7,9 @@
  * stays resumable), and resume() re-opens a session from its pi session file.
  */
 import debug from "./log.ts";
-import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, SessionManager, ModelRuntime, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { mapModel, deriveSessionName, messagesToHistory } from "./logic.ts";
 import type { SessionRegistry } from "./registry.ts";
@@ -59,6 +60,34 @@ export class Supervisor {
   registry: SessionRegistry | null;
   agentDir: string | undefined;
   sessions = new Map<string, LiveSession>();
+  private _modelRegistry: ModelRegistry | null = null;
+
+  /**
+   * Registry for model lookups. NOTE: pi's SDK AgentSession does NOT expose
+   * modelRegistry (that lives on ExtensionContext) — pinest's spawn-time
+   * setModel was a silent no-op because of that. Build our own from a
+   * ModelRuntime, exactly like pi's agent-session-services does.
+   */
+  private async modelRegistry(): Promise<ModelRegistry> {
+    if (!this._modelRegistry) {
+      const runtime = await ModelRuntime.create({
+        authPath: this.agentDir ? join(this.agentDir, "auth.json") : undefined,
+        modelsPath: this.agentDir ? join(this.agentDir, "models.json") : undefined,
+      });
+      this._modelRegistry = new ModelRegistry(runtime);
+    }
+    return this._modelRegistry;
+  }
+
+  private async findModel(spec: string): Promise<ReturnType<ModelRegistry["find"]> | null> {
+    const slash = spec.indexOf("/");
+    if (slash === -1) return null;
+    const provider = spec.slice(0, slash);
+    const id = spec.slice(slash + 1);
+    const reg = await this.modelRegistry();
+    await reg.refresh().catch(() => undefined);
+    return reg.find(provider, id) ?? null;
+  }
 
   constructor(ownerUid: string, callbacks: SupervisorCallbacks, registry: SessionRegistry | null = null, opts: SupervisorOptions = {}) {
     this.ownerUid = ownerUid;
@@ -107,11 +136,9 @@ export class Supervisor {
 
     if (cmd.model) {
       try {
-        const [p, m] = cmd.model.split("/");
-        const reg = (session as any).modelRegistry;
-        reg.refresh?.();
-        const mdl = reg.find?.(p, m);
+        const mdl = await this.findModel(cmd.model);
         if (mdl) { await session.setModel(mdl); s.model = cmd.model; s.modelName = mdl.name; }
+        else debug(`[remote-code] spawn: model ${cmd.model} not found`);
       } catch (e) { debug("[remote-code] spawn setModel:", (e as Error).message); }
     }
 
@@ -207,7 +234,7 @@ export class Supervisor {
           break;
         }
         case "list_models":
-          this.callbacks.broadcast({ type: "models", sessionId: cmd.sessionId, models: this.models(s) });
+          this.models(s).then((models) => this.callbacks.broadcast({ type: "models", sessionId: cmd.sessionId, models }));
           break;
         case "get_history": {
           const transcript = await this.getHistory(s);
@@ -267,9 +294,7 @@ export class Supervisor {
   }
 
   private async setModel(cmd: any, s: LiveSession): Promise<void> {
-    const reg = (s.session as any).modelRegistry;
-    reg.refresh?.();
-    const m = reg.find?.(cmd.provider, cmd.modelId);
+    const m = await this.findModel(`${cmd.provider}/${cmd.modelId}`);
     if (!m) throw new Error(`model ${cmd.provider}/${cmd.modelId} not found`);
     await s.session.setModel(m);
     s.model = `${cmd.provider}/${cmd.modelId}`; s.modelName = m.name;
@@ -277,10 +302,10 @@ export class Supervisor {
     this.callbacks.upsertSession(cmd.sessionId, { model: s.model, modelName: m.name });
   }
 
-  private models(s: LiveSession) {
-    const reg = (s.session as any).modelRegistry;
-    reg.refresh?.();
-    return (reg.getAvailable?.() ?? []).map(mapModel);
+  private async models(_s: LiveSession) {
+    const reg = await this.modelRegistry();
+    await reg.refresh().catch(() => undefined);
+    return reg.getAvailable().map(mapModel);
   }
 
   private async getHistory(s: LiveSession) {
