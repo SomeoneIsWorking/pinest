@@ -12,6 +12,9 @@ function routeCommand(cmd, mySessionId, supervisorSessionIds) {
   if (cmd.type === "session_spawn" || cmd.type === "session_despawn") {
     return "supervisor:command";
   }
+  if (cmd.type === "session_select") {
+    return "machine:command";
+  }
   // Session commands: if the supervisor owns it, route there
   if (supervisorSessionIds.has(cmd.sessionId)) {
     return "supervisor:session";
@@ -78,6 +81,12 @@ test("routing: session_rename for spawned → supervisor:session", () => {
   assert.equal(routeCommand(cmd, "me", new Set(["s1"])), "supervisor:session");
 });
 
+test("routing: session_select is handled as a machine-level command", () => {
+  const cmd = { type: "session_select", sessionId: "s1" };
+  // Selection is consumed by the extension before session-specific routing.
+  assert.equal(routeCommand(cmd, "me", new Set()), "machine:command");
+});
+
 test("routing: session_compact for spawned → supervisor:session", () => {
   const cmd = { type: "session_compact", sessionId: "s1" };
   assert.equal(routeCommand(cmd, "me", new Set(["s1"])), "supervisor:session");
@@ -97,7 +106,7 @@ test("routing: despawn of interactive session (not spawned) → supervisor:comma
 test("routing: every command type has a route (no orphans)", () => {
   const types = [
     "session_spawn", "session_despawn", "user_message", "cancel",
-    "model_set", "thinking_set", "session_rename", "session_compact", "session_new",
+    "model_set", "thinking_set", "session_rename", "session_select", "session_compact", "session_new",
     "list_models", "get_history",
   ];
   const supSessions = new Set(["spawned1"]);
