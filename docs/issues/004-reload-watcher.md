@@ -22,3 +22,13 @@ after settle.
 Affected state items: S4.
 
 **Status: done** — landed in the TypeScript port; see docs/project-state.md for the verified/partial split and evidence.
+
+**Status: done.** Additional real-host finding (scratch/drive-rpc.mjs drill,
+RPC mode): pi's `sendUserMessage` defaults `expandPromptTemplates: false`,
+which bypasses extension-command dispatch — the queued "/rc-reload" would
+have been delivered to the LLM as literal text (pi's own reload-runtime
+example shares this flaw). `queueReload` passes
+`expandPromptTemplates: true`. Drill proves: watcher fires on a touch of the
+extension's own source, `/rc-reload` executes as a command, module
+re-imports (factory ran 2x), host keeps executing extension commands across
+the reload with zero extension_error events.
