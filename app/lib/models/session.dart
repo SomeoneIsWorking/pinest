@@ -10,6 +10,8 @@ class Session {
   final int? contextTokens;
   final int? contextWindow;
   final double? contextPercent;
+  /// Auto-compact threshold (tokens) reported by the server for this session.
+  final int? contextCompactAt;
   final String status; // idle | working | error
   final bool isInteractive;
   final bool isHost; // the interactive session hosting the server
@@ -27,6 +29,7 @@ class Session {
     this.contextTokens,
     this.contextWindow,
     this.contextPercent,
+    this.contextCompactAt,
     this.status = 'idle',
     this.isInteractive = false,
     this.isHost = false,

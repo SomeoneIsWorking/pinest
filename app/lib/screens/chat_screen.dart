@@ -222,6 +222,8 @@ class _ChatScreenState extends State<ChatScreen> {
                   percent: s!.contextPercent!,
                   tokens: s.contextTokens,
                   window: s.contextWindow,
+                  modelName: s.modelName ?? s.model,
+                  compactAt: s.contextCompactAt,
                 ),
               ),
             Expanded(child: Container()),
@@ -368,6 +370,8 @@ class _ChatScreenState extends State<ChatScreen> {
   void _showThinking(BuildContext context, AgentService svc, Session s) {
     const levels = ['off', 'low', 'medium', 'high', 'max'];
     final current = s.thinkingLevel;
+    final defaultLevel = svc.defaultThinkingFor(s.id);
+    final onDefault = current == defaultLevel;
     showModalBottomSheet(
       context: context,
       builder: (_) => SafeArea(
@@ -378,6 +382,21 @@ class _ChatScreenState extends State<ChatScreen> {
               padding: EdgeInsets.all(16),
               child: Text('Thinking level',
                   style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            ),
+            ListTile(
+              leading: Icon(Icons.tune, size: 20,
+                  color: onDefault ? Colors.purple : null),
+              title: Text('Default ($defaultLevel)'),
+              subtitle: const Text(
+                  'The level this session started with',
+                  style: TextStyle(fontSize: 11)),
+              trailing: onDefault
+                  ? const Icon(Icons.check, color: Colors.purple, size: 18)
+                  : null,
+              onTap: () {
+                svc.setThinkingDefault(s);
+                Navigator.pop(context);
+              },
             ),
             ...levels.map((l) => ListTile(
                   leading: Icon(_thinkingIcon(l),
@@ -467,7 +486,15 @@ class _ContextBadge extends StatelessWidget {
   final double percent;
   final int? tokens;
   final int? window;
-  const _ContextBadge({required this.percent, this.tokens, this.window});
+  final String? modelName;
+  final int? compactAt;
+  const _ContextBadge({
+    required this.percent,
+    this.tokens,
+    this.window,
+    this.modelName,
+    this.compactAt,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -480,20 +507,36 @@ class _ContextBadge extends StatelessWidget {
     final label = tokens != null && window != null
         ? '${(tokens! / 1000).toStringAsFixed(1)}/${(window! / 1000).toStringAsFixed(0)}k'
         : '$pct%';
-    return Row(
+    // Model + auto-compact threshold, so the user can verify what is active.
+    final sub = [
+      ?modelName,
+      if (compactAt != null) 'compact @ ${(compactAt! / 1000).toStringAsFixed(0)}k',
+    ].join(' · ');
+    return Column(
       mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label, style: TextStyle(fontSize: 11, color: color, fontFamily: 'monospace')),
-        const SizedBox(width: 4),
-        SizedBox(
-          width: 40,
-          child: LinearProgressIndicator(
-            value: (percent / 100).clamp(0, 1),
-            backgroundColor: Colors.grey.shade300,
-            color: color,
-            minHeight: 4,
-          ),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(label, style: TextStyle(fontSize: 11, color: color, fontFamily: 'monospace')),
+            const SizedBox(width: 4),
+            SizedBox(
+              width: 40,
+              child: LinearProgressIndicator(
+                value: (percent / 100).clamp(0, 1),
+                backgroundColor: Colors.grey.shade300,
+                color: color,
+                minHeight: 4,
+              ),
+            ),
+          ],
         ),
+        if (sub.isNotEmpty)
+          Text(sub,
+              style: TextStyle(fontSize: 9, color: Colors.grey.shade600),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis),
       ],
     );
   }
