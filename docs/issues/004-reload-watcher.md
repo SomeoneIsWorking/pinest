@@ -4,8 +4,8 @@ Two pieces on top of pi's existing `/reload` machinery (jiti `moduleCache:
 false`, `ctx.reload()`):
 
 1. `server/src/reload.js`: watcher (fs.watch or chokidar) over
-   `<PI_AGENT_DIR>/extensions`, `<cwd>/.pi/extensions`, and
-   `<PI_AGENT_DIR>/settings.json`, debounced (≥1s), triggering reload via the
+   `PI_AGENT_DIR/extensions`, `<cwd>/.pi/extensions`, and
+   `PI_AGENT_DIR/settings.json`, debounced (≥1s), triggering reload via the
    `reload_runtime` command pattern. Must respect pi's guards: no reload while
    streaming/compacting — queue until `agent_settled`. Watchers rebuilt on
    `session_shutdown {reason:"reload"}` → `session_start`.

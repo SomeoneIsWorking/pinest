@@ -1,7 +1,7 @@
 # I-002 — Persisted session registry
 
 New `server/src/registry.js`: JSON file at
-`<PI_AGENT_DIR>/remote-code/sessions.json` (config path, overridable for tests).
+`PI_AGENT_DIR/remote-code/sessions.json` (config path, overridable for tests).
 Shape per entry: `{ id, name, cwd, piSessionPath, model, thinkingLevel,
 status: "running"|"idle"|"closed", createdAt, updatedAt }`. Written on every
 mutation (spawn, rename, kill, resume, delete); loaded at bootstrap. Atomic

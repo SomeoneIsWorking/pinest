@@ -89,11 +89,11 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.pinest" "\0"
+            VALUE "CompanyName", "PiNest" "\0"
             VALUE "FileDescription", "remote_pi_app" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "remote_pi_app" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.pinest. All rights reserved." "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 PiNest. All rights reserved." "\0"
             VALUE "OriginalFilename", "remote_pi_app.exe" "\0"
             VALUE "ProductName", "remote_pi_app" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"

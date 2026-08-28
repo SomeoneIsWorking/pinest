@@ -72,6 +72,13 @@ interface ListPathsDeps {
   _exists?: (path: string) => boolean;
 }
 
+/** Resolve a path entered in the remote client using the host's filesystem. */
+export function resolvePathInput(input: string | undefined): string {
+  let path = (input || "").trim();
+  if (path.startsWith("~")) path = path.replace(/^~(?=\/|$)/, homedir());
+  return resolvePath(path || homedir());
+}
+
 /**
  * Directory candidates for the spawn dialog's path autocomplete.
  *
@@ -88,10 +95,7 @@ interface ListPathsDeps {
  */
 export function listPaths(prefix: string | undefined, deps: ListPathsDeps = {}): string[] {
   const { limit = 50, _readdir = readdirSync, _stat = statSync, _exists = existsSync } = deps;
-  let p = (prefix || "").trim();
-  if (!p) p = join(homedir(), "");
-  if (p.startsWith("~")) p = p.replace(/^~(?=\/|$)/, homedir());
-  p = resolvePath(p);
+  const p = resolvePathInput(prefix);
 
   const isDir = (x: string): boolean => {
     try { return _stat(x).isDirectory(); } catch { return false; }

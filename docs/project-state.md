@@ -31,6 +31,9 @@ The live host also publishes an ngrok v3 endpoint discovered through the
 local ngrok API and accepts an authenticated WebSocket connection through it
 (I-011).
 
+The host restores non-closed registry sessions at startup and exposes the
+server-authoritative active session selection to clients (I-013).
+
 Gaps: one real browser sign-in to exercise the hosted RestImpl path end to end
 (AdminFirebase is what runs on the dev machine today).
 
@@ -38,7 +41,7 @@ Gaps: one real browser sign-in to exercise the hosted RestImpl path end to end
 
 Status: `verified`
 
-`server/src/registry.ts`: `<PI_AGENT_DIR>/remote-code/sessions.json` (env
+`server/src/registry.ts`: `PI_AGENT_DIR/remote-code/sessions.json` (env
 `RC_REGISTRY_PATH`), atomic tmp+rename writes, missing file → empty,
 corrupt/wrong-shape → loud `RegistryError` (never silently wiped), CRUD +
 close/remove with optional history deletion.
@@ -133,7 +136,7 @@ Evidence: provision ran on the dev machine (`node scripts/provision.ts` —
 model ok, context 1,000,000, auth ok, idempotent second run); settings.json
 now carries the compaction patch and default model. OpenRouter +
 opencode-go API keys installed in the machine's pi auth store
-(`<PI_AGENT_DIR>/auth.json`, `type: "api_key"`), so spawned sessions
+(`PI_AGENT_DIR/auth.json`, `type: "api_key"`), so spawned sessions
 authenticate without env vars; real-LLM integration tests pass against
 `openrouter/nvidia/nemotron-3-super-120b-a12b:free` (free tier; the gemma
 free model 429-rate-limits).
@@ -169,6 +172,10 @@ threshold editable in Settings (`set_compact_threshold`).
 The client now persists the last selected model and thinking level locally,
 uses `⌘+Enter` on macOS for sending, and exposes a per-tab edit dialog with the
 workspace path and durable session renaming (I-012).
+
+Spawn validates host directories, offers host-side folder creation, and shows
+the active workspace under `~` when it belongs to the host home directory.
+Session selection is server-authoritative rather than device-local (I-013).
 
 Gaps: run against the live host from an actual phone; hosted (RestImpl)
 backend not yet exercised by a real browser sign-in; stream deltas

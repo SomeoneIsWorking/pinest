@@ -75,14 +75,16 @@ export interface SessionSnapshot {
 export type ServerMessage =
   | { type: "authed" }
   | { type: "error"; message: string; sessionId?: string }
-  | { type: "state"; online: boolean; hostname: string; sessions: SessionSnapshot[]; registry: SessionRow[]; tunnelUrl?: string | null; tunnelProvider?: string | null }
+  | { type: "state"; online: boolean; hostname: string; homePath?: string; activeSessionId?: string | null; sessions: SessionSnapshot[]; registry: SessionRow[]; tunnelUrl?: string | null; tunnelProvider?: string | null }
   | { type: "session_list"; sessions: SessionRow[] }
   | { type: "session_deleted"; sessionId: string; deleted: boolean }
   | { type: "history"; sessionId: string; history: HistoryItem[] }
   | { type: "stream"; sessionId: string; text: string; status: string }
   | { type: "tool"; sessionId: string; tool: ToolEvent }
   | { type: "models"; sessionId?: string; models: ModelInfo[] }
-  | { type: "paths"; cmdId?: string; paths: string[] };
+  | { type: "paths"; cmdId?: string; paths: string[] }
+  | { type: "path_check"; cmdId?: string; exists: boolean; isDirectory: boolean }
+  | { type: "folder_created"; cmdId?: string; path?: string; error?: string };
 
 export type ClientCommand =
   | { type: "user_message"; sessionId?: string; text: string; id?: string }
@@ -96,9 +98,12 @@ export type ClientCommand =
   | { type: "session_list" }
   | { type: "session_resume"; sessionId: string }
   | { type: "session_rename"; sessionId: string; name: string }
+  | { type: "session_select"; sessionId: string }
   | { type: "session_delete"; sessionId: string; deleteHistory?: boolean }
   | { type: "list_models"; sessionId?: string }
   | { type: "get_history"; sessionId?: string }
   | { type: "list_paths"; prefix?: string; id?: string }
+  | { type: "path_check"; path: string; id?: string }
+  | { type: "folder_create"; path: string; id?: string }
   | { type: "set_compact_threshold"; thresholdTokens: number }
   | { type: "reload" };
