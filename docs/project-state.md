@@ -177,8 +177,8 @@ Spawn validates host directories, offers host-side folder creation, and shows
 the active workspace under `~` when it belongs to the host home directory.
 Session selection is server-authoritative rather than device-local (I-013).
 
-The repository tip is publication-audited; the remaining historical findings
-are being removed by the history-preserving public-repository rewrite (I-014).
+The repository tip and reachable history passed the publication audit after a
+history-preserving rewrite removed the historical findings (I-014).
 
 Gaps: run against the live host from an actual phone; hosted (RestImpl)
 backend not yet exercised by a real browser sign-in; stream deltas
