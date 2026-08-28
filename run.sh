@@ -3,13 +3,13 @@
 #
 #   ./run.sh            launch an interactive pi host with the extension (-e)
 #   ./run.sh install    symlink the extension into pi's global discovery dir
-#                       (<PI_AGENT_DIR>/extensions/remote-code) so EVERY `pi`
+#                       (PI_AGENT_DIR/extensions/remote-code) so EVERY `pi`
 #                       start loads it — no -e flag needed
 #   ./run.sh uninstall  remove that symlink
 #
 # Requires: node >= 22, pi on PATH (or the devDependency copy), and for the
 # remote link: a Firebase service account at
-# <PI_AGENT_DIR>/remote-code/serviceAccountKey.json (legacy pinest path works).
+# PI_AGENT_DIR/remote-code/serviceAccountKey.json (legacy pinest path works).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXT_DIR="$ROOT/server"

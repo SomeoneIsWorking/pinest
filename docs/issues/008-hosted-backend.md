@@ -13,7 +13,7 @@ Implemented in `server/src/auth.ts` as two backends behind `FirebaseAuth`:
 | Token verification of clients | Identity Toolkit REST (`accounts:lookup`, public web apiKey) | Admin SDK `verifyIdToken` |
 | Presence writes | Firestore REST with the machine's own ID token | Admin SDK (bypasses rules) |
 | Token renewal | securetoken REST with cached refresh token | n/a |
-| Setup for a new user | none — start pi, `/pinest-auth`, done | create SA key, drop in `<PI_AGENT_DIR>/remote-code/` |
+| Setup for a new user | none — start pi, `/pinest-auth`, done | create SA key, drop in `PI_AGENT_DIR/remote-code/` |
 
 Safety rails: browser login only in interactive TUI mode
 (`resolveOwner({ interactive })`); headless runs (tests/RPC/print) resolve

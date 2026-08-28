@@ -1,7 +1,7 @@
 /**
  * remote-code local config — persists user preferences that survive restarts.
  *
- * Stored at <PI_AGENT_DIR>/remote-code/config.json (machine-local, gitignored).
+ * Stored below the machine-local PI_AGENT_DIR (gitignored).
  * Tests override the path via RC_CONFIG_PATH (legacy: PINEST_CONFIG_PATH).
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
@@ -16,6 +16,7 @@ export interface Config {
   tunnelProvider: string; // "cloudflared" | "ngrok" | "tailscale" | "off"
   /** Auto-compact sessions at this many context tokens (0/undefined = off). */
   compactAtTokens?: number;
+  activeSessionId?: string;
   [key: string]: unknown;
 }
 

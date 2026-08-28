@@ -1,7 +1,7 @@
 /**
  * Session registry — the durable identity store for remote-controlled
  * sessions. Maps session identity (id, name, cwd, model, status) to pi's own
- * session file path. Lives at <PI_AGENT_DIR>/remote-code/sessions.json.
+ * session file path. Lives below the machine-local PI_AGENT_DIR.
  *
  * Invariants:
  *  - Every mutation is persisted immediately (atomic tmp+rename write).

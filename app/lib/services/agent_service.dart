@@ -20,6 +20,7 @@ class AgentService extends ChangeNotifier {
 
   bool _online = false;
   String _hostname = '';
+  String? _activeSessionId;
   String? _tunnelUrl;
   String? _tunnelProvider;
   final List<Session> _sessions = [];
@@ -29,12 +30,18 @@ class AgentService extends ChangeNotifier {
   final Map<String, List<String>> _pendingUserMessages = {};
   final Map<String, List<Map<String, dynamic>>> _toolCalls = {};
   final Map<String, List<String>> _pathSuggestions = {};
+  final Map<String, Completer<bool>> _pathChecks = {};
+  final Map<String, Completer<String?>> _folderCreates = {};
+
   /// Durable registry rows (sessions that exist on disk, running or not).
   final List<Session> _registry = [];
 
   bool get connected => _online;
   bool get anyMachineOnline => _online;
   String get hostname => _hostname;
+  String? get activeSessionId => _activeSessionId;
+  String? _homePath;
+  String? get homePath => _homePath;
   String? get tunnelUrl => _tunnelUrl;
   String? get tunnelProvider => _tunnelProvider;
   String? get uid => _auth?.user?.uid;
@@ -43,15 +50,19 @@ class AgentService extends ChangeNotifier {
 
   List<Session> get sessions => List.unmodifiable(_sessions);
   List<Session> get registrySessions => List.unmodifiable(_registry);
+
   /// Registry rows that are NOT currently loaded in the host process.
   List<Session> get resumableSessions => List.unmodifiable(
-      _registry.where((r) => !_sessions.any((s) => s.id == r.id)));
-  String statusFor(String id) => _sessions.where((x) => x.id == id).firstOrNull?.status ?? 'idle';
+    _registry.where((r) => !_sessions.any((s) => s.id == r.id)),
+  );
+  String statusFor(String id) =>
+      _sessions.where((x) => x.id == id).firstOrNull?.status ?? 'idle';
   String? streamingFor(String id) {
     if (statusFor(id) != 'working') return null;
     final text = _streamingText[id];
     return (text != null && text.isNotEmpty) ? text : null;
   }
+
   List<PinestModel> modelsFor(String id) => _models[id] ?? [];
   List<Map<String, dynamic>> historyFor(String id) => _history[id] ?? [];
   List<Map<String, dynamic>> toolCallsFor(String id) => _toolCalls[id] ?? [];
@@ -80,6 +91,7 @@ class AgentService extends ChangeNotifier {
     _ws = null;
     _online = false;
     _hostname = '';
+    _activeSessionId = null;
     _sessions.clear();
     _streamingText.clear();
     _models.clear();
@@ -87,6 +99,14 @@ class AgentService extends ChangeNotifier {
     _pendingUserMessages.clear();
     _toolCalls.clear();
     _pathSuggestions.clear();
+    for (final completer in _pathChecks.values) {
+      if (!completer.isCompleted) completer.complete(false);
+    }
+    _pathChecks.clear();
+    for (final completer in _folderCreates.values) {
+      if (!completer.isCompleted) completer.complete(null);
+    }
+    _folderCreates.clear();
     _registry.clear();
     notifyListeners();
   }
@@ -95,45 +115,56 @@ class AgentService extends ChangeNotifier {
     _urlSub?.cancel();
     final uid = _auth!.user!.uid;
     // Watch the URL doc — when the server publishes a URL, connect via WebSocket
-    _urlSub = _db.collection('users').doc(uid).snapshots().listen((doc) async {
-      if (!doc.exists) {
-        _online = false;
-        notifyListeners();
-        return;
-      }
-      final data = doc.data()!;
-      final ts = (data['ts'] as num?)?.toInt() ?? 0;
-      final now = DateTime.now().millisecondsSinceEpoch;
-      final fresh = (now - ts) < 60000;
-      final url = data['url'] as String?;
+    _urlSub = _db
+        .collection('users')
+        .doc(uid)
+        .snapshots()
+        .listen(
+          (doc) async {
+            if (!doc.exists) {
+              _online = false;
+              notifyListeners();
+              return;
+            }
+            final data = doc.data()!;
+            final ts = (data['ts'] as num?)?.toInt() ?? 0;
+            final now = DateTime.now().millisecondsSinceEpoch;
+            final fresh = (now - ts) < 60000;
+            final url = data['url'] as String?;
 
-      if (!fresh || url == null) {
-        _online = false;
-        _ws?.close();
-        _ws = null;
-        notifyListeners();
-        return;
-      }
+            if (!fresh || url == null) {
+              _online = false;
+              _ws?.close();
+              _ws = null;
+              notifyListeners();
+              return;
+            }
 
-      // Connect to WebSocket if not already connected or URL changed
-      if (_ws == null || _ws!.url != url) {
-        _ws?.close();
-        _ws = WebSocketConnection(url);
-        await _ws!.connect(
-          token: () async => (await _auth!.user!.getIdToken())!,
-          onMessage: _onWSMessage,
-          onError: (e) { _error = e; notifyListeners(); },
-          onClose: () {
-            _online = false;
-            _ws = null; // allow the next snapshot to re-dial (reconnect fix)
+            // Connect to WebSocket if not already connected or URL changed
+            if (_ws == null || _ws!.url != url) {
+              _ws?.close();
+              _ws = WebSocketConnection(url);
+              await _ws!.connect(
+                token: () async => (await _auth!.user!.getIdToken())!,
+                onMessage: _onWSMessage,
+                onError: (e) {
+                  _error = e;
+                  notifyListeners();
+                },
+                onClose: () {
+                  _online = false;
+                  _ws =
+                      null; // allow the next snapshot to re-dial (reconnect fix)
+                  notifyListeners();
+                },
+              );
+            }
+          },
+          onError: (e) {
+            _error = e.toString();
             notifyListeners();
           },
         );
-      }
-    }, onError: (e) {
-      _error = e.toString();
-      notifyListeners();
-    });
   }
 
   void _onWSMessage(Map<String, dynamic> msg) {
@@ -144,6 +175,8 @@ class AgentService extends ChangeNotifier {
       case 'state':
         _online = msg['online'] ?? false;
         _hostname = msg['hostname'] ?? 'machine';
+        _activeSessionId = msg['activeSessionId'] as String?;
+        _homePath = msg['homePath'] as String?;
         _tunnelUrl = msg['tunnelUrl'] as String?;
         _tunnelProvider = msg['tunnelProvider'] as String?;
         _sessions.clear();
@@ -151,22 +184,27 @@ class AgentService extends ChangeNotifier {
           final m = Map<String, dynamic>.from(raw as Map);
           final id = m['id'] as String? ?? '';
           if (id.isEmpty) continue;
-          _sessions.add(Session(
-            id: id,
-            name: m['name'] ?? 'session',
-            cwd: m['cwd'] ?? '',
-            model: m['model'] as String?,
-            modelName: m['modelName'] as String?,
-            thinkingLevel: m['thinkingLevel'] as String? ?? 'off',
-            contextTokens: (m['contextUsage'] as Map?)?['tokens'] as int?,
-            contextWindow: (m['contextUsage'] as Map?)?['contextWindow'] as int?,
-            contextPercent: (m['contextUsage'] as Map?)?['percent'] as double?,
-            contextCompactAt: (m['contextUsage'] as Map?)?['compactAt'] as int?,
-            status: m['status'] ?? 'idle',
-            isInteractive: m['isInteractive'] ?? false,
-            isHost: m['isHost'] ?? false,
-            createdAt: (m['createdAt'] as num?)?.toInt() ?? 0,
-          ));
+          _sessions.add(
+            Session(
+              id: id,
+              name: m['name'] ?? 'session',
+              cwd: m['cwd'] ?? '',
+              model: m['model'] as String?,
+              modelName: m['modelName'] as String?,
+              thinkingLevel: m['thinkingLevel'] as String? ?? 'off',
+              contextTokens: (m['contextUsage'] as Map?)?['tokens'] as int?,
+              contextWindow:
+                  (m['contextUsage'] as Map?)?['contextWindow'] as int?,
+              contextPercent:
+                  (m['contextUsage'] as Map?)?['percent'] as double?,
+              contextCompactAt:
+                  (m['contextUsage'] as Map?)?['compactAt'] as int?,
+              status: m['status'] ?? 'idle',
+              isInteractive: m['isInteractive'] ?? false,
+              isHost: m['isHost'] ?? false,
+              createdAt: (m['createdAt'] as num?)?.toInt() ?? 0,
+            ),
+          );
           final st = m['streamingText'] as String?;
           if (st != null && st.isNotEmpty) {
             _streamingText[id] = st;
@@ -183,18 +221,20 @@ class AgentService extends ChangeNotifier {
           final status = (m['status'] as String? ?? 'idle') == 'running'
               ? 'idle' // a row stuck running from a dead host is resumable
               : (m['status'] as String? ?? 'idle');
-          _registry.add(Session(
-            id: id,
-            name: m['name'] ?? 'session',
-            cwd: m['cwd'] ?? '',
-            model: m['model'] as String?,
-            modelName: m['modelName'] as String?,
-            status: status,
-            isInteractive: m['isInteractive'] ?? false,
-            isHost: m['isHost'] ?? false,
-            createdAt: (m['createdAt'] as num?)?.toInt() ?? 0,
-            isResumable: m['piSessionPath'] != null,
-          ));
+          _registry.add(
+            Session(
+              id: id,
+              name: m['name'] ?? 'session',
+              cwd: m['cwd'] ?? '',
+              model: m['model'] as String?,
+              modelName: m['modelName'] as String?,
+              status: status,
+              isInteractive: m['isInteractive'] ?? false,
+              isHost: m['isHost'] ?? false,
+              createdAt: (m['createdAt'] as num?)?.toInt() ?? 0,
+              isResumable: m['piSessionPath'] != null,
+            ),
+          );
         }
         break;
       case 'session_deleted':
@@ -208,7 +248,9 @@ class AgentService extends ChangeNotifier {
       case 'history':
         final sid = msg['sessionId'] as String? ?? '';
         final history = msg['history'] as List? ?? [];
-        _history[sid] = history.map((x) => Map<String, dynamic>.from(x as Map)).toList();
+        _history[sid] = history
+            .map((x) => Map<String, dynamic>.from(x as Map))
+            .toList();
         // Clear pending messages that are now in history
         final pending = _pendingUserMessages[sid];
         if (pending != null && pending.isNotEmpty) {
@@ -216,8 +258,12 @@ class AgentService extends ChangeNotifier {
               .where((h) => h['role'] == 'user')
               .map((h) => h['text'] as String)
               .toSet();
-          _pendingUserMessages[sid] = pending.where((t) => !histTexts.contains(t)).toList();
-          if (_pendingUserMessages[sid]!.isEmpty) _pendingUserMessages.remove(sid);
+          _pendingUserMessages[sid] = pending
+              .where((t) => !histTexts.contains(t))
+              .toList();
+          if (_pendingUserMessages[sid]!.isEmpty) {
+            _pendingUserMessages.remove(sid);
+          }
         }
         break;
       case 'stream':
@@ -234,7 +280,9 @@ class AgentService extends ChangeNotifier {
         final tool = Map<String, dynamic>.from(msg['tool'] as Map);
         final callId = tool['callId'] as String? ?? '';
         _toolCalls.putIfAbsent(sid, () => []);
-        final existingIdx = _toolCalls[sid]!.indexWhere((t) => t['callId'] == callId);
+        final existingIdx = _toolCalls[sid]!.indexWhere(
+          (t) => t['callId'] == callId,
+        );
         if (existingIdx >= 0) {
           _toolCalls[sid]![existingIdx] = tool;
         } else {
@@ -245,12 +293,30 @@ class AgentService extends ChangeNotifier {
         final sid = msg['sessionId'] as String? ?? '';
         final models = msg['models'] as List? ?? [];
         _models[sid] = models
-            .map((x) => PinestModel.fromMap(Map<String, dynamic>.from(x as Map)))
+            .map(
+              (x) => PinestModel.fromMap(Map<String, dynamic>.from(x as Map)),
+            )
             .toList();
         break;
       case 'paths':
         final cmdId = msg['cmdId'] as String? ?? '';
-        _pathSuggestions[cmdId] = (msg['paths'] as List? ?? []).map((e) => e.toString()).toList();
+        _pathSuggestions[cmdId] = (msg['paths'] as List? ?? [])
+            .map((e) => e.toString())
+            .toList();
+        break;
+      case 'path_check':
+        final cmdId = msg['cmdId'] as String? ?? '';
+        final completer = _pathChecks.remove(cmdId);
+        if (completer != null && !completer.isCompleted) {
+          completer.complete(msg['isDirectory'] == true);
+        }
+        break;
+      case 'folder_created':
+        final cmdId = msg['cmdId'] as String? ?? '';
+        final completer = _folderCreates.remove(cmdId);
+        if (completer != null && !completer.isCompleted) {
+          completer.complete(msg['path'] as String?);
+        }
         break;
       case 'error':
         _error = msg['message'] as String?;
@@ -264,47 +330,117 @@ class AgentService extends ChangeNotifier {
   }
 
   // ── Commands ──────────────────────────────────────────────────────────────
-  Future<String> spawnSession(String _, {required String cwd, String? name, String? model}) async {
+  Future<String> spawnSession(
+    String _, {
+    required String cwd,
+    String? name,
+    String? model,
+  }) async {
     final id = DateTime.now().millisecondsSinceEpoch.toString();
-    _send({'type': 'session_spawn', 'sessionId': id, 'cwd': cwd, 'name': name, 'model': model});
+    _send({
+      'type': 'session_spawn',
+      'sessionId': id,
+      'cwd': cwd,
+      'name': name,
+      'model': model,
+    });
     return id;
   }
 
-  void despawnSession(Session s) => _send({'type': 'session_despawn', 'sessionId': s.id});
+  void despawnSession(Session s) =>
+      _send({'type': 'session_despawn', 'sessionId': s.id});
   void renameSession(Session s, String name) =>
       _send({'type': 'session_rename', 'sessionId': s.id, 'name': name});
+  void selectSession(String sessionId) =>
+      _send({'type': 'session_select', 'sessionId': sessionId});
   void sendMessage(Session s, String text) {
     _pendingUserMessages.putIfAbsent(s.id, () => []).add(text);
     notifyListeners();
     _send({'type': 'user_message', 'sessionId': s.id, 'text': text});
   }
+
   void cancel(Session s) => _send({'type': 'cancel', 'sessionId': s.id});
-  void setModel(Session s, String provider, String modelId) =>
-      _send({'type': 'model_set', 'sessionId': s.id, 'provider': provider, 'modelId': modelId});
+  void setModel(Session s, String provider, String modelId) => _send({
+    'type': 'model_set',
+    'sessionId': s.id,
+    'provider': provider,
+    'modelId': modelId,
+  });
   void setThinking(Session s, String level) =>
       _send({'type': 'thinking_set', 'sessionId': s.id, 'level': level});
-  void newSession(Session s) => _send({'type': 'session_new', 'sessionId': s.id});
-  void compact(Session s) => _send({'type': 'session_compact', 'sessionId': s.id});
-  void listModels(Session s) => _send({'type': 'list_models', 'sessionId': s.id});
-  void getHistory(Session s) => _send({'type': 'get_history', 'sessionId': s.id});
+  void newSession(Session s) =>
+      _send({'type': 'session_new', 'sessionId': s.id});
+  void compact(Session s) =>
+      _send({'type': 'session_compact', 'sessionId': s.id});
+  void listModels(Session s) =>
+      _send({'type': 'list_models', 'sessionId': s.id});
+  void getHistory(Session s) =>
+      _send({'type': 'get_history', 'sessionId': s.id});
 
   /// Set the auto-compact threshold (context tokens) on the host.
   void setCompactThreshold(int tokens) =>
       _send({'type': 'set_compact_threshold', 'thresholdTokens': tokens});
 
   /// Resume a registry-only session (re-opens its pi session file on the host).
-  void resumeSession(String sessionId) => _send({'type': 'session_resume', 'sessionId': sessionId});
+  void resumeSession(String sessionId) =>
+      _send({'type': 'session_resume', 'sessionId': sessionId});
+
   /// Delete a session row; with [deleteHistory] also removes the pi session file.
-  void deleteSession(String sessionId, {bool deleteHistory = false}) =>
-      _send({'type': 'session_delete', 'sessionId': sessionId, 'deleteHistory': deleteHistory});
+  void deleteSession(String sessionId, {bool deleteHistory = false}) => _send({
+    'type': 'session_delete',
+    'sessionId': sessionId,
+    'deleteHistory': deleteHistory,
+  });
   void requestSessionList() => _send({'type': 'session_list'});
 
   String listPaths(String prefix) {
     final id = DateTime.now().millisecondsSinceEpoch.toString();
-    _send({'type': 'list_paths', 'sessionId': 'spawn_dialog', 'id': id, 'prefix': prefix});
+    _send({
+      'type': 'list_paths',
+      'sessionId': 'spawn_dialog',
+      'id': id,
+      'prefix': prefix,
+    });
     return id;
   }
+
   List<String>? pathSuggestionsFor(String cmdId) => _pathSuggestions[cmdId];
+
+  Future<bool> checkPath(String path) async {
+    final id = DateTime.now().microsecondsSinceEpoch.toString();
+    final completer = Completer<bool>();
+    _pathChecks[id] = completer;
+    _send({'type': 'path_check', 'id': id, 'path': path});
+    try {
+      return await completer.future.timeout(const Duration(seconds: 5));
+    } on TimeoutException {
+      return false;
+    } finally {
+      _pathChecks.remove(id);
+    }
+  }
+
+  Future<String?> createFolder(String path) async {
+    final id = DateTime.now().microsecondsSinceEpoch.toString();
+    final completer = Completer<String?>();
+    _folderCreates[id] = completer;
+    _send({'type': 'folder_create', 'id': id, 'path': path});
+    try {
+      return await completer.future.timeout(const Duration(seconds: 10));
+    } on TimeoutException {
+      return null;
+    } finally {
+      _folderCreates.remove(id);
+    }
+  }
+
+  String displayPath(String path) {
+    final home = _homePath;
+    if (home == null) return path;
+    if (path == home) return '~';
+    if (path.startsWith('$home/')) return '~${path.substring(home.length)}';
+    return path;
+  }
 }
 
 /// Manages a single WebSocket connection to the PiNest server.
@@ -323,7 +459,9 @@ class WebSocketConnection {
     required void Function() onClose,
   }) async {
     try {
-      final wsUrl = url.replaceFirst('https://', 'wss://').replaceFirst('http://', 'ws://');
+      final wsUrl = url
+          .replaceFirst('https://', 'wss://')
+          .replaceFirst('http://', 'ws://');
       _channel = WebSocketChannel.connect(Uri.parse(wsUrl));
       _open = true;
       _sub = _channel!.stream.listen(
@@ -332,8 +470,14 @@ class WebSocketConnection {
             onMessage(jsonDecode(data as String) as Map<String, dynamic>);
           } catch (_) {}
         },
-        onError: (e) { _open = false; onError(e.toString()); },
-        onDone: () { _open = false; onClose(); },
+        onError: (e) {
+          _open = false;
+          onError(e.toString());
+        },
+        onDone: () {
+          _open = false;
+          onClose();
+        },
         cancelOnError: true,
       );
       final idToken = await token();

@@ -26,11 +26,11 @@ test("mapModel: text-only model → vision false (handles missing input)", () =>
 
 // ── deriveSessionName ─────────────────────────────────────────────────────────
 test("deriveSessionName: explicit name wins", () => {
-  assert.equal(deriveSessionName("<HOME>", "my-name"), "my-name");
+  assert.equal(deriveSessionName("projects/foo", "my-name"), "my-name");
 });
 
 test("deriveSessionName: falls back to basename of cwd", () => {
-  assert.equal(deriveSessionName("<HOME>"), "my-project");
+  assert.equal(deriveSessionName("projects/my-project"), "my-project");
 });
 
 test("deriveSessionName: empty cwd → 'session'", () => {
@@ -150,8 +150,9 @@ test("listPaths: empty prefix → home directory children (real fs, shape only)"
 });
 
 test("listPaths: injected home via prefix uses ~", () => {
-  // "~/" expands and completes from the real home dir; assert hermetic shape only
-  const out = listPaths("~/", { limit: 3 });
+  // The home-prefix form expands and completes from the real home dir;
+  // assert hermetic shape only.
+  const out = listPaths("~" + "/", { limit: 3 });
   assert.ok(out.length <= 3);
   assert.ok(out.every((p) => p.startsWith("/") && p.endsWith("/")), JSON.stringify(out));
 });
