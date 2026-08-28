@@ -131,15 +131,20 @@ free model 429-rate-limits).
 
 ## S6 — Flutter client with durable session UI
 
-Status: `missing`
+Status: `partial`
 
-Not started; protocol now carries `state.registry`, `session_list`,
-`session_resume`, `session_delete`, `session_deleted` for it.
+PiNest's app forked to `app/` (dead code not carried): reconnect fix landed
+(WS close re-dials on the next discovery-doc heartbeat), session history UI
+(`SessionHistorySheet`: registry-only sessions with resume/delete), spawn
+default model `opencode-go/glm-5.3-flash`, and `firebase_options.dart`
+checked in (public web config — pinest gitignored it, breaking fresh
+clones). Verified with `flutter analyze` (0 issues) and `flutter build web`.
 
-Gaps: fork + reconnect fix + sessions UI (I-007).
+Gaps: run against the live host from an actual phone; hosted (RestImpl)
+backend not yet exercised by a real browser sign-in; stream deltas
+(I-006 item 5) still cumulative — protocol+app change together.
 
 ## Current focus
 
-I-007 Flutter app fork (sessions UI + reconnect). Registry/resume/reload
-verified against a real host; rules deployed and verified; provisioning
-done.
+Phone run of the app against the live host; one real browser sign-in to
+exercise the hosted (RestImpl) path end-to-end.
