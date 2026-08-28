@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import '../services/agent_service.dart';
+import '../services/user_preferences.dart';
 import '../models/session.dart';
 import '../models/chat_item.dart';
 
@@ -23,6 +24,9 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _wasWorking = false;
   bool _atBottom = true; // track whether user is scrolled to bottom
   final Map<String, int> _prevHistoryLen = {};
+
+  bool get _isMacOS => Theme.of(context).platform == TargetPlatform.macOS;
+  String get _sendShortcutLabel => _isMacOS ? '⌘+Enter' : 'Ctrl+Enter';
 
   Session? _session(AgentService svc) =>
       svc.sessions.where((s) => s.id == widget.sessionId).firstOrNull;
@@ -49,7 +53,8 @@ class _ChatScreenState extends State<ChatScreen> {
   void _onScroll() {
     if (_scroll.hasClients) {
       // Considered "at bottom" if within 80px of the max scroll extent
-      _atBottom = _scroll.position.pixels >= _scroll.position.maxScrollExtent - 80;
+      _atBottom =
+          _scroll.position.pixels >= _scroll.position.maxScrollExtent - 80;
     }
   }
 
@@ -82,8 +87,11 @@ class _ChatScreenState extends State<ChatScreen> {
     if (!_atBottom) return; // user scrolled up — don't auto-scroll
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scroll.hasClients) {
-        _scroll.animateTo(_scroll.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 120), curve: Curves.easeOut);
+        _scroll.animateTo(
+          _scroll.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 120),
+          curve: Curves.easeOut,
+        );
       }
     });
   }
@@ -133,15 +141,15 @@ class _ChatScreenState extends State<ChatScreen> {
     return Column(
       children: [
         _toolbar(context, svc, s, working, models),
-        Expanded(
-          child: _messageList(history, streaming, toolCalls, svc),
-        ),
+        Expanded(child: _messageList(history, streaming, toolCalls, svc)),
         if (history.isEmpty && streaming == null)
           const Padding(
             padding: EdgeInsets.all(16),
             child: Center(
-              child: Text('Send a message to start working.',
-                  style: TextStyle(color: Colors.grey)),
+              child: Text(
+                'Send a message to start working.',
+                style: TextStyle(color: Colors.grey),
+              ),
             ),
           ),
         _inputBar(working, svc, s),
@@ -149,8 +157,12 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _messageList(List<Map<String, dynamic>> history, String? streaming,
-      List<Map<String, dynamic>> toolCalls, AgentService svc) {
+  Widget _messageList(
+    List<Map<String, dynamic>> history,
+    String? streaming,
+    List<Map<String, dynamic>> toolCalls,
+    AgentService svc,
+  ) {
     final queued = svc.queuedMessagesFor(widget.sessionId);
     final items = <Widget>[];
     for (final msg in history) {
@@ -158,20 +170,24 @@ class _ChatScreenState extends State<ChatScreen> {
       final text = msg['text'] as String? ?? '';
       final tools = msg['tools'] as List?;
       if (role == 'user') {
-        items.add(_bubble(text, Alignment.centerRight, Colors.blueGrey.withAlpha(40)));
+        items.add(
+          _bubble(text, Alignment.centerRight, Colors.blueGrey.withAlpha(40)),
+        );
       } else {
         // Show tools from history (expandable)
         if (tools != null) {
           for (final t in tools) {
             final tm = Map<String, dynamic>.from(t as Map);
-            items.add(_ToolCallCard(
-              name: tm['name'] ?? 'tool',
-              args: tm['args'],
-              result: null,
-              images: const [],
-              isError: false,
-              running: false,
-            ));
+            items.add(
+              _ToolCallCard(
+                name: tm['name'] ?? 'tool',
+                args: tm['args'],
+                result: null,
+                images: const [],
+                isError: false,
+                running: false,
+              ),
+            );
           }
         }
         if (text.isNotEmpty) {
@@ -181,21 +197,34 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     // Live tool calls (not yet in history)
     for (final tc in toolCalls) {
-      items.add(_ToolCallCard(
-        name: tc['name'] ?? 'tool',
-        args: tc['args'],
-        result: tc['result'] as String?,
-        images: (tc['images'] as List?)?.map((i) => Map<String, dynamic>.from(i as Map)).toList() ?? const [],
-        isError: tc['isError'] ?? false,
-        running: tc['running'] ?? false,
-      ));
+      items.add(
+        _ToolCallCard(
+          name: tc['name'] ?? 'tool',
+          args: tc['args'],
+          result: tc['result'] as String?,
+          images:
+              (tc['images'] as List?)
+                  ?.map((i) => Map<String, dynamic>.from(i as Map))
+                  .toList() ??
+              const [],
+          isError: tc['isError'] ?? false,
+          running: tc['running'] ?? false,
+        ),
+      );
     }
     if (streaming != null) {
       items.add(_StreamingBubble(text: streaming));
     }
     // Queued messages at the very end (sent but not yet processed)
     for (final text in queued) {
-      items.add(_bubble(text, Alignment.centerRight, Colors.orange.withAlpha(40), queued: true));
+      items.add(
+        _bubble(
+          text,
+          Alignment.centerRight,
+          Colors.orange.withAlpha(40),
+          queued: true,
+        ),
+      );
     }
     return ListView(
       controller: _scroll,
@@ -204,12 +233,19 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _toolbar(BuildContext context, AgentService svc, Session? s,
-      bool working, List<PinestModel> models) {
+  Widget _toolbar(
+    BuildContext context,
+    AgentService svc,
+    Session? s,
+    bool working,
+    List<PinestModel> models,
+  ) {
     // If models are empty, re-request once (in case the first request lost).
     if (s != null && models.isEmpty && !_modelsRequested) _requestModels();
     return Material(
-      color: Theme.of(context).colorScheme.surfaceContainerHighest.withAlpha(80),
+      color: Theme.of(
+        context,
+      ).colorScheme.surfaceContainerHighest.withAlpha(80),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         child: Row(
@@ -229,11 +265,15 @@ class _ChatScreenState extends State<ChatScreen> {
             Expanded(child: Container()),
             _ToolButton(
               label: '/model ${s?.modelName ?? ""}'.trim(),
-              onTap: models.isEmpty ? null : () => _showModels(context, svc, models),
+              onTap: models.isEmpty
+                  ? null
+                  : () => _showModels(context, svc, models),
             ),
             _ToolButton(
               label: '/thinking ${s?.thinkingLevel ?? "off"}',
-              color: (s?.thinkingLevel ?? 'off') != 'off' ? Colors.purple : null,
+              color: (s?.thinkingLevel ?? 'off') != 'off'
+                  ? Colors.purple
+                  : null,
               onTap: (s == null) ? null : () => _showThinking(context, svc, s),
             ),
             _ToolButton(
@@ -249,8 +289,10 @@ class _ChatScreenState extends State<ChatScreen> {
                   ? const Padding(
                       padding: EdgeInsets.symmetric(horizontal: 10),
                       child: SizedBox(
-                          width: 16, height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2)),
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
                     )
                   : _ToolButton(
                       label: '/remove',
@@ -275,7 +317,9 @@ class _ChatScreenState extends State<ChatScreen> {
                 onKeyEvent: (event) {
                   if (event is KeyDownEvent &&
                       event.logicalKey == LogicalKeyboardKey.enter &&
-                      HardwareKeyboard.instance.isControlPressed) {
+                      (_isMacOS
+                          ? HardwareKeyboard.instance.isMetaPressed
+                          : HardwareKeyboard.instance.isControlPressed)) {
                     _send();
                   }
                 },
@@ -284,9 +328,14 @@ class _ChatScreenState extends State<ChatScreen> {
                   minLines: 1,
                   maxLines: 5,
                   decoration: InputDecoration(
-                    hintText: working ? 'Agent is working… (steer or wait)' : 'Message… (Ctrl+Enter to send)',
+                    hintText: working
+                        ? 'Agent is working… (steer or wait)'
+                        : 'Message… ($_sendShortcutLabel to send)',
                     border: const OutlineInputBorder(),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
                   ),
                   onSubmitted: (_) => _send(),
                 ),
@@ -318,11 +367,7 @@ class _ChatScreenState extends State<ChatScreen> {
                           color: Colors.white.withAlpha(180),
                         ),
                       ),
-                      Container(
-                        width: 16,
-                        height: 16,
-                        color: Colors.white,
-                      ),
+                      Container(width: 16, height: 16, color: Colors.white),
                     ],
                   ),
                 ),
@@ -334,14 +379,25 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _bubble(String text, Alignment align, Color? bg, {bool markdown = false, bool queued = false}) {
+  Widget _bubble(
+    String text,
+    Alignment align,
+    Color? bg, {
+    bool markdown = false,
+    bool queued = false,
+  }) {
     return Align(
       alignment: align,
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 3),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(12)),
-        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.82),
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width * 0.82,
+        ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.end,
           mainAxisSize: MainAxisSize.min,
@@ -354,7 +410,10 @@ class _ChatScreenState extends State<ChatScreen> {
                   children: [
                     Icon(Icons.schedule, size: 12, color: Colors.orange),
                     SizedBox(width: 4),
-                    Text('queued', style: TextStyle(fontSize: 10, color: Colors.orange)),
+                    Text(
+                      'queued',
+                      style: TextStyle(fontSize: 10, color: Colors.orange),
+                    ),
                   ],
                 ),
               ),
@@ -381,37 +440,49 @@ class _ChatScreenState extends State<ChatScreen> {
           children: [
             const Padding(
               padding: EdgeInsets.all(16),
-              child: Text('Thinking level',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+              child: Text(
+                'Thinking level',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+              ),
             ),
             ListTile(
-              leading: Icon(Icons.tune, size: 20,
-                  color: onDefault ? Colors.purple : null),
+              leading: Icon(
+                Icons.tune,
+                size: 20,
+                color: onDefault ? Colors.purple : null,
+              ),
               title: const Text('Default'),
               subtitle: const Text(
-                  "The model's own default (no override)",
-                  style: TextStyle(fontSize: 11)),
+                "The model's own default (no override)",
+                style: TextStyle(fontSize: 11),
+              ),
               trailing: onDefault
                   ? const Icon(Icons.check, color: Colors.purple, size: 18)
                   : null,
               onTap: () {
                 svc.setThinking(s, 'default');
+                context.read<UserPreferences>().saveThinking('default');
                 Navigator.pop(context);
               },
             ),
-            ...levels.map((l) => ListTile(
-                  leading: Icon(_thinkingIcon(l),
-                      size: 20,
-                      color: l == current ? Colors.purple : null),
-                  title: Text(l[0].toUpperCase() + l.substring(1)),
-                  trailing: l == current
-                      ? const Icon(Icons.check, color: Colors.purple, size: 18)
-                      : null,
-                  onTap: () {
-                    svc.setThinking(s, l);
-                    Navigator.pop(context);
-                  },
-                )),
+            ...levels.map(
+              (l) => ListTile(
+                leading: Icon(
+                  _thinkingIcon(l),
+                  size: 20,
+                  color: l == current ? Colors.purple : null,
+                ),
+                title: Text(l[0].toUpperCase() + l.substring(1)),
+                trailing: l == current
+                    ? const Icon(Icons.check, color: Colors.purple, size: 18)
+                    : null,
+                onTap: () {
+                  svc.setThinking(s, l);
+                  context.read<UserPreferences>().saveThinking(l);
+                  Navigator.pop(context);
+                },
+              ),
+            ),
             const SizedBox(height: 8),
           ],
         ),
@@ -421,16 +492,26 @@ class _ChatScreenState extends State<ChatScreen> {
 
   IconData _thinkingIcon(String level) {
     switch (level) {
-      case 'off': return Icons.block;
-      case 'low': return Icons.psychology_outlined;
-      case 'medium': return Icons.psychology;
-      case 'high': return Icons.lightbulb_outline;
-      case 'max': return Icons.auto_awesome;
-      default: return Icons.psychology_outlined;
+      case 'off':
+        return Icons.block;
+      case 'low':
+        return Icons.psychology_outlined;
+      case 'medium':
+        return Icons.psychology;
+      case 'high':
+        return Icons.lightbulb_outline;
+      case 'max':
+        return Icons.auto_awesome;
+      default:
+        return Icons.psychology_outlined;
     }
   }
 
-  void _showModels(BuildContext context, AgentService svc, List<PinestModel> models) {
+  void _showModels(
+    BuildContext context,
+    AgentService svc,
+    List<PinestModel> models,
+  ) {
     final s = _session(svc);
     if (s == null) return;
     showModalBottomSheet(
@@ -440,6 +521,7 @@ class _ChatScreenState extends State<ChatScreen> {
         models: models,
         onPick: (m) {
           svc.setModel(s, m.provider, m.id);
+          context.read<UserPreferences>().saveModel('${m.provider}/${m.id}');
           Navigator.pop(context);
         },
       ),
@@ -451,11 +533,16 @@ class _ChatScreenState extends State<ChatScreen> {
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('Remove session?'),
-        content: Text(s.isInteractive
-            ? 'This removes the session from PiNest. Your terminal keeps running.'
-            : 'This stops and removes the agent session.'),
+        content: Text(
+          s.isInteractive
+              ? 'This removes the session from PiNest. Your terminal keeps running.'
+              : 'This stops and removes the agent session.',
+        ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
           FilledButton(
             style: FilledButton.styleFrom(backgroundColor: Colors.red),
             onPressed: () {
@@ -503,15 +590,16 @@ class _ContextBadge extends StatelessWidget {
     final color = pct >= 90
         ? Colors.red
         : pct >= 70
-            ? Colors.orange
-            : Colors.green;
+        ? Colors.orange
+        : Colors.green;
     final label = tokens != null && window != null
         ? '${(tokens! / 1000).toStringAsFixed(1)}/${(window! / 1000).toStringAsFixed(0)}k'
         : '$pct%';
     // Model + auto-compact threshold, so the user can verify what is active.
     final sub = [
       ?modelName,
-      if (compactAt != null) 'compact @ ${(compactAt! / 1000).toStringAsFixed(0)}k',
+      if (compactAt != null)
+        'compact @ ${(compactAt! / 1000).toStringAsFixed(0)}k',
     ].join(' · ');
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -520,7 +608,14 @@ class _ContextBadge extends StatelessWidget {
         Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(label, style: TextStyle(fontSize: 11, color: color, fontFamily: 'monospace')),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 11,
+                color: color,
+                fontFamily: 'monospace',
+              ),
+            ),
             const SizedBox(width: 4),
             SizedBox(
               width: 40,
@@ -534,10 +629,12 @@ class _ContextBadge extends StatelessWidget {
           ],
         ),
         if (sub.isNotEmpty)
-          Text(sub,
-              style: TextStyle(fontSize: 9, color: Colors.grey.shade600),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis),
+          Text(
+            sub,
+            style: TextStyle(fontSize: 9, color: Colors.grey.shade600),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
       ],
     );
   }
@@ -558,13 +655,16 @@ class _ToolButton extends StatelessWidget {
       borderRadius: BorderRadius.circular(6),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-        child: Text(label, style: TextStyle(
-          fontFamily: 'monospace',
-          fontSize: 12,
-          color: c,
-          decoration: TextDecoration.underline,
-          decorationColor: c.withAlpha(120),
-        )),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontFamily: 'monospace',
+            fontSize: 12,
+            color: c,
+            decoration: TextDecoration.underline,
+            decorationColor: c.withAlpha(120),
+          ),
+        ),
       ),
     );
   }
@@ -596,15 +696,26 @@ class _ToolCallCardState extends State<_ToolCallCard> {
   @override
   Widget build(BuildContext context) {
     final icon = widget.running
-        ? const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.5))
-        : Icon(widget.isError ? Icons.error_outline : Icons.check,
-            size: 14, color: widget.isError ? Colors.red : Colors.green);
-    final argStr = widget.args != null ? const JsonEncoder.withIndent('  ').convert(widget.args) : '';
+        ? const SizedBox(
+            width: 12,
+            height: 12,
+            child: CircularProgressIndicator(strokeWidth: 1.5),
+          )
+        : Icon(
+            widget.isError ? Icons.error_outline : Icons.check,
+            size: 14,
+            color: widget.isError ? Colors.red : Colors.green,
+          );
+    final argStr = widget.args != null
+        ? const JsonEncoder.withIndent('  ').convert(widget.args)
+        : '';
     return Align(
       alignment: Alignment.centerLeft,
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 2),
-        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.85),
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width * 0.85,
+        ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -615,19 +726,32 @@ class _ToolCallCardState extends State<_ToolCallCard> {
                 children: [
                   icon,
                   const SizedBox(width: 6),
-                  Text(widget.name,
-                      style: const TextStyle(
-                          fontSize: 12, fontFamily: 'monospace', color: Colors.grey)),
+                  Text(
+                    widget.name,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontFamily: 'monospace',
+                      color: Colors.grey,
+                    ),
+                  ),
                   if (argStr.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(left: 6),
-                      child: Text(_argSummary(widget.name, widget.args),
-                          style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
-                          overflow: TextOverflow.ellipsis),
+                      child: Text(
+                        _argSummary(widget.name, widget.args),
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.grey.shade600,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
                   const SizedBox(width: 4),
-                  Icon(_expanded ? Icons.expand_less : Icons.expand_more,
-                      size: 16, color: Colors.grey),
+                  Icon(
+                    _expanded ? Icons.expand_less : Icons.expand_more,
+                    size: 16,
+                    color: Colors.grey,
+                  ),
                 ],
               ),
             ),
@@ -640,23 +764,37 @@ class _ToolCallCardState extends State<_ToolCallCard> {
                     color: Colors.grey.shade100,
                     borderRadius: BorderRadius.circular(6),
                   ),
-                  child: SelectableText(argStr,
-                      style: TextStyle(fontSize: 11, fontFamily: 'monospace', color: Colors.grey.shade700)),
+                  child: SelectableText(
+                    argStr,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontFamily: 'monospace',
+                      color: Colors.grey.shade700,
+                    ),
+                  ),
                 ),
               if (widget.result != null)
                 Container(
                   margin: const EdgeInsets.only(top: 4),
                   padding: const EdgeInsets.all(8),
                   decoration: BoxDecoration(
-                    color: widget.isError ? Colors.red.shade50 : Colors.grey.shade100,
+                    color: widget.isError
+                        ? Colors.red.shade50
+                        : Colors.grey.shade100,
                     borderRadius: BorderRadius.circular(6),
                   ),
                   constraints: BoxConstraints(maxHeight: 300),
                   child: SingleChildScrollView(
-                    child: SelectableText(widget.result!,
-                        style: TextStyle(
-                            fontSize: 11, fontFamily: 'monospace',
-                            color: widget.isError ? Colors.red.shade700 : Colors.grey.shade700)),
+                    child: SelectableText(
+                      widget.result!,
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                        color: widget.isError
+                            ? Colors.red.shade700
+                            : Colors.grey.shade700,
+                      ),
+                    ),
                   ),
                 ),
               for (final img in widget.images)
@@ -678,7 +816,14 @@ class _ToolCallCardState extends State<_ToolCallCard> {
     if (args == null) return '';
     if (args is Map) {
       // Show the most relevant field
-      for (final key in ['path', 'file', 'command', 'url', 'query', 'pattern']) {
+      for (final key in [
+        'path',
+        'file',
+        'command',
+        'url',
+        'query',
+        'pattern',
+      ]) {
         if (args[key] != null) return '${args[key]}';
       }
       if (args.length == 1) return '${args.values.first}';
@@ -702,17 +847,31 @@ class _StreamingBubble extends StatelessWidget {
           border: Border.all(color: Colors.orange.withAlpha(120)),
           borderRadius: BorderRadius.circular(12),
         ),
-        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.82),
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width * 0.82,
+        ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             MarkdownBody(data: text, shrinkWrap: true),
             const SizedBox(height: 4),
-            Row(children: [
-              const SizedBox(width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1.5)),
-              const SizedBox(width: 6),
-              Text('streaming…', style: TextStyle(fontSize: 10, color: Colors.orange.withAlpha(220))),
-            ]),
+            Row(
+              children: [
+                const SizedBox(
+                  width: 10,
+                  height: 10,
+                  child: CircularProgressIndicator(strokeWidth: 1.5),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  'streaming…',
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: Colors.orange.withAlpha(220),
+                  ),
+                ),
+              ],
+            ),
           ],
         ),
       ),
@@ -748,8 +907,10 @@ class _ModelSheetState extends State<_ModelSheet> {
               padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
               child: Align(
                 alignment: Alignment.centerLeft,
-                child: Text('Select model',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                child: Text(
+                  'Select model',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                ),
               ),
             ),
             Padding(
@@ -768,7 +929,12 @@ class _ModelSheetState extends State<_ModelSheet> {
             const SizedBox(height: 8),
             Expanded(
               child: filtered.isEmpty
-                  ? const Center(child: Text('No models match', style: TextStyle(color: Colors.grey)))
+                  ? const Center(
+                      child: Text(
+                        'No models match',
+                        style: TextStyle(color: Colors.grey),
+                      ),
+                    )
                   : ListView.builder(
                       itemCount: filtered.length,
                       itemBuilder: (_, i) {
@@ -777,7 +943,8 @@ class _ModelSheetState extends State<_ModelSheet> {
                           leading: const Icon(Icons.circle_outlined),
                           title: Text(m.name),
                           subtitle: Text(
-                              '${m.provider}${m.reasoning ? " · reasoning" : ""}${m.vision ? " · vision" : ""}'),
+                            '${m.provider}${m.reasoning ? " · reasoning" : ""}${m.vision ? " · vision" : ""}',
+                          ),
                           onTap: () => widget.onPick(m),
                         );
                       },

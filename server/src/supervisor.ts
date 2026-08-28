@@ -198,6 +198,14 @@ export class Supervisor {
     debug(`[remote-code] Despawned ${sessionId}`);
   }
 
+  async rename(sessionId: string, name: string): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    if (!s) throw new Error(`unknown session ${sessionId}`);
+    s.name = name;
+    this.persistRow(sessionId, { name });
+    this.callbacks.upsertSession(sessionId, { name });
+  }
+
   async handleSessionCommand(cmd: any): Promise<boolean> {
     const s = this.sessions.get(cmd.sessionId);
     if (!s) return false;

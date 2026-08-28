@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  PROVIDERS, PROVIDER_NAMES, DEFAULT_PROVIDER, getProvider, startTunnel,
+  PROVIDERS, PROVIDER_NAMES, DEFAULT_PROVIDER, getProvider, readNgrokApiUrl, startTunnel,
 } from "../src/tunnel.ts";
 
 // ── Registry shape ─────────────────────────────────────────────────────────
@@ -53,6 +53,29 @@ test("available(): every provider returns a boolean without throwing", () => {
   for (const p of PROVIDERS) {
     assert.equal(typeof p.available(), "boolean", `${p.name}.available() is boolean`);
   }
+});
+
+test("readNgrokApiUrl: selects the tunnel forwarding the requested port", async () => {
+  const fetchImpl = (async () => ({
+    ok: true,
+    async json() {
+      return {
+        tunnels: [
+          { public_url: "https://wrong.ngrok-free.dev", config: { addr: "http://localhost:1234" } },
+          { public_url: "https://right.ngrok-free.dev", config: { addr: "http://localhost:4321" } },
+        ],
+      };
+    },
+  })) as typeof fetch;
+  assert.equal(await readNgrokApiUrl(4321, fetchImpl), "https://right.ngrok-free.dev");
+});
+
+test("readNgrokApiUrl: returns null when the API has no matching tunnel", async () => {
+  const fetchImpl = (async () => ({
+    ok: true,
+    async json() { return { tunnels: [] }; },
+  })) as typeof fetch;
+  assert.equal(await readNgrokApiUrl(4321, fetchImpl), null);
 });
 
 // ── startTunnel: "off" preference is honored (no network) ─────────────────
