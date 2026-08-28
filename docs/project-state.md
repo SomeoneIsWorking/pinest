@@ -101,10 +101,14 @@ load test invoking `/pinest-auth` un-isolated; fixed (temp-dir auth env,
 port-blocker for the login server) and verified: zero :8731 listeners across
 the full suite.
 
-Gaps: `firestore.rules` (owner-write on users/{uid}) not yet DEPLOYED to
-pinest-app — the ADMIN path works today, the HOSTED path's presence writes
-need that one deploy; login flow not yet exercised end-to-end by a real
-browser sign-in.
+Rules DEPLOYED to pinest-app (live release → ruleset 04f3c8ab, deployed
+2026-08-28 via the Rules API with the owner's gcloud credentials; previous
+pinest ruleset backed up in scratch/rules-backup/). Verified functionally
+against the live project: owner write of own doc 200, cross-user write 403,
+non-whitelisted field 403.
+
+Gaps: one real browser sign-in to exercise RestImpl end-to-end (AdminFirebase
+is what runs on the dev machine today).
 
 ## S5 — GLM-5.3-Flash via OpenCode Go, compact at ~400k
 
@@ -134,6 +138,6 @@ Gaps: fork + reconnect fix + sessions UI (I-007).
 
 ## Current focus
 
-Deploy updated `firestore.rules` to pinest-app (enables hosted presence
-writes) → I-005 provisioning → I-007 app fork. Registry/resume verified
-against a real host: stable host id across reloads observed live.
+I-005 provisioning (compact settings + default model) → I-007 app fork.
+Registry/resume verified against a real host: stable host id across reloads
+observed live; rules deployed and verified.
