@@ -59,7 +59,7 @@ let _pi: ExtensionAPI | null = null;
 let _ws: WSServer | null = null; // WSServer
 let _supervisor: Supervisor | null = null;
 let _registry: SessionRegistry | null = null; // SessionRegistry
-let _sessionId = process.env.RC_SESSION_ID || process.env.PINEST_SESSION_ID || randomUUID();
+let _sessionId = process.env.RC_SESSION_ID || randomUUID();
 let _activeSessionId: string | null = null;
 let _ownerUid: string | null = null;
 let _ownerEmail: string | null = null;
@@ -271,7 +271,7 @@ async function bootstrap(): Promise<void> {
   // Stable host session id across restarts (unless explicitly pinned by env):
   // reuse the registry's host row so app bindings survive a host restart.
   const hostRow = _registry?.all().find((s) => s.isHost && s.isInteractive);
-  if (hostRow && !process.env.RC_SESSION_ID && !process.env.PINEST_SESSION_ID) {
+  if (hostRow && !process.env.RC_SESSION_ID) {
     _sessionId = hostRow.id;
   }
   debug(`[remote-code] Owner ${email} · session ${_sessionId}`);
@@ -337,7 +337,7 @@ async function bootstrap(): Promise<void> {
   const initCtx = enrichedContextUsage();
   const hostPiSessionPath: string | null = (_ctx?.sessionManager as any)?.getSessionFile?.()
     ?? (_ctx?.sessionManager as any)?.sessionFile ?? null;
-  const hostName = deriveSessionName(process.cwd(), process.env.RC_NAME || process.env.PINEST_NAME);
+  const hostName = deriveSessionName(process.cwd(), process.env.RC_NAME);
   upsertSession(_sessionId, {
     name: hostName,
     cwd: process.cwd(),

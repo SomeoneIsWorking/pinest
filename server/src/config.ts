@@ -2,14 +2,13 @@
  * remote-code local config — persists user preferences that survive restarts.
  *
  * Stored below the machine-local PI_AGENT_DIR (gitignored).
- * Tests override the path via RC_CONFIG_PATH (legacy: PINEST_CONFIG_PATH).
+ * Tests override the path via RC_CONFIG_PATH.
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 
 const CONFIG_PATH = process.env.RC_CONFIG_PATH
-  || process.env.PINEST_CONFIG_PATH
   || join(homedir(), ".pi", "agent", "remote-code", "config.json");
 
 export interface Config {

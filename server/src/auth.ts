@@ -26,13 +26,11 @@ import { execSync, spawn } from "node:child_process";
 const AGENT_DIR = join(homedir(), ".pi", "agent");
 const RC_DIR = join(AGENT_DIR, "remote-code");
 const AUTH_PATH = process.env.RC_AUTH_PATH
-  || process.env.PINEST_AUTH_PATH
   || join(RC_DIR, "auth.json");
-// Current + legacy locations, first match wins.
+// Explicit service-account override, then the project-local default.
 const SERVICE_ACCOUNT_PATHS = [
   process.env.RC_SERVICE_ACCOUNT_PATH,
   join(RC_DIR, "serviceAccountKey.json"),
-  join(AGENT_DIR, "pinest-serviceAccountKey.json"), // legacy PiNest location
 ].filter((p): p is string => !!p);
 
 const LOGIN_HTML = readFileSync(join(import.meta.dirname, "login.html"), "utf-8");
@@ -89,7 +87,7 @@ export interface WebConfig {
   appId: string;
 }
 
-const PINEST_DEFAULTS = {
+const HOSTED_DEFAULTS = {
   apiKey: "FIREBASE_WEB_API_KEY_REMOVED_FROM_HISTORY",
   appId: "1:271491621267:web:3822b177db9e36a57b8866",
   projectId: "pinest-app",
@@ -111,15 +109,15 @@ export function hasServiceAccount(): boolean {
 export function firebaseWebConfig(): WebConfig {
   const sa = hasServiceAccount() ? readServiceAccount() : null;
   return {
-    apiKey: process.env.RC_FIREBASE_API_KEY || process.env.PINEST_FIREBASE_API_KEY || PINEST_DEFAULTS.apiKey,
+    apiKey: process.env.RC_FIREBASE_API_KEY || HOSTED_DEFAULTS.apiKey,
     authDomain: `${sa?.project_id ?? webProjectId()}.firebaseapp.com`,
     projectId: sa?.project_id ?? webProjectId(),
-    appId: process.env.RC_FIREBASE_APP_ID || process.env.PINEST_FIREBASE_APP_ID || PINEST_DEFAULTS.appId,
+    appId: process.env.RC_FIREBASE_APP_ID || HOSTED_DEFAULTS.appId,
   };
 }
 
 function webProjectId(): string {
-  return process.env.RC_FIREBASE_PROJECT || process.env.PINEST_FIREBASE_PROJECT || PINEST_DEFAULTS.projectId;
+  return process.env.RC_FIREBASE_PROJECT || HOSTED_DEFAULTS.projectId;
 }
 
 // ── Cached identity + refresh token ─────────────────────────────────────────
@@ -129,7 +127,7 @@ interface CachedAuth extends Identity {
 }
 
 function readCachedAuth(): CachedAuth | null {
-  for (const p of [AUTH_PATH, join(AGENT_DIR, "pinest-auth.json")]) {
+  for (const p of [AUTH_PATH]) {
     if (!existsSync(p)) continue;
     try {
       const cached = JSON.parse(readFileSync(p, "utf-8"));
@@ -145,7 +143,7 @@ function writeCachedAuth(auth: CachedAuth): void {
 }
 
 function clearCachedAuth(): void {
-  for (const p of [AUTH_PATH, join(AGENT_DIR, "pinest-auth.json")]) {
+  for (const p of [AUTH_PATH]) {
     try { unlinkSync(p); } catch { /* not cached — fine */ }
   }
 }
@@ -187,7 +185,6 @@ function gcloudBin(): string {
 
 function detectAutoEmail(): string | null {
   if (process.env.RC_OWNER_EMAIL) return process.env.RC_OWNER_EMAIL.trim();
-  if (process.env.PINEST_OWNER_EMAIL) return process.env.PINEST_OWNER_EMAIL.trim();
   try {
     const out = execSync(`${gcloudBin()} config get-value account 2>/dev/null`, { encoding: "utf-8" }).trim();
     if (out.includes("@")) return out;
