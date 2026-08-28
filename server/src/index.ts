@@ -26,6 +26,7 @@ import { loadConfig, saveConfig } from "./config.ts";
 import { PROVIDERS } from "./tunnel.ts";
 import { createAttachView } from "./attach-view.ts";
 import { ReloadWatcher } from "./reload.ts";
+import { resolveThinkingLevel, reportThinkingLevel } from "./thinking.ts";
 import { Type } from "typebox";
 import type { SessionRow, SessionSnapshot, ClientCommand, ServerMessage } from "./protocol.ts";
 
@@ -120,6 +121,9 @@ function broadcast(msg: ServerMessage): void {
 }
 
 function stateMessage(): ServerMessage {
+  // Cheap sync overlay so every tab carries live status + context usage,
+  // not just whichever session last emitted an event.
+  _supervisor?.refreshUsage?.();
   return {
     type: "state",
     online: true,
@@ -472,10 +476,12 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
     case "model_set":
       await setModel(cmd);
       break;
-    case "thinking_set":
-      _pi?.setThinkingLevel?.(cmd.level as any);
-      upsertSession(_sessionId, { thinkingLevel: cmd.level });
+    case "thinking_set": {
+      const r = resolveThinkingLevel((_ctx as any)?.model, cmd.level);
+      _pi?.setThinkingLevel?.(r.set as any);
+      upsertSession(_sessionId, { thinkingLevel: r.report });
       break;
+    }
     case "session_compact":
       await (_pi as any)?.ctx?.compact?.() ?? (_pi as any)?.compact?.();
       break;
@@ -522,18 +528,29 @@ async function getInteractiveHistory() {
 }
 
 async function setModel(cmd: Extract<ClientCommand, { type: "model_set" }>): Promise<void> {
+  const reg = (_ctx as any)?.modelRegistry;
+  await reg?.refresh?.()?.catch?.(() => undefined);
+  const m = reg?.find?.(cmd.provider, cmd.modelId);
+  if (!m) throw new Error(`model ${cmd.provider}/${cmd.modelId} not found`);
+  // ExtensionAPI.setModel resolves boolean — false means the host did NOT
+  // switch. Trusting the request instead of the result once shipped a badge
+  // that named GLM while the session stayed on kimi (262k window). Verify.
+  const ok = await _pi?.setModel?.(m);
+  if (ok === false) throw new Error(`host refused switch to ${cmd.provider}/${cmd.modelId}`);
+  upsertSession(_sessionId, {
+    model: `${cmd.provider}/${cmd.modelId}`,
+    modelName: m.name,
+    contextUsage: enrichedContextUsage(),
+    thinkingLevel: reportThinkingLevel(m, currentHostThinkingLevel()),
+  });
+}
+
+function currentHostThinkingLevel(): string | undefined {
   try {
-    const reg = (_ctx as any)?.modelRegistry;
-    reg?.refresh?.();
-    const m = reg?.find?.(cmd.provider, cmd.modelId);
-    if (!m) throw new Error(`model ${cmd.provider}/${cmd.modelId} not found`);
-    _pi?.setModel?.(m);
-    upsertSession(_sessionId, {
-      model: `${cmd.provider}/${cmd.modelId}`,
-      modelName: m.name,
-      contextUsage: enrichedContextUsage(),
-    });
-  } catch (e) { debug("[remote-code] setModel:", (e as Error).message); }
+    return ((_ctx as any)?.thinkingLevel ?? (_pi as any)?.thinkingLevel) || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 // ── Image embedding ─────────────────────────────────────────────────────────
