@@ -24,3 +24,13 @@ auth store (OpenRouter + opencode-go, `type: "api_key"` — pi rejects the
 opencode-style `"type": "api"`). Real-LLM integration tests pass against a
 free OpenRouter model via `RC_TEST_MODEL`; provision.ts (models.json +
 settings defaults) still open.
+
+**Status: done.** `server/scripts/provision.ts` + `src/provision-core.ts`:
+settings.json gets `compaction { enabled, reserveTokens: 600000,
+keepRecentTokens: 20000 }` (auto-compact ≈400k on the 1M window) and
+`defaultModel: opencode-go/glm-5.3-flash`; unknown user fields preserved,
+idempotent (second run = no-op, verified on the dev machine), atomic writes.
+models.json is deliberately NOT written — opencode-go is a builtin pi
+provider via models.dev and a static entry would freeze a stale model list.
+Verification step resolves the model and checks auth. Ran on the dev
+machine: model ok (context 1,000,000), auth ok (key from pi's auth store).
