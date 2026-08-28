@@ -15,10 +15,9 @@ import { existsSync, statSync, readFileSync } from "node:fs";
 import { resolve as resolvePath, isAbsolute, join, dirname as dirnamePath } from "node:path";
 import { randomUUID } from "node:crypto";
 import { hostname, homedir } from "node:os";
-import admin from "firebase-admin";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { resolveOwnerUid, forceReLogin, readServiceAccount } from "./auth.ts";
-import type { AdminAuth } from "./auth.ts";
+import { createFirebase } from "./auth.ts";
+import type { FirebaseAuth } from "./auth.ts";
 import { WSServer } from "./wsserver.ts";
 import { Supervisor } from "./supervisor.ts";
 import { SessionRegistry } from "./registry.ts";
@@ -34,25 +33,23 @@ const REGISTRY_PATH = process.env.RC_REGISTRY_PATH
   || join(homedir(), ".pi", "agent", "remote-code", "sessions.json");
 
 // ── Lazy Firebase ───────────────────────────────────────────────────────────
-// Firebase is initialized lazily on first use: a missing service account key
-// must NOT crash the pi host at extension-load time — remote control just
-// stays offline with the reason visible.
-interface FirebaseContext {
-  db: admin.firestore.Firestore;
-  adminAuth: AdminAuth;
-}
-let _fb: FirebaseContext | null = null;
+// Initialized lazily on first use. Backend choice: service account key →
+// Admin SDK (self-hosted project); otherwise the HOSTED project with the
+// user's own Google identity (zero-config — this is the distribution path).
+// Either way a failure must not crash the pi host: remote control stays
+// offline with the reason visible.
+let _fb: FirebaseAuth | null = null;
 
-function firebase(): FirebaseContext {
+function firebase(): FirebaseAuth {
   if (_fb) return _fb;
-  const serviceAccount = readServiceAccount();
-  const app = admin.apps.length
-    ? admin.apps[0]
-    : admin.initializeApp({ credential: admin.credential.cert(serviceAccount as any) });
-  const db = app!.firestore();
-  try { db.settings({ ignoreUndefinedProperties: true }); } catch { /* set once */ }
-  _fb = { db, adminAuth: app!.auth() as unknown as AdminAuth };
-  return _fb;
+  // createFirebase is async; the sync callers below go through fbAsync().
+  throw new Error("Firebase not initialized — bootstrap must run first");
+}
+
+let _fbPromise: Promise<FirebaseAuth> | null = null;
+function fbAsync(): Promise<FirebaseAuth> {
+  _fbPromise ??= createFirebase();
+  return _fbPromise;
 }
 
 // ── Per-process state ───────────────────────────────────────────────────────
@@ -89,15 +86,15 @@ function statSyncSafe(p: string): boolean {
 function renderFooter(): void {
   if (!_ui?.setStatus) return;
   try {
-    _ui.setStatus("rc:owner", _ownerEmail ? `🟣 ${_ownerEmail}` : undefined);
+    _ui.setStatus("pinest:owner", _ownerEmail ? `🟣 ${_ownerEmail}` : undefined);
     const spawned = _supervisor?.sessions?.size ?? 0;
     const live = 1 + spawned;
     const working = (_status === "working" ? 1 : 0)
       + [...(_supervisor?.sessions?.values() ?? [])].filter((s: any) => s.status === "working").length;
     const url = _ws?.tunnelUrl ?? "(starting…)";
     const prov = loadConfig().tunnelProvider;
-    _ui.setStatus("rc:sessions", live ? `📡 ${live} session${live === 1 ? "" : "s"}${working ? ` · ⚡${working} working` : ""}` : undefined);
-    _ui.setStatus("rc:url", `${prov}: ${url}`);
+    _ui.setStatus("pinest:sessions", live ? `📡 ${live} session${live === 1 ? "" : "s"}${working ? ` · ⚡${working} working` : ""}` : undefined);
+    _ui.setStatus("pinest:url", `${prov}: ${url}`);
   } catch { /* footer is best-effort */ }
 }
 
@@ -203,9 +200,9 @@ function queueReload(): void {
   if (!_pi) return;
   try {
     // expandPromptTemplates: true is REQUIRED — sendUserMessage defaults it to
-    // false, which skips pi's extension-command dispatch; "/rc-reload" would
+    // false, which skips pi's extension-command dispatch; "/pinest-reload" would
     // then reach the LLM as literal text instead of executing.
-    _pi.sendUserMessage("/rc-reload", { deliverAs: "followUp", expandPromptTemplates: true });
+    _pi.sendUserMessage("/pinest-reload", { deliverAs: "followUp", expandPromptTemplates: true });
   } catch (e) {
     debug("[remote-code] queueReload failed:", (e as Error).message);
   }
@@ -225,8 +222,12 @@ function teardownRemote(): void {
 // ── Bootstrap ───────────────────────────────────────────────────────────────
 async function bootstrap(): Promise<void> {
   if (_ws) return;
-  const { db, adminAuth } = firebase();
-  const { uid, email } = await resolveOwnerUid(adminAuth);
+  const fb = await fbAsync();
+  _fb = fb;
+  // Browser login ONLY when a human is at the TUI. Headless runs (tests,
+  // RPC/print/json modes) resolve from cache or fail with instructions —
+  // an unattended run must never open a browser window.
+  const { uid, email } = await fb.resolveOwner({ interactive: _ctx?.mode === "tui" });
   _ownerUid = uid;
   _ownerEmail = email;
 
@@ -259,37 +260,43 @@ async function bootstrap(): Promise<void> {
   // Start WebSocket server + tunnel
   _ws = new WSServer({ port: 0, expectedUid: uid });
   _ws.setVerifyFn(async (token) => {
-    const decoded = await adminAuth.verifyIdToken(token);
-    return decoded.uid;
+    const identity = await fb.verifyToken(token);
+    return identity?.uid ?? null;
   });
   _ws.on("command", (cmd) => { void handleCommand(cmd); });
   _ws.setStateProvider(stateMessage);
   await _ws.start();
-  const { tunnelProvider: preferred } = loadConfig();
-  debug(`[remote-code] Starting tunnel (preferred: ${preferred})…`);
-  try {
-    const used = await _ws.startTunnel(preferred);
-    debug(`[remote-code] Tunnel up via ${used ?? "(none)"}: ${_ws.tunnelUrl ?? "local-only"}`);
-  } catch (e) {
-    debug("[remote-code] Tunnel failed:", (e as Error).message, "— running local-only");
-  }
 
-  // Publish URL to Firebase (tiny doc — just the URL)
-  await db.collection("users").doc(uid).set({
-    url: _ws.tunnelUrl,
-    online: true,
+  // Presence: publish IMMEDIATELY (url may be null until the tunnel lands)
+  // and republish when it does. The tunnel runs in the BACKGROUND — a slow
+  // or dead network must never block the registry/presence work below it.
+  const publishPresence = (online: boolean): Promise<void> => fb.publishPresence(uid, {
+    url: _ws?.tunnelUrl ?? null,
+    online,
     ownerEmail: email,
     hostname: hostname(),
     ts: Date.now(),
-  }, { merge: true });
+  });
 
   // Heartbeat: keep the URL doc fresh
   _heartbeat = setInterval(() => {
-    db.collection("users").doc(uid).set({
-      url: _ws?.tunnelUrl ?? null, online: true, ts: Date.now(),
-    }, { merge: true }).catch(() => {});
+    publishPresence(true).catch(() => {});
   }, 20_000);
   _heartbeat.unref?.();
+
+  // Tunnel (background). Drifts publish the fresh URL as soon as it's up.
+  const { tunnelProvider: preferred } = loadConfig();
+  debug(`[remote-code] Starting tunnel (preferred: ${preferred})…`);
+  const ws = _ws; // teardownRemote() may null _ws while the tunnel is pending
+  void ws.startTunnel(preferred)
+    .then((used) => {
+      debug(`[remote-code] Tunnel up via ${used ?? "(none)"}: ${ws.tunnelUrl ?? "local-only"}`);
+      return publishPresence(true);
+    })
+    .catch((e) => {
+      debug("[remote-code] Tunnel failed:", (e as Error).message, "— running local-only");
+      return publishPresence(true);
+    });
 
   // Register this interactive session
   const initModel = _ctx?.model;
@@ -323,6 +330,8 @@ async function bootstrap(): Promise<void> {
     isInteractive: true,
     isHost: true,
   });
+  await publishPresence(true).catch((e) =>
+    debug("[remote-code] initial presence publish failed:", (e as Error).message));
 
   // Footer
   const footerTimer = setInterval(renderFooter, 3000);
@@ -333,9 +342,7 @@ async function bootstrap(): Promise<void> {
   const shutdown = async (): Promise<void> => {
     try {
       teardownRemote();
-      await db.collection("users").doc(uid).set({
-        online: false, ts: Date.now(),
-      }, { merge: true });
+      await publishPresence(false);
     } catch { /* best effort */ }
     process.exit(0);
   };
@@ -590,7 +597,25 @@ function bridge(pi: ExtensionAPI): void {
     // (edit extension code / settings → applies live) works even when the
     // remote-control bootstrap fails (e.g. no service account key).
     startWatcher();
-    bootstrap().then(() => renderFooter()).catch((e) => debug("[remote-code] bootstrap failed:", (e as Error).message));
+    // Make the extension VISIBLE: silence reads as "not installed".
+    const notify = (msg: string, level?: any): void => {
+      try { (ctx?.ui as any)?.notify?.(msg, level); } catch { /* */ }
+    };
+    notify("[pinest] loaded — /pinest-sessions sessions · /pinest-provider tunnel · /pinest-auth sign in");
+    bootstrap()
+      .then(() => {
+        notify(`[pinest] online as ${_ownerEmail ?? "(unknown)"} — ${_ws?.tunnelUrl ?? "local-only"}`);
+        renderFooter();
+      })
+      .catch((e) => {
+        const reason = (e as Error)?.message?.split("\n")[0] ?? String(e);
+        debug("[pinest] bootstrap failed:", reason);
+        const hint = /serviceAccountKey/i.test(reason)
+          ? "run ./run.sh install && place the Firebase serviceAccountKey (or /pinest-auth once configured)"
+          : "run /pinest-auth to sign in";
+        notify(`[pinest] OFFLINE: ${reason} — ${hint}`, "warning");
+        try { _ui?.setStatus?.("pinest:url", `offline — ${reason}`); } catch { /* */ }
+      });
   });
 
   // Reload tears this instance down; the re-imported instance bootstraps
@@ -611,17 +636,17 @@ const remoteCode = (pi: ExtensionAPI): void => {
   try { bridge(pi); } catch (e) { debug("[remote-code] bridge failed:", e); }
 
   const say = (ctx: unknown, content: string, details?: unknown): void => {
-    try { _pi?.sendMessage?.({ customType: "remote-code", content, details, display: true }); } catch { /* */ }
+    try { _pi?.sendMessage?.({ customType: "pinest", content, details, display: true }); } catch { /* */ }
   };
 
-  // ── /rc-reload — apply harness self-modification without a restart ────
+  // ── /pinest-reload — apply harness self-modification without a restart ────
   // Queued by the file watcher, the reload_runtime tool, and the app.
-  pi.registerCommand("rc-reload", {
-    description: "remote-code: reload extensions, skills, prompts, themes, and settings from disk",
+  pi.registerCommand("pinest-reload", {
+    description: "PiNest: reload extensions, skills, prompts, themes, and settings from disk",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
       captureUi(ctx);
       try {
-        say(ctx, "[remote-code] reloading extensions, skills, prompts, settings…");
+        say(ctx, "[pinest] reloading extensions, skills, prompts, settings…");
         await ctx.waitForIdle?.();
         await ctx.reload();
         // Terminal for this module instance — the re-imported instance takes over.
@@ -644,29 +669,30 @@ const remoteCode = (pi: ExtensionAPI): void => {
     async execute() {
       queueReload();
       return {
-        content: [{ type: "text", text: "Queued /rc-reload as a follow-up command; changes apply when the current turn settles." }],
+        content: [{ type: "text", text: "Queued /pinest-reload as a follow-up command; changes apply when the current turn settles." }],
         details: {},
       };
     },
   });
 
-  // ── /rc-auth — open browser for Firebase sign-in ───────────────────────
-  pi.registerCommand("rc-auth", {
-    description: "remote-code: open browser to re-authenticate with Firebase (Google sign-in)",
+  // ── /pinest-auth — open browser for Firebase sign-in ───────────────────────
+  pi.registerCommand("pinest-auth", {
+    description: "PiNest: open browser to re-authenticate with Firebase (Google sign-in)",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
       captureUi(ctx);
       try {
-        const { db, adminAuth } = firebase();
-        ctx?.ui?.notify?.("[remote-code] Opening browser for sign-in…", "info");
-        const { uid, email } = await forceReLogin(adminAuth);
+        ctx?.ui?.notify?.("[pinest] Opening browser for sign-in…", "info");
+        const fb = await fbAsync();
+        _fb = fb;
+        const { uid, email } = await fb.forceReLogin();
         _ownerUid = uid;
         _ownerEmail = email;
         // Re-publish presence under the new identity.
         if (_ws?.tunnelUrl) {
-          db.collection("users").doc(uid).set({
+          fb.publishPresence(uid, {
             url: _ws.tunnelUrl, online: true, ownerEmail: email,
             hostname: hostname(), ts: Date.now(),
-          }, { merge: true }).catch(() => {});
+          }).catch(() => {});
         }
         say(ctx, `[remote-code] signed in as ${email}`);
       } catch (e) {
@@ -675,9 +701,9 @@ const remoteCode = (pi: ExtensionAPI): void => {
     },
   });
 
-  // ── /rc-spawn — start a headless session in a project dir ──────────────
-  pi.registerCommand("rc-spawn", {
-    description: "remote-code: spawn a headless agent session. /rc-spawn [dir] [model]",
+  // ── /pinest-spawn — start a headless session in a project dir ──────────────
+  pi.registerCommand("pinest-spawn", {
+    description: "PiNest: spawn a headless agent session. /pinest-spawn [dir] [model]",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       captureUi(ctx);
       try {
@@ -688,9 +714,9 @@ const remoteCode = (pi: ExtensionAPI): void => {
         if (!dir) {
           if (ctx?.ui?.input) {
             dir = await ctx.ui.input("Project directory to spawn a session in", ctx?.cwd);
-            if (!dir) { ctx?.ui?.notify?.("[remote-code] spawn cancelled", "info"); return; }
+            if (!dir) { ctx?.ui?.notify?.("[pinest] spawn cancelled", "info"); return; }
           } else {
-            say(ctx, "[remote-code] usage: /rc-spawn <dir> [model]");
+            say(ctx, "[pinest] usage: /pinest-spawn <dir> [model]");
             return;
           }
         }
@@ -698,7 +724,7 @@ const remoteCode = (pi: ExtensionAPI): void => {
         // Resolve and validate.
         const cwd = resolvePath(dir);
         if (!existsSync(cwd) || !statSyncSafe(cwd)) {
-          ctx?.ui?.notify?.(`[remote-code] not a directory: ${cwd}`, "error");
+          ctx?.ui?.notify?.(`[pinest] not a directory: ${cwd}`, "error");
           return;
         }
         const model = modelParts.join(" ") || "opencode-go/glm-5.3-flash";
@@ -714,9 +740,9 @@ const remoteCode = (pi: ExtensionAPI): void => {
     },
   });
 
-  // ── /rc-sessions — list, kill, or attach a session ─────────────────────
-  pi.registerCommand("rc-sessions", {
-    description: "remote-code: list sessions, then kill or attach one in an overlay",
+  // ── /pinest-sessions — list, kill, or attach a session ─────────────────────
+  pi.registerCommand("pinest-sessions", {
+    description: "PiNest: list sessions, then kill or attach one in an overlay",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
       captureUi(ctx);
       try {
@@ -741,14 +767,14 @@ const remoteCode = (pi: ExtensionAPI): void => {
           return;
         }
 
-        const choice = await ctx.ui.select("remote-code sessions", entries.map((e) => e.label));
+        const choice = await ctx.ui.select("PiNest sessions", entries.map((e) => e.label));
         if (choice === undefined) return; // dismissed
         const picked = entries.find((e) => e.label === choice);
         if (!picked) return;
 
         if (picked.isHost) {
           // Can't attach the host to itself; can't "kill" it meaningfully here.
-          say(ctx, "[remote-code] that's the current terminal session.");
+          say(ctx, "[pinest] that's the current terminal session.");
           return;
         }
 
@@ -769,11 +795,11 @@ const remoteCode = (pi: ExtensionAPI): void => {
 
         if (action === "Attach (open in overlay)") {
           if (!ctx?.ui?.custom) {
-            say(ctx, "[remote-code] attach overlay needs TUI mode.");
+            say(ctx, "[pinest] attach overlay needs TUI mode.");
             return;
           }
           const entry: any = _supervisor?.sessions.get(picked.id);
-          if (!entry) { say(ctx, "[remote-code] session not found (may have exited)"); return; }
+          if (!entry) { say(ctx, "[pinest] session not found (may have exited)"); return; }
 
           await (ctx.ui as any).custom(
             (tui: any, theme: any, _kb: unknown, done: () => void) => createAttachView({
@@ -791,11 +817,11 @@ const remoteCode = (pi: ExtensionAPI): void => {
     },
   });
 
-  // ── /rc-provider — pick a tunnel provider via the pi dialog ────────────
+  // ── /pinest-provider — pick a tunnel provider via the pi dialog ────────────
   // Separate command (not a subcommand) because pi has trouble with
   // multi-word commands. Opens the SDK's native select() picker dialog.
-  pi.registerCommand("rc-provider", {
-    description: "remote-code: choose the remote tunnel provider (localtunnel, cloudflared, ngrok, tailscale, off)",
+  pi.registerCommand("pinest-provider", {
+    description: "PiNest: choose the remote tunnel provider (localtunnel, cloudflared, ngrok, tailscale, off)",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
       captureUi(ctx);
       const configured = loadConfig().tunnelProvider;
@@ -824,7 +850,7 @@ const remoteCode = (pi: ExtensionAPI): void => {
         return;
       }
 
-      const choice = await ctx.ui.select("remote-code tunnel provider", opts);
+      const choice = await ctx.ui.select("PiNest tunnel provider", opts);
       if (choice === undefined) return; // user dismissed
 
       // Find which provider the selected string corresponds to (by label prefix).
@@ -839,11 +865,10 @@ const remoteCode = (pi: ExtensionAPI): void => {
       say(ctx, `[remote-code] provider set to "${picked.name}", restarting tunnel…`);
       const used = await _ws?.restartTunnel(picked.name);
       // Re-publish URL to Firebase so the app picks up the new endpoint.
-      const { db } = firebase();
-      if (_ownerUid && _ws?.tunnelUrl) {
-        db.collection("users").doc(_ownerUid).set({
+      if (_ownerUid && _ws?.tunnelUrl && _fb) {
+        _fb.publishPresence(_ownerUid, {
           url: _ws.tunnelUrl, online: true, ts: Date.now(),
-        }, { merge: true }).catch(() => {});
+        }).catch(() => {});
       }
       say(ctx, `[remote-code] tunnel ${used ? `up via ${used}` : "off"} → ${_ws?.tunnelUrl ?? "local-only"}`);
     },

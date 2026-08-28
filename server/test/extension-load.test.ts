@@ -8,10 +8,23 @@ import { existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { makeTempDir, removeTempDir } from "../support/tmp.ts";
 
-// Resolve the module the same way pi does (.pi.extensions → ./src/index.js).
+// Resolve the module the same way pi does (.pi.extensions → ./src/index.ts).
 const EXT_ENTRY = resolve(dirname(new URL(import.meta.url).pathname), "..", "src", "index.ts");
 
-const EXPECTED_COMMANDS = ["rc-auth", "rc-spawn", "rc-sessions", "rc-provider", "rc-reload"];
+// Isolate auth state BEFORE importing the extension: tests must never touch
+// the real pairing cache or pick up a real service account.
+process.env.RC_AUTH_PATH = makeTempDir("rc-extload-auth-") + "/auth.json";
+process.env.RC_SERVICE_ACCOUNT_PATH = process.env.RC_AUTH_PATH + ".no-such-sa";
+process.env.RC_NO_BROWSER = "1";
+
+// Isolate auth state BEFORE importing the extension: tests must never touch
+// the real pairing cache or pick up a real service account, and the
+// /pinest-auth handler test below must never open a browser.
+process.env.RC_AUTH_PATH = makeTempDir("rc-extload-auth-") + "/auth.json";
+process.env.RC_SERVICE_ACCOUNT_PATH = process.env.RC_AUTH_PATH + ".no-such-sa";
+process.env.RC_NO_BROWSER = "1";
+
+const EXPECTED_COMMANDS = ["pinest-auth", "pinest-spawn", "pinest-sessions", "pinest-provider", "pinest-reload"];
 
 /** A minimal stub of the Pi ExtensionAPI that records what the extension does. */
 function stubPi(overrides = {}) {
@@ -80,12 +93,12 @@ test("factory registers the new command set", async () => {
   }
 });
 
-test("the old pinest-* commands are NOT registered", async () => {
+test("the rc-* rename experiment is NOT registered (pinest names only)", async () => {
   const mod = await freshModule();
   const pi = stubPi();
   mod.default(pi);
-  for (const old of ["pinest-auth", "pinest-spawn", "pinest-sessions", "pinest-provider"]) {
-    assert.ok(!pi.commands.includes(old), `old /${old} removed`);
+  for (const old of ["rc-auth", "rc-spawn", "rc-sessions", "rc-provider", "rc-reload"]) {
+    assert.ok(!pi.commands.includes(old), `/${old} must not exist`);
   }
 });
 
@@ -124,12 +137,12 @@ test("reload-safety: a FRESH pi (after /reload) re-registers all commands", asyn
   assert.deepEqual(pi2.commands.sort(), [...EXPECTED_COMMANDS].sort());
 });
 
-// ── /rc-spawn ──────────────────────────────────────────────────────────
+// ── /pinest-spawn ──────────────────────────────────────────────────────────
 test("/rc-spawn with no arg and dismissed input → emits feedback, no throw", async () => {
   const mod = await freshModule();
   const pi = stubPi();
   mod.default(pi);
-  await assert.doesNotReject(() => invokeCommand(pi, "rc-spawn", "", stubCtx({
+  await assert.doesNotReject(() => invokeCommand(pi, "pinest-spawn", "", stubCtx({
     ui: { async input() { return undefined; }, notify() {} },
   })));
   // Either a notify ("cancelled") or a sendMessage — either is acceptable.
@@ -142,52 +155,60 @@ test("/rc-spawn with a valid dir → spawns a session", async () => {
   // The supervisor isn't bootstrapped in this stub context, so spawn will
   // surface an error message rather than crash — that's the contract.
   const dir = makeTempDir("rc-extload-spawn-");
-  await assert.doesNotReject(() => invokeCommand(pi, "rc-spawn", dir));
+  await assert.doesNotReject(() => invokeCommand(pi, "pinest-spawn", dir));
   removeTempDir(dir);
   assert.ok(pi.sent.length >= 1, "spawn emits feedback");
 });
 
-// ── /rc-sessions ───────────────────────────────────────────────────────
+// ── /pinest-sessions ───────────────────────────────────────────────────────
 test("/rc-sessions with dismissed picker → no throw", async () => {
   const mod = await freshModule();
   const pi = stubPi();
   mod.default(pi);
-  await assert.doesNotReject(() => invokeCommand(pi, "rc-sessions", ""));
+  await assert.doesNotReject(() => invokeCommand(pi, "pinest-sessions", ""));
 });
 
 test("/rc-sessions without ctx.ui.select → text fallback listing", async () => {
   const mod = await freshModule();
   const pi = stubPi();
   mod.default(pi);
-  await invokeCommand(pi, "rc-sessions", "", { cwd: makeTempDir("rc-extload-"), mode: "print", hasUI: false, ui: {} });
+  await invokeCommand(pi, "pinest-sessions", "", { cwd: makeTempDir("rc-extload-"), mode: "print", hasUI: false, ui: {} });
   assert.ok(pi.sent.some((m) => /session/i.test(m.content)), "emits a text session list");
 });
 
-// ── /rc-provider ───────────────────────────────────────────────────────
+// ── /pinest-provider ───────────────────────────────────────────────────────
 test("/rc-provider with dismissed picker → no throw", async () => {
   const mod = await freshModule();
   const pi = stubPi();
   mod.default(pi);
-  await assert.doesNotReject(() => invokeCommand(pi, "rc-provider", ""));
+  await assert.doesNotReject(() => invokeCommand(pi, "pinest-provider", ""));
 });
 
 test("/rc-provider without ctx.ui.select → text fallback listing", async () => {
   const mod = await freshModule();
   const pi = stubPi();
   mod.default(pi);
-  await invokeCommand(pi, "rc-provider", "", { cwd: makeTempDir("rc-extload-"), mode: "print", hasUI: false, ui: {} });
+  await invokeCommand(pi, "pinest-provider", "", { cwd: makeTempDir("rc-extload-"), mode: "print", hasUI: false, ui: {} });
   assert.ok(pi.sent.some((m) => /provider|tunnel|config/i.test(m.content)), "emits provider info");
 });
 
-// ── /rc-auth ───────────────────────────────────────────────────────────
-test("/rc-auth surfaces an error when browser login can't complete (no throw)", async () => {
+// ── /pinest-auth ───────────────────────────────────────────────────────────
+test("/pinest-auth surfaces an error when browser login can't complete (no throw, no browser)", async () => {
   const mod = await freshModule();
   const pi = stubPi();
   mod.default(pi);
-  // forceReLogin will try to start a local server + open a browser; in this
-  // stub context it will fail/timeout. The command must catch and report.
-  await assert.doesNotReject(() => invokeCommand(pi, "rc-auth", ""));
-  assert.ok(pi.sent.some((m) => /auth|sign|firebase/i.test(m.content)), "emits auth feedback");
+  // Occupy the login port: forceReLogin's server fails with EADDRINUSE
+  // BEFORE it opens a browser or waits out its 5-minute timeout. The command
+  // must catch that and report — hermetically.
+  const { createServer } = await import("node:http");
+  const blocker = createServer().listen(8731, "127.0.0.1");
+  await new Promise<void>((resolve) => blocker.once("listening", resolve));
+  try {
+    await assert.doesNotReject(() => invokeCommand(pi, "pinest-auth", ""));
+    assert.ok(pi.sent.some((m) => /auth|sign|firebase/i.test(m.content)), "emits auth feedback");
+  } finally {
+    blocker.close();
+  }
 });
 
 // ── General robustness ─────────────────────────────────────────────────────

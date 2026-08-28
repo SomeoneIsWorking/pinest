@@ -84,6 +84,28 @@ on Firebase bootstrap succeeding.
 Gaps: reload during an ACTIVE remote session (spawned sessions parking +
 app reconnect) exercised end-to-end — blocked on S6.
 
+## S5b — Hosted discovery backend (zero-config distribution)
+
+Status: `partial`
+
+Two Firebase backends behind `FirebaseAuth` (`server/src/auth.ts`):
+HOSTED (default — our `pinest-app` project; user signs in via browser, ID
+token + refresh token cached, renewals via securetoken, client-token
+verification via Identity Toolkit REST, presence via Firestore REST) and
+ADMIN (optional service account key, self-hosters, bypasses rules). Browser
+login is gated to interactive TUI mode; headless runs resolve from cache or
+fail with instructions — pinned by `test/auth.test.ts` ("opens NO browser"
+assertions) plus `RC_NO_BROWSER=1` guard in `openBrowser`. After a user
+report of tests opening the browser, the path was traced to the extension-
+load test invoking `/pinest-auth` un-isolated; fixed (temp-dir auth env,
+port-blocker for the login server) and verified: zero :8731 listeners across
+the full suite.
+
+Gaps: `firestore.rules` (owner-write on users/{uid}) not yet DEPLOYED to
+pinest-app — the ADMIN path works today, the HOSTED path's presence writes
+need that one deploy; login flow not yet exercised end-to-end by a real
+browser sign-in.
+
 ## S5 — GLM-5.3-Flash via OpenCode Go, compact at ~400k
 
 Status: `missing`
@@ -95,6 +117,11 @@ Default spawn model string updated to `opencode-go/glm-5.3-flash` in the
 meantime.
 
 Gaps: `server/scripts/provision.ts` (I-005), settings defaults.
+NOTE: OpenRouter + opencode-go API keys are now installed in the machine's
+pi auth store (`<PI_AGENT_DIR>/auth.json`, `type: "api_key"`), so spawned
+sessions authenticate without env vars; real-LLM integration tests pass
+against `openrouter/nvidia/nemotron-3-super-120b-a12b:free` (free tier;
+gemma free model 429-rate-limits).
 
 ## S6 — Flutter client with durable session UI
 
@@ -107,6 +134,6 @@ Gaps: fork + reconnect fix + sessions UI (I-007).
 
 ## Current focus
 
-I-005 provisioning (OpenCode Go provider entry + compact settings) → I-007
-app fork; on a machine with the Firebase service account key: registry +
-resume drill against a real host (S3's remaining gap).
+Deploy updated `firestore.rules` to pinest-app (enables hosted presence
+writes) → I-005 provisioning → I-007 app fork. Registry/resume verified
+against a real host: stable host id across reloads observed live.

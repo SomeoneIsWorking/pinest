@@ -1,0 +1,41 @@
+rules_version = '2';
+
+// remote-code Firestore rules — hosted discovery backend (pinest-app).
+//
+// Firebase holds auth + discovery ONLY: one tiny presence doc per user.
+// Chat content never touches Firestore (it flows over the WS tunnel).
+//
+// CHANGED vs PiNest: the machine no longer needs a service account. It
+// authenticates as the USER (browser Google sign-in + refresh token) and
+// publishes its own presence doc through Firestore REST — hence owner
+// create/update on users/{uid}. The Admin-SDK self-host path bypasses rules
+// either way.
+//
+// Deploy once with: firebase deploy --only firestore:rules --project pinest-app
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Presence/discovery doc (ephemeral, overwritten by the machine) ───
+    // The phone/web app reads it; the machine writes it with its own ID token.
+    match /users/{uid} {
+      allow get, list: if request.auth != null && request.auth.uid == uid;
+      allow create, update: if request.auth != null
+        && request.auth.uid == uid
+        // only the whitelisted fields, no surprises
+        && request.resource.data.diff(resource.data == null ? {} : resource.data)
+             .affectedKeys().hasOnly(['url', 'online', 'ownerEmail', 'hostname', 'ts'])
+        && request.resource.data.size() <= 5;
+
+      // Transient commands (legacy PiNest path; unused by remote-code today).
+      match /commands/{cmdId} {
+        allow read, update, delete: if false;
+        allow create: if request.auth != null && request.auth.uid == uid;
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

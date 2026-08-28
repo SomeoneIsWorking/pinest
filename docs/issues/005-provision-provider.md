@@ -18,3 +18,9 @@ Acceptance: script runs twice producing identical output (idempotent), refuses
 to overwrite an existing differing provider entry without `--force`.
 
 Affected state items: S5.
+
+**Update (this session):** provider keys are installed in the machine's pi
+auth store (OpenRouter + opencode-go, `type: "api_key"` — pi rejects the
+opencode-style `"type": "api"`). Real-LLM integration tests pass against a
+free OpenRouter model via `RC_TEST_MODEL`; provision.ts (models.json +
+settings defaults) still open.

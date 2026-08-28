@@ -42,5 +42,10 @@ smoked against a real `pi -e server/src/index.ts` run when pi is available.
   pi's own `SessionManager` API.
 - Firebase holds auth + discovery ONLY (uid → tunnel URL doc). Chat content never
   touches Firebase.
+- Two auth backends (`server/src/auth.ts`): HOSTED (default — our shared
+  `pinest-app` project, user signs in via browser, zero setup) and ADMIN
+  (optional service account key for self-hosters). Headless runs
+  (tests/RPC/print) must NEVER open the browser-login page — gated by
+  `resolveOwner({ interactive })` and pinned by `test/auth.test.ts`.
 - Keep `docs/` registries updated in the same change that moves reality
   (codemap for placement, state ledger for capability changes, issues for new work).
