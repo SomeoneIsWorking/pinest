@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>PiNest — Sign in</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; background: #1e1e2e; color: #cdd6f4;
+           display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+    .card { background: #313244; padding: 40px; border-radius: 16px; text-align: center; max-width: 360px; }
+    h1 { font-size: 20px; margin: 0 0 8px; }
+    p { color: #a6adc8; font-size: 14px; margin: 0 0 24px; }
+    button { background: #4285f4; color: white; border: none; padding: 12px 24px;
+             border-radius: 8px; font-size: 15px; cursor: pointer; font-weight: 600; }
+    button:hover { background: #3367d6; }
+    button:disabled { opacity: 0.6; cursor: default; }
+    #status { margin-top: 20px; font-size: 14px; min-height: 20px; }
+    .err { color: #f38ba8; } .ok { color: #a6e3a1; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>🔐 PiNest Server Login</h1>
+    <p>Sign in with the Google account that owns this machine's agents.</p>
+    <button id="btn">Sign in with Google</button>
+    <div id="status"></div>
+  </div>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+    import { getAuth, GoogleAuthProvider, signInWithPopup } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+
+    const firebaseConfig = __FIREBASE_CONFIG__;
+    const projectId = "__PROJECT_ID__";
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+
+    const btn = document.getElementById("btn");
+    const status = document.getElementById("status");
+
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      status.className = "";
+      status.textContent = "Opening Google sign-in…";
+      try {
+        const provider = new GoogleAuthProvider();
+        const result = await signInWithPopup(auth, provider);
+        const idToken = await result.user.getIdToken();
+        status.className = "ok";
+        status.textContent = "Completing sign-in…";
+
+        const r = await fetch("/callback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ idToken }),
+        });
+        if (r.ok) {
+          status.className = "ok";
+          status.textContent = "✓ Success! You can close this tab.";
+        } else {
+          throw new Error(await r.text());
+        }
+      } catch (e) {
+        status.className = "err";
+        status.textContent = "Failed: " + (e.message || e);
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

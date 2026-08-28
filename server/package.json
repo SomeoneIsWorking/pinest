@@ -1,0 +1,39 @@
+{
+  "name": "remote-code-server",
+  "version": "0.1.0",
+  "description": "remote-code \u2014 control Pi coding agents remotely (pi extension)",
+  "type": "module",
+  "main": "src/index.ts",
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "start": "pi -e src/index.ts",
+    "test": "node --test \"test/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "imports": {
+    "node:test": "node:test"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.7.0",
+    "localtunnel": "^2.0.2",
+    "typebox": "^1.3.19",
+    "ws": "^8.21.0"
+  },
+  "optionalDependencies": {
+    "cloudflared": "^0.7.1"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@types/node": "^26.4.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^7.0.2"
+  }
+}
