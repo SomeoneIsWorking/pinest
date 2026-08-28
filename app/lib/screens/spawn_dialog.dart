@@ -5,9 +5,10 @@ import '../services/agent_service.dart';
 /// Spawn dialog — path autocomplete via server query (the web app can't read
 /// the local filesystem, so we ask the extension to list matching dirs).
 class SpawnDialog extends StatefulWidget {
+  final String? initialCwd;
   final String? initialModel;
 
-  const SpawnDialog({super.key, this.initialModel});
+  const SpawnDialog({super.key, this.initialCwd, this.initialModel});
 
   @override
   State<SpawnDialog> createState() => _SpawnDialogState();
@@ -20,10 +21,14 @@ class _SpawnDialogState extends State<SpawnDialog> {
   late final TextEditingController _modelController;
   List<String> _suggestions = [];
   bool _loading = false;
+  bool? _pathValid;
+  bool _creatingFolder = false;
+  String? _pathError;
 
   @override
   void initState() {
     super.initState();
+    _cwdController.text = widget.initialCwd ?? '';
     _modelController = TextEditingController(
       text: widget.initialModel ?? 'opencode-go/glm-5.3-flash',
     );
@@ -41,7 +46,39 @@ class _SpawnDialogState extends State<SpawnDialog> {
   }
 
   void _onChanged() {
-    _queryPaths(_cwdController.text);
+    final input = _cwdController.text.trim();
+    if (mounted) {
+      setState(() {
+        _pathValid = null;
+        _pathError = null;
+      });
+    }
+    _queryPaths(input);
+    if (input.isNotEmpty) _checkPath(input);
+  }
+
+  Future<void> _checkPath(String input) async {
+    final svc = context.read<AgentService>();
+    final valid = await svc.checkPath(input);
+    if (!mounted || _cwdController.text.trim() != input) return;
+    setState(() => _pathValid = valid);
+  }
+
+  Future<void> _createFolder() async {
+    final input = _cwdController.text.trim();
+    if (input.isEmpty) return;
+    setState(() {
+      _creatingFolder = true;
+      _pathError = null;
+    });
+    final created = await context.read<AgentService>().createFolder(input);
+    if (!mounted) return;
+    setState(() {
+      _creatingFolder = false;
+      _pathValid = created != null;
+      _pathError = created == null ? 'Could not create this folder.' : null;
+    });
+    if (created != null) _queryPaths(input);
   }
 
   void _queryPaths(String input) {
@@ -109,9 +146,42 @@ class _SpawnDialogState extends State<SpawnDialog> {
                           )
                         : null,
                   ),
-                  validator: (v) =>
-                      (v == null || v.trim().isEmpty) ? 'Required' : null,
+                  validator: (v) {
+                    if (v == null || v.trim().isEmpty) return 'Required';
+                    if (_pathValid != true) {
+                      return _pathValid == null
+                          ? 'Checking whether this directory exists…'
+                          : 'Directory does not exist. Create it first.';
+                    }
+                    return null;
+                  },
                 ),
+                if (_pathValid == false &&
+                    _cwdController.text.trim().isNotEmpty)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton.icon(
+                      onPressed: _creatingFolder ? null : _createFolder,
+                      icon: _creatingFolder
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.create_new_folder_outlined),
+                      label: const Text('Create folder'),
+                    ),
+                  ),
+                if (_pathError != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      _pathError!,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                  ),
                 if (_suggestions.isNotEmpty)
                   Container(
                     margin: const EdgeInsets.only(top: 4),

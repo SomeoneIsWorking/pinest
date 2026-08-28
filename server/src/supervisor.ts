@@ -11,6 +11,7 @@ import { createAgentSession, SessionManager, ModelRuntime, ModelRegistry } from 
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
 import { mapModel, deriveSessionName, messagesToHistory } from "./logic.ts";
 import { resolveThinkingLevel, reportThinkingLevel } from "./thinking.ts";
 import type { SessionRegistry } from "./registry.ts";
@@ -54,7 +55,7 @@ interface LiveSession {
 }
 
 export interface SupervisorOptions {
-  /** Redirect pi's state dir (<PI_AGENT_DIR>) — used by tests. */
+  /** Redirect pi's state dir (PI_AGENT_DIR) — used by tests. */
   agentDir?: string;
 }
 
@@ -130,6 +131,9 @@ export class Supervisor {
   async spawn(cmd: SpawnCommand): Promise<void> {
     const id = cmd.sessionId || randomUUID();
     const cwd = cmd.cwd ?? process.cwd();
+    let isDirectory = false;
+    try { isDirectory = statSync(cwd).isDirectory(); } catch { /* checked below */ }
+    if (!isDirectory) throw new Error(`workspace directory does not exist: ${cwd}`);
     const { session } = await createAgentSession(this.createSessionOpts(cwd));
     const name = deriveSessionName(cwd, cmd.name);
     const s: LiveSession = {

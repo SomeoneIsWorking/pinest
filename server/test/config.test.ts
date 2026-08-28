@@ -1,5 +1,5 @@
 // Tests for config.js — persisted user preferences.
-// Uses a temp file via RC_CONFIG_PATH so the real <PI_AGENT_DIR> config is untouched.
+// Uses a temp file via RC_CONFIG_PATH so the real PI_AGENT_DIR config is untouched.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";

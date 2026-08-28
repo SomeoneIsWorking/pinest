@@ -11,7 +11,7 @@ import debug from "./log.ts";
  * is real-time WebSocket messages.
  */
 
-import { existsSync, statSync, readFileSync } from "node:fs";
+import { existsSync, statSync, mkdirSync, readFileSync } from "node:fs";
 import { resolve as resolvePath, isAbsolute, join, dirname as dirnamePath } from "node:path";
 import { randomUUID } from "node:crypto";
 import { hostname, homedir } from "node:os";
@@ -21,7 +21,7 @@ import type { FirebaseAuth } from "./auth.ts";
 import { WSServer } from "./wsserver.ts";
 import { Supervisor } from "./supervisor.ts";
 import { SessionRegistry } from "./registry.ts";
-import { mapModel, deriveSessionName, messagesToHistory, listPaths } from "./logic.ts";
+import { mapModel, deriveSessionName, messagesToHistory, listPaths, resolvePathInput } from "./logic.ts";
 import { loadConfig, saveConfig } from "./config.ts";
 import { PROVIDERS } from "./tunnel.ts";
 import { createAttachView } from "./attach-view.ts";
@@ -60,6 +60,7 @@ let _ws: WSServer | null = null; // WSServer
 let _supervisor: Supervisor | null = null;
 let _registry: SessionRegistry | null = null; // SessionRegistry
 let _sessionId = process.env.RC_SESSION_ID || process.env.PINEST_SESSION_ID || randomUUID();
+let _activeSessionId: string | null = null;
 let _ownerUid: string | null = null;
 let _ownerEmail: string | null = null;
 let _currentTurnId: string | null = null;
@@ -133,6 +134,8 @@ function stateMessage(): ServerMessage {
     type: "state",
     online: true,
     hostname: hostname(),
+    homePath: homedir(),
+    activeSessionId: _activeSessionId,
     sessions: getSessionSnapshots(),
     // Durable registry rows (incl. not-running sessions). Old clients ignore
     // this field; new clients merge it with `sessions` for the full list.
@@ -295,6 +298,7 @@ async function bootstrap(): Promise<void> {
     void _ws?.restartTunnel(loadConfig().tunnelProvider).then(() => publishPresence(true));
   };
   await _ws.start();
+  await restorePersistedSessions();
 
   // Presence: publish IMMEDIATELY (url may be null until the tunnel lands)
   // and republish when it does. The tunnel runs in the BACKGROUND — a slow
@@ -359,6 +363,14 @@ async function bootstrap(): Promise<void> {
     isInteractive: true,
     isHost: true,
   });
+  const configuredActive = loadConfig().activeSessionId;
+  _activeSessionId = configuredActive &&
+      (_sessions.has(configuredActive) || !!_registry?.get(configuredActive))
+    ? configuredActive
+    : _sessionId;
+  if (_activeSessionId !== configuredActive) {
+    saveConfig({ activeSessionId: _activeSessionId });
+  }
   await publishPresence(true).catch((e) =>
     debug("[remote-code] initial presence publish failed:", (e as Error).message));
 
@@ -392,7 +404,10 @@ async function handleCommand(cmd: ClientCommand): Promise<void> {
     }
     if (cmd.type === "session_resume") return await resumeSession(cmd);
     if (cmd.type === "session_rename") return await renameSession(cmd);
+    if (cmd.type === "session_select") return selectSession(cmd);
     if (cmd.type === "session_delete") return await deleteSession(cmd);
+    if (cmd.type === "path_check") return checkPath(cmd);
+    if (cmd.type === "folder_create") return createFolder(cmd);
     if (cmd.type === "set_compact_threshold") return setCompactThreshold(cmd);
     if (cmd.type === "reload") {
       queueReload();
@@ -415,7 +430,11 @@ async function handleCommand(cmd: ClientCommand): Promise<void> {
 
 async function spawnSession(cmd: Extract<ClientCommand, { type: "session_spawn" }>): Promise<void> {
   const id = cmd.sessionId || randomUUID();
-  await _supervisor!.spawn({ ...cmd, sessionId: id });
+  await _supervisor!.spawn({
+    ...cmd,
+    sessionId: id,
+    cwd: cmd.cwd ? resolvePathInput(cmd.cwd) : undefined,
+  });
   broadcastState();
 }
 
@@ -444,6 +463,30 @@ async function resumeSession(cmd: Extract<ClientCommand, { type: "session_resume
   broadcastState();
 }
 
+/** Restore sessions that were alive before this host process restarted. */
+async function restorePersistedSessions(): Promise<void> {
+  const rows = _registry?.all().filter((row) =>
+    !row.isHost && row.status !== "closed" && !!row.piSessionPath && !!row.cwd) ?? [];
+  for (const row of rows) {
+    try {
+      await _supervisor!.resume({
+        sessionId: row.id,
+        piSessionPath: row.piSessionPath!,
+        cwd: row.cwd!,
+        name: row.name,
+      });
+    } catch (e) {
+      debug(`[remote-code] could not restore session ${row.id}:`, (e as Error).message);
+      broadcast({
+        type: "error",
+        sessionId: row.id,
+        message: `could not restore ${row.name ?? row.id}: ${(e as Error).message}`,
+      });
+    }
+  }
+  if (rows.length) broadcastState();
+}
+
 async function renameSession(cmd: Extract<ClientCommand, { type: "session_rename" }>): Promise<void> {
   const name = cmd.name.trim();
   if (!name) throw new Error("session name cannot be empty");
@@ -454,6 +497,15 @@ async function renameSession(cmd: Extract<ClientCommand, { type: "session_rename
     _registry.upsert({ id: cmd.sessionId, name });
     upsertSession(cmd.sessionId, { name });
   }
+  broadcastState();
+}
+
+function selectSession(cmd: Extract<ClientCommand, { type: "session_select" }>): void {
+  if (!_sessions.has(cmd.sessionId) && !_registry?.get(cmd.sessionId)) {
+    throw new Error(`unknown session ${cmd.sessionId}`);
+  }
+  _activeSessionId = cmd.sessionId;
+  saveConfig({ activeSessionId: cmd.sessionId });
   broadcastState();
 }
 
@@ -528,6 +580,22 @@ function listModels() {
     reg?.refresh?.();
     return (reg?.getAvailable?.() ?? []).map(mapModel);
   } catch { return []; }
+}
+
+function checkPath(cmd: Extract<ClientCommand, { type: "path_check" }>): void {
+  const path = resolvePathInput(cmd.path);
+  const isDirectory = statSyncSafe(path);
+  broadcast({ type: "path_check", cmdId: cmd.id, exists: existsSync(path), isDirectory });
+}
+
+function createFolder(cmd: Extract<ClientCommand, { type: "folder_create" }>): void {
+  const path = resolvePathInput(cmd.path);
+  try {
+    mkdirSync(path, { recursive: true });
+    broadcast({ type: "folder_created", cmdId: cmd.id, path });
+  } catch (e) {
+    broadcast({ type: "folder_created", cmdId: cmd.id, error: (e as Error).message });
+  }
 }
 
 async function getInteractiveHistory() {
@@ -750,7 +818,7 @@ const remoteCode = (pi: ExtensionAPI): void => {
     description:
       "Reload your own runtime: extensions, skills, prompts, themes, and settings. " +
       "Call this after editing extension code under .pi/extensions, this extension's " +
-      "source, or <PI_AGENT_DIR>/settings.json so the changes apply without a restart.",
+      "source, or PI_AGENT_DIR/settings.json so the changes apply without a restart.",
     parameters: Type.Object({}),
     async execute() {
       queueReload();
@@ -932,7 +1000,7 @@ const remoteCode = (pi: ExtensionAPI): void => {
         const lines = PROVIDERS.map((p) =>
           `${p.name === configured ? "▶" : " "} ${p.available() ? p.label : dim(p.label + " — " + p.installHint)}`,
         );
-        say(ctx, `[remote-code] tunnel provider picker needs interactive UI.\n${lines.join("\n")}\nSet via config: <PI_AGENT_DIR>/remote-code/config.json`);
+        say(ctx, `[remote-code] tunnel provider picker needs interactive UI.\n${lines.join("\n")}\nSet via config: PI_AGENT_DIR/remote-code/config.json`);
         return;
       }
 

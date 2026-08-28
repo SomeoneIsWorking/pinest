@@ -31,6 +31,12 @@ class _MainShellState extends State<MainShell> {
     if (_selectedId != null && !sessions.any((s) => s.id == _selectedId)) {
       _selectedId = sessions.isNotEmpty ? sessions.first.id : null;
     }
+    if (_selectedId == null && sessions.isNotEmpty) {
+      _selectedId = svc.activeSessionId;
+      if (_selectedId == null || !sessions.any((s) => s.id == _selectedId)) {
+        _selectedId = sessions.first.id;
+      }
+    }
 
     if (wide) {
       return _wide(context, svc, sessions);
@@ -44,6 +50,7 @@ class _MainShellState extends State<MainShell> {
     // provides one (length 1 when empty so it never asserts).
     return DefaultTabController(
       length: sessions.isEmpty ? 1 : sessions.length,
+      initialIndex: _selectedIndex(sessions),
       child: Scaffold(
         appBar: AppBar(
           title: const Text('PiNest'),
@@ -92,7 +99,7 @@ class _MainShellState extends State<MainShell> {
                         ),
                       )
                       .toList(),
-                  onTap: (i) => setState(() => _selectedId = sessions[i].id),
+                  onTap: (i) => _selectSession(svc, sessions[i].id),
                 ),
         ),
         body: sessions.isEmpty
@@ -145,7 +152,7 @@ class _MainShellState extends State<MainShell> {
           sessions: sessions,
           selectedId: _selectedId,
           onTap: (id) {
-            setState(() => _selectedId = id);
+            _selectSession(svc, id);
             Navigator.pop(context);
           },
           onEdit: (s) => _editSession(context, svc, s),
@@ -181,11 +188,14 @@ class _MainShellState extends State<MainShell> {
       );
       return;
     }
+    final active = _activeSession(svc.sessions);
     final preferences = context.read<UserPreferences>();
     final result = await showDialog<Map<String, dynamic>>(
       context: context,
-      builder: (_) =>
-          SpawnDialog(initialModel: preferences.lastModel),
+      builder: (_) => SpawnDialog(
+        initialCwd: active == null ? null : svc.displayPath(active.cwd),
+        initialModel: preferences.lastModel,
+      ),
     );
     if (result == null || (result['cwd'] as String?)?.isEmpty != false) return;
 
@@ -213,6 +223,24 @@ class _MainShellState extends State<MainShell> {
       svc.setThinking(created, lastThinking);
     }
     if (mounted) setState(() => _spawning = false);
+  }
+
+  int _selectedIndex(List<Session> sessions) {
+    if (_selectedId == null) return 0;
+    final index = sessions.indexWhere((s) => s.id == _selectedId);
+    return index < 0 ? 0 : index;
+  }
+
+  void _selectSession(AgentService svc, String id) {
+    setState(() => _selectedId = id);
+    svc.selectSession(id);
+  }
+
+  Session? _activeSession(List<Session> sessions) {
+    if (_selectedId != null) {
+      return sessions.where((s) => s.id == _selectedId).firstOrNull;
+    }
+    return sessions.firstOrNull;
   }
 
   Future<void> _editSession(

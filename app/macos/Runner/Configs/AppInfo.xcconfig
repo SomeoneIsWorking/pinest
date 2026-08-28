@@ -11,4 +11,4 @@ PRODUCT_NAME = remote_pi_app
 PRODUCT_BUNDLE_IDENTIFIER = com.pinest.remotePiApp
 
 // The copyright displayed in application information
-PRODUCT_COPYRIGHT = Copyright © 2026 com.pinest. All rights reserved.
+PRODUCT_COPYRIGHT = Copyright © 2026 PiNest. All rights reserved.
