@@ -202,7 +202,10 @@ function startWatcher(): void {
 function queueReload(): void {
   if (!_pi) return;
   try {
-    _pi.sendUserMessage("/rc-reload", { deliverAs: "followUp" });
+    // expandPromptTemplates: true is REQUIRED — sendUserMessage defaults it to
+    // false, which skips pi's extension-command dispatch; "/rc-reload" would
+    // then reach the LLM as literal text instead of executing.
+    _pi.sendUserMessage("/rc-reload", { deliverAs: "followUp", expandPromptTemplates: true });
   } catch (e) {
     debug("[remote-code] queueReload failed:", (e as Error).message);
   }
@@ -320,8 +323,6 @@ async function bootstrap(): Promise<void> {
     isInteractive: true,
     isHost: true,
   });
-
-  startWatcher();
 
   // Footer
   const footerTimer = setInterval(renderFooter, 3000);
@@ -585,6 +586,10 @@ function bridge(pi: ExtensionAPI): void {
   pi.on("session_start", (_event: unknown, ctx?: ExtensionContext) => {
     captureUi(ctx?.ui ? { ui: ctx.ui } : ctx);
     _ctx = ctx ?? null;
+    // The watcher must not depend on Firebase: harness self-modification
+    // (edit extension code / settings → applies live) works even when the
+    // remote-control bootstrap fails (e.g. no service account key).
+    startWatcher();
     bootstrap().then(() => renderFooter()).catch((e) => debug("[remote-code] bootstrap failed:", (e as Error).message));
   });
 

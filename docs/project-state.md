@@ -6,7 +6,7 @@ Atomic work and findings live in `docs/issues/`.
 
 ## S1 — PiNest extension ported and loading under pi
 
-Status: `partial`
+Status: `verified`
 
 Ported to `server/` in erasable TypeScript; loads and routes against a
 stubbed pi API (`npm test`, extension-load + manifest suites). Fixed during
@@ -17,10 +17,13 @@ connect (now `setStateProvider`), host `cancel` silent no-op (abort lives on
 account no longer crashes the pi host).
 
 Evidence: `cd server && npm test` — 127 tests, 0 fail; `npm run typecheck`
-clean. NOT yet verified: a real `pi -e server/src/index.ts` smoke (pi not
-installed on the dev machine at port time).
+clean. Real-host smoke (pi 0.84.3): `pi -e server/src/index.ts` loads the
+extension via jiti; `/rc-sessions` executes and answers the extension-UI
+select dialog (exit-0 vs exit-1 discriminator against a bogus command and
+the old /pinest-* names).
 
-Gaps: real-host smoke; Firebase path exercised against the real project.
+Gaps: Firebase path exercised against the real project (needs service
+account key on the host machine).
 
 ## S2 — Session registry persisted to disk
 
@@ -56,7 +59,7 @@ Gaps: real-host restart drill; app UI for resume (I-007).
 
 ## S4 — Harness self-modification applies live
 
-Status: `partial`
+Status: `verified`
 
 `server/src/reload.ts` + index wiring: watcher over global/project extension
 dirs, this extension's own source, and settings files (debounced 1.5s, arm
@@ -66,12 +69,20 @@ follow-up; `reload` WS command for the app. On reload the instance tears down
 (WS/tunnel stop, spawned sessions parked idle → resumable) and the
 re-imported instance bootstraps fresh.
 
-Evidence: `server/test/reload.test.ts` — single fire per burst, zero fires
-without change, stop cancels, arm delay swallows startup noise, missing dirs
-tolerated; extension-load test asserts `rc-reload` + `reload_runtime` register.
-NOT yet verified: an actual edit-while-running cycle in a real pi host.
+Evidence: unit tests (`reload.test.ts` — single fire per burst, zero fires
+without change, stop cancels, arm delay, missing dirs tolerated) PLUS a real
+host drill (`scratch/drive-rpc.mjs`, RPC mode): touching the extension's own
+source fired the watcher, `/rc-reload` executed as a command (custom message
+in the event stream), the module re-imported (factory ran 2x), and the host
+kept executing extension commands post-reload with zero `extension_error`.
+Found + fixed by the drill: `sendUserMessage` defaults
+`expandPromptTemplates: false`, which skips pi's command dispatch — the
+queued "/rc-reload" would have reached the LLM as literal text; queueReload
+now passes `expandPromptTemplates: true`. The watcher also no longer depends
+on Firebase bootstrap succeeding.
 
-Gaps: real-host self-edit drill; app UX for reload outage (reconnect).
+Gaps: reload during an ACTIVE remote session (spawned sessions parking +
+app reconnect) exercised end-to-end — blocked on S6.
 
 ## S5 — GLM-5.3-Flash via OpenCode Go, compact at ~400k
 
@@ -96,5 +107,6 @@ Gaps: fork + reconnect fix + sessions UI (I-007).
 
 ## Current focus
 
-Real-host verification pass (install pi, smoke `-e server/src/index.ts`,
-watcher drill) → I-005 provisioning → I-007 app fork.
+I-005 provisioning (OpenCode Go provider entry + compact settings) → I-007
+app fork; on a machine with the Firebase service account key: registry +
+resume drill against a real host (S3's remaining gap).
