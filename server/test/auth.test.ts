@@ -11,7 +11,6 @@ const TMP = makeTempDir("rc-auth-");
 process.env.RC_AUTH_PATH = join(TMP, "auth.json");
 process.env.RC_SERVICE_ACCOUNT_PATH = join(TMP, "nonexistent-sa.json"); // → RestImpl
 delete process.env.RC_OWNER_EMAIL;
-delete process.env.PINEST_OWNER_EMAIL;
 
 const { createFirebase, presenceToFirestoreFields } = await import("../src/auth.ts");
 
