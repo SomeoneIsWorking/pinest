@@ -21,13 +21,13 @@ test("PROVIDERS: is a non-empty array of provider objects", () => {
 
 test("PROVIDER_NAMES: matches the names in PROVIDERS", () => {
   assert.deepEqual(PROVIDER_NAMES, PROVIDERS.map((p) => p.name));
-  for (const expected of ["localtunnel", "cloudflared", "ngrok", "tailscale", "off"]) {
+  for (const expected of ["cloudflared", "ngrok", "tailscale", "off"]) {
     assert.ok(PROVIDER_NAMES.includes(expected), `registry includes ${expected}`);
   }
 });
 
-test("DEFAULT_PROVIDER: is localtunnel (zero-binary-install default)", () => {
-  assert.equal(DEFAULT_PROVIDER, "localtunnel");
+test("DEFAULT_PROVIDER: is cloudflared (vendored binary, no account)", () => {
+  assert.equal(DEFAULT_PROVIDER, "cloudflared");
 });
 
 test("every provider declares an installHint string (may be empty for off)", () => {
@@ -38,7 +38,7 @@ test("every provider declares an installHint string (may be empty for off)", () 
 
 // ── getProvider ────────────────────────────────────────────────────────────
 test("getProvider: returns the provider by name", () => {
-  assert.equal(getProvider("localtunnel")?.name, "localtunnel");
+  assert.equal(getProvider("cloudflared")?.name, "cloudflared");
   assert.equal(getProvider("off")?.name, "off");
 });
 
