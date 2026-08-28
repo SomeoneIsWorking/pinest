@@ -99,6 +99,35 @@ test("resume: already-running session → error, not double-load", async () => {
   await sup.shutdownAll();
 });
 
+test("refreshUsage: quiet overlay does not re-enter state broadcast", async () => {
+  const workdir = makeTempDir("rc-refresh-usage-");
+  let sup;
+  let broadcasts = 0;
+  let quietUpdates = 0;
+  const callbacks = {
+    upsertSession: (_id, _snap, notify = true) => {
+      if (!notify) {
+        quietUpdates += 1;
+        return;
+      }
+      broadcasts += 1;
+      // Model index.ts: a normal snapshot mutation broadcasts a state
+      // message, whose usage overlay must update snapshots quietly.
+      sup.refreshUsage(false);
+    },
+    removeSession: () => {},
+    broadcast: () => {},
+    embedImages: (t) => t,
+  };
+  sup = new Supervisor("uid", callbacks, registry, { agentDir: AGENT_DIR });
+
+  await sup.spawn({ sessionId: "refresh-usage", cwd: workdir });
+
+  assert.equal(broadcasts, 1, "the spawn mutation broadcasts once");
+  assert.equal(quietUpdates, 1, "state construction refreshes without rebroadcasting");
+  await sup.shutdownAll();
+});
+
 test("shutdownAll: live rows become idle (resumable), not closed", async () => {
   const workdir = makeTempDir("rc-resume-work3-");
   const sup = new Supervisor("uid", makeCallbacks(), registry, { agentDir: AGENT_DIR });

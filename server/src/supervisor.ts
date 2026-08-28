@@ -32,7 +32,7 @@ export interface ResumeCommand {
 }
 
 export interface SupervisorCallbacks {
-  upsertSession: (id: string, snap: Partial<SessionSnapshot>) => void;
+  upsertSession: (id: string, snap: Partial<SessionSnapshot>, notify?: boolean) => void;
   removeSession: (id: string) => void;
   broadcast: (msg: unknown) => void;
   embedImages?: (text: string) => string;
@@ -340,13 +340,13 @@ export class Supervisor {
    * immediately, not only after that session's next event. The usage carries
    * the effective auto-compact threshold (compactAt) like the host's does.
    */
-  refreshUsage(): void {
+  refreshUsage(notify = true): void {
     for (const [id, s] of this.sessions) {
       const u = this.usageWithCompactAt(s);
       this.callbacks.upsertSession(id, {
         status: s.status === "working" ? "working" : "idle",
         ...(u ? { contextUsage: u } : {}),
-      });
+      }, notify);
     }
   }
 
