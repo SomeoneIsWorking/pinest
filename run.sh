@@ -9,7 +9,7 @@
 #
 # Requires: node >= 22, pi on PATH (or the devDependency copy), and for the
 # remote link: a Firebase service account at
-# PI_AGENT_DIR/remote-code/serviceAccountKey.json (legacy pinest path works).
+# PI_AGENT_DIR/remote-code/serviceAccountKey.json.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXT_DIR="$ROOT/server"
