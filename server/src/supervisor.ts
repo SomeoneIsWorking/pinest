@@ -35,6 +35,8 @@ export interface SupervisorCallbacks {
   removeSession: (id: string) => void;
   broadcast: (msg: unknown) => void;
   embedImages?: (text: string) => string;
+  /** Current auto-compact threshold (tokens); undefined disables the check. */
+  compactAtTokens?: () => number | undefined;
 }
 
 interface LiveSession {
@@ -47,6 +49,7 @@ interface LiveSession {
   model: string | null;
   modelName: string | null;
   _streamingText: string | null;
+  _compacting: boolean;
 }
 
 export interface SupervisorOptions {
@@ -130,7 +133,7 @@ export class Supervisor {
     const name = deriveSessionName(cwd, cmd.name);
     const s: LiveSession = {
       session, currentTurnId: null, unsub: null, cwd, status: "idle", name,
-      model: null, modelName: null, _streamingText: null,
+      model: null, modelName: null, _streamingText: null, _compacting: false,
     };
     this.sessions.set(id, s);
 
@@ -165,7 +168,7 @@ export class Supervisor {
     const name = cmd.name || deriveSessionName(cwd);
     const s: LiveSession = {
       session, currentTurnId: null, unsub: null, cwd, status: "idle", name,
-      model: null, modelName: null, _streamingText: null,
+      model: null, modelName: null, _streamingText: null, _compacting: false,
     };
     this.sessions.set(id, s);
 
@@ -278,8 +281,9 @@ export class Supervisor {
         s.status = "idle";
         s._streamingText = null;
         if (s.currentTurnId) s.currentTurnId = null;
-        this.callbacks.upsertSession(id, { status: "idle" });
+        this.callbacks.upsertSession(id, { status: "idle", contextUsage: this.contextUsage(s) });
         this.persistRow(id, { status: "idle" });
+        this.maybeAutoCompact(id, s);
         // Send updated history
         this.getHistory(s).then((h) => this.callbacks.broadcast({ type: "history", sessionId: id, history: h }));
       } else if (event.type === "model_select") {
@@ -299,7 +303,29 @@ export class Supervisor {
     await s.session.setModel(m);
     s.model = `${cmd.provider}/${cmd.modelId}`; s.modelName = m.name;
     this.persistRow(cmd.sessionId, { model: s.model, modelName: m.name });
-    this.callbacks.upsertSession(cmd.sessionId, { model: s.model, modelName: m.name });
+    // Refresh the context usage NOW so the app's context badge reflects the
+    // new model's window immediately (it used to lag until the next turn).
+    this.callbacks.upsertSession(cmd.sessionId, {
+      model: s.model, modelName: m.name, contextUsage: this.contextUsage(s),
+    });
+  }
+
+  private contextUsage(s: LiveSession): unknown {
+    try { return (s.session as any).getContextUsage?.(); } catch { return undefined; }
+  }
+
+  /** Auto-compact when the context crosses the configured threshold. */
+  private maybeAutoCompact(id: string, s: LiveSession): void {
+    if (s._compacting) return;
+    const at = this.callbacks.compactAtTokens?.();
+    if (!at) return;
+    const usage = this.contextUsage(s) as any;
+    if (!usage?.tokens || usage.tokens < at) return;
+    s._compacting = true;
+    debug(`[remote-code] auto-compacting session ${id} (${usage.tokens} >= ${at} tokens)`);
+    Promise.resolve((s.session as any).compact())
+      .catch((e: unknown) => debug("[remote-code] auto-compact failed:", (e as Error).message))
+      .finally(() => { s._compacting = false; });
   }
 
   private async models(_s: LiveSession) {

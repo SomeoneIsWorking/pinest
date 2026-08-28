@@ -14,11 +14,17 @@ const CONFIG_PATH = process.env.RC_CONFIG_PATH
 
 export interface Config {
   tunnelProvider: string; // "cloudflared" | "ngrok" | "tailscale" | "off"
+  /** Auto-compact sessions at this many context tokens (0/undefined = off). */
+  compactAtTokens?: number;
   [key: string]: unknown;
 }
 
+export const DEFAULT_COMPACT_AT = 400_000;
+
 const DEFAULTS: Config = {
   tunnelProvider: "cloudflared",
+  /** Auto-compact a session when its context reaches this many tokens. */
+  compactAtTokens: DEFAULT_COMPACT_AT,
 };
 
 export function loadConfig(): Config {

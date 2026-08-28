@@ -20,6 +20,8 @@ const require = createRequire(import.meta.url);
 export interface TunnelHandle {
   url: string | null;
   stop: () => void;
+  /** Fired when the tunnel process dies unexpectedly (auto-restart hook). */
+  onDead?: () => void;
 }
 
 export interface TunnelProvider {
@@ -56,6 +58,7 @@ const cloudflaredProvider: TunnelProvider = {
     if (!bin) throw new Error("cloudflared binary not found");
     return new Promise<TunnelHandle>((resolve, reject) => {
       let settled = false;
+      let stopped = false;
       let timer: NodeJS.Timeout | undefined;
       const done = <T,>(fn: (v: T) => void) => (v: T): void => {
         if (!settled) { settled = true; clearTimeout(timer); fn(v); }
@@ -72,7 +75,19 @@ const cloudflaredProvider: TunnelProvider = {
         const m = line.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
         if (m) {
           debug(`[remote-code] cloudflared tunnel: ${m[0]}`);
-          done(resolve)({ url: m[0], stop: () => { try { proc.kill(); } catch { /* */ } } });
+          const handle: TunnelHandle = {
+            url: m[0],
+            stop: () => { stopped = true; try { proc.kill(); } catch { /* */ } },
+          };
+          // Quick tunnels die eventually — surface it so the server can
+          // restart automatically instead of publishing a dead URL forever.
+          proc.once("exit", () => {
+            if (!stopped) {
+              debug("[remote-code] cloudflared exited — tunnel dead");
+              handle.onDead?.();
+            }
+          });
+          done(resolve)(handle);
         }
       };
       proc.stdout!.on("data", (d: Buffer) => d.toString().split("\n").forEach(onLine));
@@ -95,6 +110,7 @@ const ngrokProvider: TunnelProvider = {
       const done = <T,>(fn: (v: T) => void) => (v: T): void => {
         if (!settled) { settled = true; clearTimeout(timer); fn(v); }
       };
+      let stopped = false;
       const proc = spawn("ngrok", [
         "http", String(port), "--log=stdout", "--log-format=logfmt",
       ], { stdio: ["ignore", "pipe", "pipe"] });
@@ -107,7 +123,14 @@ const ngrokProvider: TunnelProvider = {
           || line.match(/(https:\/\/[a-z0-9-]+\.ngrok(?:-free)?\.app)/i);
         if (m) {
           debug(`[remote-code] ngrok tunnel: ${m[1]}`);
-          done(resolve)({ url: m[1] ?? "", stop: () => { try { proc.kill(); } catch { /* */ } } });
+          const handle: TunnelHandle = {
+            url: m[1] ?? "",
+            stop: () => { stopped = true; try { proc.kill(); } catch { /* */ } },
+          };
+          proc.once("exit", () => {
+            if (!stopped) handle.onDead?.();
+          });
+          done(resolve)(handle);
         }
       };
       proc.stdout!.on("data", (d: Buffer) => d.toString().split("\n").forEach(onLine));

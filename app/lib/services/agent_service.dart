@@ -20,6 +20,11 @@ class AgentService extends ChangeNotifier {
 
   bool _online = false;
   String _hostname = '';
+  String? _tunnelUrl;
+  String? _tunnelProvider;
+  /// The thinking level each session STARTED with — "Default" in the picker
+  /// reverts to this (opencode-style default, not a forced level).
+  final Map<String, String> _firstThinking = {};
   final List<Session> _sessions = [];
   final Map<String, String> _streamingText = {};
   final Map<String, List<PinestModel>> _models = {};
@@ -33,6 +38,10 @@ class AgentService extends ChangeNotifier {
   bool get connected => _online;
   bool get anyMachineOnline => _online;
   String get hostname => _hostname;
+  String? get tunnelUrl => _tunnelUrl;
+  String? get tunnelProvider => _tunnelProvider;
+  /// The level a session started with ("Default" in the thinking picker).
+  String defaultThinkingFor(String id) => _firstThinking[id] ?? 'off';
   String? get uid => _auth?.user?.uid;
   String? _error;
   String? get error => _error;
@@ -84,6 +93,7 @@ class AgentService extends ChangeNotifier {
     _toolCalls.clear();
     _pathSuggestions.clear();
     _registry.clear();
+    _firstThinking.clear();
     notifyListeners();
   }
 
@@ -140,6 +150,8 @@ class AgentService extends ChangeNotifier {
       case 'state':
         _online = msg['online'] ?? false;
         _hostname = msg['hostname'] ?? 'machine';
+        _tunnelUrl = msg['tunnelUrl'] as String?;
+        _tunnelProvider = msg['tunnelProvider'] as String?;
         _sessions.clear();
         for (final raw in (msg['sessions'] as List? ?? [])) {
           final m = Map<String, dynamic>.from(raw as Map);
@@ -155,11 +167,14 @@ class AgentService extends ChangeNotifier {
             contextTokens: (m['contextUsage'] as Map?)?['tokens'] as int?,
             contextWindow: (m['contextUsage'] as Map?)?['contextWindow'] as int?,
             contextPercent: (m['contextUsage'] as Map?)?['percent'] as double?,
+            contextCompactAt: (m['contextUsage'] as Map?)?['compactAt'] as int?,
             status: m['status'] ?? 'idle',
             isInteractive: m['isInteractive'] ?? false,
             isHost: m['isHost'] ?? false,
             createdAt: (m['createdAt'] as num?)?.toInt() ?? 0,
           ));
+          // Remember each session's starting thinking level ("Default").
+          _firstThinking.putIfAbsent(id, () => m['thinkingLevel'] as String? ?? 'off');
           final st = m['streamingText'] as String?;
           if (st != null && st.isNotEmpty) {
             _streamingText[id] = st;
@@ -278,6 +293,16 @@ class AgentService extends ChangeNotifier {
   void compact(Session s) => _send({'type': 'session_compact', 'sessionId': s.id});
   void listModels(Session s) => _send({'type': 'list_models', 'sessionId': s.id});
   void getHistory(Session s) => _send({'type': 'get_history', 'sessionId': s.id});
+
+  /// Set the auto-compact threshold (context tokens) on the host.
+  void setCompactThreshold(int tokens) =>
+      _send({'type': 'set_compact_threshold', 'thresholdTokens': tokens});
+
+  /// Revert a session to the thinking level it started with ("Default").
+  void setThinkingDefault(Session s) {
+    final d = defaultThinkingFor(s.id);
+    if (d != s.thinkingLevel) setThinking(s, d);
+  }
 
   /// Resume a registry-only session (re-opens its pi session file on the host).
   void resumeSession(String sessionId) => _send({'type': 'session_resume', 'sessionId': sessionId});
