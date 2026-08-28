@@ -821,7 +821,7 @@ const remoteCode = (pi: ExtensionAPI): void => {
   // Separate command (not a subcommand) because pi has trouble with
   // multi-word commands. Opens the SDK's native select() picker dialog.
   pi.registerCommand("pinest-provider", {
-    description: "PiNest: choose the remote tunnel provider (localtunnel, cloudflared, ngrok, tailscale, off)",
+    description: "PiNest: choose the remote tunnel provider (cloudflared, ngrok, tailscale, off)",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
       captureUi(ctx);
       const configured = loadConfig().tunnelProvider;

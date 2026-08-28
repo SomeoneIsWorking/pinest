@@ -2,12 +2,11 @@
  * Tunnel providers — expose a local port to the public internet.
  *
  * Design goals:
- *  1. Work out of the box after `npm install` — localtunnel (pure JS) is the
- *     default and needs NO system binary.
- *  2. Support binary-based providers (cloudflared, ngrok, tailscale) for users
- *     who want reliability and have the binary installed. These are only
- *     selectable when `available()` returns true; otherwise the picker shows
- *     them grayed-out with an install hint.
+ *  1. Work out of the box after `npm install` — cloudflared (vendored npm
+ *     binary, no account needed for quick tunnels) is the default.
+ *  2. Support binary-based providers (ngrok, tailscale) for users who want
+ *     them. These are only selectable when `available()` returns true;
+ *     otherwise the picker shows them grayed-out with an install hint.
  *  3. Never crash the process — every provider's start() rejects on failure.
  */
 import { existsSync } from "node:fs";
@@ -36,25 +35,6 @@ function onPath(bin: string): boolean {
   try { execFileSync(bin, ["--version"], { stdio: "ignore" }); return true; }
   catch { return false; }
 }
-
-// ── Provider: localtunnel (pure JS, no binary) ─────────────────────────────
-const localtunnelProvider: TunnelProvider = {
-  name: "localtunnel",
-  label: "localtunnel",
-  available: () => {
-    try { require.resolve("localtunnel/package.json"); return true; }
-    catch { return false; }
-  },
-  installHint: "npm install localtunnel  (pure JS, no binary)",
-  async start({ port }) {
-    const mod = await import("localtunnel");
-    const lt = (mod as any).default ?? mod;
-    const tunnel = await lt({ port });
-    if (!tunnel?.url) throw new Error("localtunnel returned no URL");
-    tunnel.on("error", (err: Error) => debug("[remote-code] localtunnel error:", err.message));
-    return { url: tunnel.url, stop: () => { try { tunnel.close(); } catch { /* */ } } };
-  },
-};
 
 // ── Provider: cloudflared (needs binary; vendored npm pkg or system) ───────
 function resolveCloudflaredBin(): string | null {
@@ -178,7 +158,6 @@ const offProvider: TunnelProvider = {
 
 // ── Registry ───────────────────────────────────────────────────────────────
 export const PROVIDERS: TunnelProvider[] = [
-  localtunnelProvider,
   cloudflaredProvider,
   ngrokProvider,
   tailscaleProvider,
@@ -186,7 +165,7 @@ export const PROVIDERS: TunnelProvider[] = [
 ];
 
 export const PROVIDER_NAMES: string[] = PROVIDERS.map((p) => p.name);
-export const DEFAULT_PROVIDER = "localtunnel";
+export const DEFAULT_PROVIDER = "cloudflared";
 
 export function getProvider(name: string): TunnelProvider | null {
   return PROVIDERS.find((p) => p.name === name) ?? null;

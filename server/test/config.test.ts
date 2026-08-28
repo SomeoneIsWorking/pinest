@@ -21,14 +21,14 @@ after(() => removeTempDir(TMP));
 test("loadConfig: returns defaults when no file exists", () => {
   rmSync(CFG, { force: true });
   const cfg = loadConfig();
-  assert.equal(cfg.tunnelProvider, "localtunnel");
+  assert.equal(cfg.tunnelProvider, "cloudflared");
 });
 
 test("loadConfig: defaults are a fresh object each call (no mutation leak)", () => {
   const a = loadConfig();
   a.tunnelProvider = "mutated";
   const b = loadConfig();
-  assert.equal(b.tunnelProvider, "localtunnel");
+  assert.equal(b.tunnelProvider, "cloudflared");
 });
 
 // ── save → load round-trip ────────────────────────────────────────────────
@@ -57,14 +57,14 @@ test("resetConfig: restores defaults", () => {
   saveConfig({ tunnelProvider: "ngrok" });
   resetConfig();
   const cfg = loadConfig();
-  assert.equal(cfg.tunnelProvider, "localtunnel");
+  assert.equal(cfg.tunnelProvider, "cloudflared");
 });
 
 // ── corrupt-file resilience ───────────────────────────────────────────────
 test("loadConfig: corrupt JSON falls back to defaults instead of throwing", () => {
   writeFileSync(CFG, "{ this is not valid json");
   const cfg = loadConfig();
-  assert.equal(cfg.tunnelProvider, "localtunnel");
+  assert.equal(cfg.tunnelProvider, "cloudflared");
 });
 
 // ── file format ───────────────────────────────────────────────────────────
