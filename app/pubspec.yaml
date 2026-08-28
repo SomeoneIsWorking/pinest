@@ -1,0 +1,25 @@
+name: pinest_app
+description: Control Pi coding agents remotely via Firebase
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.8.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  firebase_core: ^4.11.0
+  firebase_auth: ^6.5.4
+  cloud_firestore: ^6.6.0
+  provider: ^6.1.2
+  uuid: ^4.5.1
+  web_socket_channel: ^3.0.1
+  flutter_markdown: ^0.7.6+1
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

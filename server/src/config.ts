@@ -13,12 +13,12 @@ const CONFIG_PATH = process.env.RC_CONFIG_PATH
   || join(homedir(), ".pi", "agent", "remote-code", "config.json");
 
 export interface Config {
-  tunnelProvider: string; // "localtunnel" | "cloudflared" | "ngrok" | "tailscale" | "off"
+  tunnelProvider: string; // "cloudflared" | "ngrok" | "tailscale" | "off"
   [key: string]: unknown;
 }
 
 const DEFAULTS: Config = {
-  tunnelProvider: "localtunnel",
+  tunnelProvider: "cloudflared",
 };
 
 export function loadConfig(): Config {
