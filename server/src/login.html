@@ -45,13 +45,14 @@
         const provider = new GoogleAuthProvider();
         const result = await signInWithPopup(auth, provider);
         const idToken = await result.user.getIdToken();
+        const refreshToken = result.user.refreshToken;
         status.className = "ok";
         status.textContent = "Completing sign-in…";
 
         const r = await fetch("/callback", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ idToken }),
+          body: JSON.stringify({ idToken, refreshToken }),
         });
         if (r.ok) {
           status.className = "ok";

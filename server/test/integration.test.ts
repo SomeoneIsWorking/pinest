@@ -9,14 +9,37 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createAgentSession } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { makeTempDir, removeTempDir } from "../support/tmp.ts";
 
 // Real-LLM tests need provider credentials; opt in with RC_INTEGRATION=1.
+// RC_TEST_MODEL="provider/model" pins the model (e.g. a free OpenRouter
+// model) so the suite never bills a paid default.
 const INTEGRATION = !!process.env.RC_INTEGRATION;
 const t = INTEGRATION ? test : test.skip;
 let workdir;
 const cwd = () => (workdir ??= makeTempDir("rc-integration-"));
+let isolatedAgentDir;
+// Isolate pi's agent dir so the globally-installed extension (and its
+// bootstrap/browser-login) never loads inside a test run.
+const agentDir = () => (isolatedAgentDir ??= makeTempDir("rc-integration-agent-"));
+// Auth/models still come from the real store; only discovery is isolated.
+let sharedRuntime;
+const modelRuntime = async () => (sharedRuntime ??= await ModelRuntime.create({}));
+
+async function useTestModel(session: any): Promise<void> {
+  const spec = process.env.RC_TEST_MODEL;
+  if (!spec) return;
+  // AgentSession exposes no modelRegistry — build one like the supervisor does.
+  const { ModelRuntime, ModelRegistry } = await import("@earendil-works/pi-coding-agent");
+  const runtime = await ModelRuntime.create({});
+  const reg = new ModelRegistry(runtime);
+  await reg.refresh().catch(() => undefined);
+  const slash = spec.indexOf("/");
+  const m = reg.find(spec.slice(0, slash), spec.slice(slash + 1));
+  if (!m) throw new Error(`RC_TEST_MODEL ${spec} not found in pi registry`);
+  await session.setModel(m);
+}
 import { messagesToHistory, extractText } from "../src/logic.ts";
 
 /**
@@ -88,19 +111,23 @@ test("messagesToHistory: converts real pi message format", () => {
   assert.equal(h[1].text, "Hi!");
 });
 
-t("real pi: createAgentSession has modelRegistry with models", async () => {
-  const { session } = await createAgentSession({ cwd: cwd() });
-  const reg = session.modelRegistry;
-  assert.ok(reg, "modelRegistry should exist");
-  const avail = reg.getAvailable();
-  assert.ok(avail.length > 0, `expected models, got ${avail.length}`);
+t("real pi: RC_TEST_MODEL resolves and session.setModel accepts it", async () => {
+  const { session } = await createAgentSession({
+    cwd: cwd(), agentDir: agentDir(), modelRuntime: await modelRuntime(),
+  });
+  // useTestModel throws if the model cannot be resolved+set — that IS the assertion.
+  await useTestModel(session);
+  assert.ok(session.model, "session should have a model after setModel");
   await session.shutdown?.();
 });
 
 t("real pi: messages array accessible and in expected format", async () => {
-  const { session } = await createAgentSession({ cwd: cwd() });
+  const { session } = await createAgentSession({
+    cwd: cwd(), agentDir: agentDir(), modelRuntime: await modelRuntime(),
+  });
+  await useTestModel(session);
   await session.prompt("say hello in one word");
-  await new Promise(r => setTimeout(r, 4000));
+  await session.waitForIdle?.();
   const msgs = session.messages;
   assert.ok(msgs.length >= 2);
   const last = msgs[msgs.length - 1];
@@ -118,11 +145,14 @@ t("real pi: messages array accessible and in expected format", async () => {
 });
 
 t("real pi: session.subscribe receives events", async () => {
-  const { session } = await createAgentSession({ cwd: cwd() });
+  const { session } = await createAgentSession({
+    cwd: cwd(), agentDir: agentDir(), modelRuntime: await modelRuntime(),
+  });
+  await useTestModel(session);
   const events = [];
   const unsub = session.subscribe((event) => events.push(event));
   await session.prompt("say hi");
-  await new Promise(r => setTimeout(r, 4000));
+  await session.waitForIdle?.();
   unsub();
   // Should have received message_start, message_update, agent_end, etc.
   const types = events.map(e => e.type);
@@ -131,12 +161,14 @@ t("real pi: session.subscribe receives events", async () => {
   await session.shutdown?.();
 });
 
-t("real pi: getAvailable returns models with expected fields", async () => {
-  const { session } = await createAgentSession({ cwd: cwd() });
-  const avail = session.modelRegistry.getAvailable();
+t("real pi: registry getAvailable returns models with expected fields", async () => {
+  const { ModelRuntime, ModelRegistry } = await import("@earendil-works/pi-coding-agent");
+  const reg = new ModelRegistry(await ModelRuntime.create({}));
+  await reg.refresh().catch(() => undefined);
+  const avail = reg.getAvailable();
+  assert.ok(avail.length > 0, `expected models, got ${avail.length}`);
   const m = avail[0];
   assert.ok(m.id, "model should have id");
   assert.ok(m.name, "model should have name");
   assert.ok(m.provider, "model should have provider");
-  await session.shutdown?.();
 });
