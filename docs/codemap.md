@@ -19,7 +19,9 @@ Goals/status/work live in the other `docs/` registries, not here.
 | TUI attach overlay (drive a headless session from the host TUI) | `server` | `server/src/attach-view.ts` |
 | Type shims for untyped deps | `server` | `server/src/types-shims.d.ts` |
 | Launcher (slim shim → `pi -e server/src/index.ts`) | repo root | `run.sh` |
-| Flutter client (chat, sessions, spawn, auth) | `app` | `app/lib/…` (forked from PiNest, not yet added) |
+| Flutter client (chat, sessions, spawn, auth) | `app` | `app/lib/` (forked from PiNest) |
+| Durable-session UI + reconnect | `app` | `app/lib/screens/main_shell.dart` (`SessionHistorySheet`), `app/lib/services/agent_service.dart` |
+| Firebase web config (public) for the app | `app` | `app/lib/firebase_options.dart` |
 | Provider entry (OpenCode Go / glm-5.3-flash), compact settings | user machine config | `<PI_AGENT_DIR>/models.json`, `settings.json` — to be provisioned by `server/scripts/provision.ts` (I-005); API keys live in `<PI_AGENT_DIR>/auth.json` (`type: "api_key"`) |
 | Hosted discovery rules (owner-writable presence doc) | repo root | `firestore.rules` — deploy to pinest-app (I-008) |
 
@@ -27,6 +29,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 
 - Multi-machine identity (currently one `users/{uid}` doc) — future goal; do not
   shoehorn into `auth.ts`; it will want its own discovery module.
-- App reconnect/backoff — belongs in the app's `agent_service.dart` when the app lands.
+- Stream delta protocol (currently cumulative `stream` text) — change together
+  with the app, never server-only.
 - Stream delta protocol (currently cumulative `stream` text) — change together
   with the app, never server-only.
