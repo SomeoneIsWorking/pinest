@@ -95,6 +95,7 @@ export type ClientCommand =
   | { type: "session_despawn"; sessionId: string }
   | { type: "session_list" }
   | { type: "session_resume"; sessionId: string }
+  | { type: "session_rename"; sessionId: string; name: string }
   | { type: "session_delete"; sessionId: string; deleteHistory?: boolean }
   | { type: "list_models"; sessionId?: string }
   | { type: "get_history"; sessionId?: string }

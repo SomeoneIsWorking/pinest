@@ -271,6 +271,8 @@ class AgentService extends ChangeNotifier {
   }
 
   void despawnSession(Session s) => _send({'type': 'session_despawn', 'sessionId': s.id});
+  void renameSession(Session s, String name) =>
+      _send({'type': 'session_rename', 'sessionId': s.id, 'name': name});
   void sendMessage(Session s, String text) {
     _pendingUserMessages.putIfAbsent(s.id, () => []).add(text);
     notifyListeners();

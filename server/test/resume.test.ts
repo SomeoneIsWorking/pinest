@@ -99,6 +99,19 @@ test("resume: already-running session → error, not double-load", async () => {
   await sup.shutdownAll();
 });
 
+test("rename: updates the live snapshot and durable registry row", async () => {
+  const workdir = makeTempDir("rc-rename-work-");
+  const sup = new Supervisor("uid", makeCallbacks(), registry, { agentDir: AGENT_DIR });
+  await sup.spawn({ sessionId: "rename1", cwd: workdir, name: "before" });
+
+  await sup.rename("rename1", "after");
+
+  assert.equal(sup.sessions.get("rename1").name, "after");
+  assert.equal(registry.get("rename1").name, "after");
+  assert.ok(events.some((e) => e.kind === "upsert" && e.id === "rename1" && e.snap.name === "after"));
+  await sup.shutdownAll();
+});
+
 test("refreshUsage: quiet overlay does not re-enter state broadcast", async () => {
   const workdir = makeTempDir("rc-refresh-usage-");
   let sup;

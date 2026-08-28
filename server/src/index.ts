@@ -391,6 +391,7 @@ async function handleCommand(cmd: ClientCommand): Promise<void> {
       return broadcast({ type: "session_list", sessions: mergedRegistryRows() });
     }
     if (cmd.type === "session_resume") return await resumeSession(cmd);
+    if (cmd.type === "session_rename") return await renameSession(cmd);
     if (cmd.type === "session_delete") return await deleteSession(cmd);
     if (cmd.type === "set_compact_threshold") return setCompactThreshold(cmd);
     if (cmd.type === "reload") {
@@ -440,6 +441,19 @@ async function resumeSession(cmd: Extract<ClientCommand, { type: "session_resume
     cwd: row.cwd,
     name: row.name,
   });
+  broadcastState();
+}
+
+async function renameSession(cmd: Extract<ClientCommand, { type: "session_rename" }>): Promise<void> {
+  const name = cmd.name.trim();
+  if (!name) throw new Error("session name cannot be empty");
+  if (_supervisor?.sessions.has(cmd.sessionId)) {
+    await _supervisor.rename(cmd.sessionId, name);
+  } else {
+    if (!_registry?.get(cmd.sessionId)) throw new Error(`unknown session ${cmd.sessionId}`);
+    _registry.upsert({ id: cmd.sessionId, name });
+    upsertSession(cmd.sessionId, { name });
+  }
   broadcastState();
 }
 

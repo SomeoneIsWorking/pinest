@@ -16,7 +16,7 @@ connect (now `setStateProvider`), host `cancel` silent no-op (abort lives on
 `ExtensionContext`), Firebase init moved off the import path (missing service
 account no longer crashes the pi host).
 
-Evidence: `cd server && npm test` — 149 tests, 0 fail; `npm run typecheck`
+Evidence: `cd server && npm test` — 153 tests, 0 fail; `npm run typecheck`
 clean. Real-host smoke (pi 0.84.3): `pi -e server/src/index.ts` loads the
 extension via jiti; `/rc-sessions` executes and answers the extension-UI
 select dialog (exit-0 vs exit-1 discriminator against a bogus command and
@@ -27,8 +27,12 @@ recursion fix (I-009).
 Fatal uncaught exceptions and unhandled rejections now print their kind,
 message, and full stack to the Pi terminal before the host exits (I-010).
 
-Gaps: Firebase path exercised against the real project (needs service
-account key on the host machine).
+The live host also publishes an ngrok v3 endpoint discovered through the
+local ngrok API and accepts an authenticated WebSocket connection through it
+(I-011).
+
+Gaps: one real browser sign-in to exercise the hosted RestImpl path end to end
+(AdminFirebase is what runs on the dev machine today).
 
 ## S2 — Session registry persisted to disk
 
@@ -161,6 +165,10 @@ pi's "off" is wire-identical and is reported as `default`; explicit-off
 models fall back to "medium". (4) The badge now names the model and the
 auto-compact threshold so label/window mismatches are self-evident;
 threshold editable in Settings (`set_compact_threshold`).
+
+The client now persists the last selected model and thinking level locally,
+uses `⌘+Enter` on macOS for sending, and exposes a per-tab edit dialog with the
+workspace path and durable session renaming (I-012).
 
 Gaps: run against the live host from an actual phone; hosted (RestImpl)
 backend not yet exercised by a real browser sign-in; stream deltas
