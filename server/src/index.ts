@@ -414,7 +414,16 @@ async function bootstrap(): Promise<void> {
 
   // Re-attach runs parked by the previous instance FIRST — before the WS
   // server, tunnel, or registry restore. They are executing right now.
-  adoptReloadedSessions();
+  // Adoption is auxiliary: if it fails, remote control must still come up.
+  // (It once threw on a field the previous build did not have and took the
+  // whole host offline — the app just showed "Supervisor offline".)
+  try {
+    adoptReloadedSessions();
+  } catch (e) {
+    const reason = (e as Error)?.message ?? String(e);
+    debug(`[remote-code] reload: adoption failed: ${reason} — sessions stay resumable, remote control continues`);
+    uiNotify(`[pinest] could not re-attach parked sessions: ${reason} (they remain resumable)`, "warning");
+  }
 
   // Start WebSocket server + tunnel
   _ws = new WSServer({ port: 0, expectedUid: uid });

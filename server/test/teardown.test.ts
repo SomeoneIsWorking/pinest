@@ -232,3 +232,28 @@ test("parking keeps the old subscription so a gap agent_end is not lost", () => 
   sup2.adoptStashedSessions();
   assert.ok(calls.includes("unsub-old"), `adopt must drop the old subscription; calls=${calls}`);
 });
+
+// ── A parked session from an OLDER BUILD must not take the host down ───────
+// A hot reload IS a version change: the parked object was constructed by the
+// previous build. Spreading a field it never had ("s.pendingSteering is not
+// iterable") threw inside bootstrap and left the app showing "Supervisor
+// offline" with a live tunnel.
+test("adoption survives a parked session missing fields added since it was parked", () => {
+  const sup = makeSupervisor();
+  const old = liveStub([], "working", true) as Record<string, unknown>;
+  delete old.pendingSteering;       // field did not exist in that build
+  delete old.pending;
+  (old as any).name = "";           // and identity may be absent too
+  (old as any).cwd = "";
+  (sup as any).sessions.set("old1", old);
+  sup.stashForReload();
+
+  const sup2 = makeSupervisor();
+  const snaps: Array<Record<string, unknown>> = [];
+  (sup2 as any).callbacks.upsertSession = (_id: string, snap: Record<string, unknown>) => snaps.push(snap);
+  let adopted = 0;
+  assert.doesNotThrow(() => { adopted = sup2.adoptStashedSessions(); });
+  assert.equal(adopted, 1, "the session must still be adopted, not dropped");
+  assert.deepEqual(snaps[0]!.pendingSteering, [], "missing queue defaults to empty");
+  assert.equal(snaps[0]!.name, "old1", "a nameless parked session falls back to its id, not blank");
+});

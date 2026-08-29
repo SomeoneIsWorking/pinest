@@ -83,6 +83,24 @@ export interface SupervisorOptions {
   agentDir?: string;
 }
 
+/** Fill in fields a parked session may predate (a hot reload IS a version
+ * change). Returns the names of the fields that had to be defaulted — the
+ * caller logs them, so an older-build handoff is visible rather than silent. */
+function normaliseAdopted(id: string, s: LiveSession): string[] {
+  const missing: string[] = [];
+  const fix = <K extends keyof LiveSession>(key: K, value: LiveSession[K], ok: boolean): void => {
+    if (ok) return;
+    (s as any)[key] = value;
+    missing.push(String(key));
+  };
+  fix("pending", [], Array.isArray(s.pending));
+  fix("pendingSteering", [], Array.isArray(s.pendingSteering));
+  fix("name", s.name || id, typeof s.name === "string" && s.name.length > 0);
+  fix("cwd", s.cwd || process.cwd(), typeof s.cwd === "string" && s.cwd.length > 0);
+  fix("status", s.status === "working" ? "working" : "idle", s.status === "idle" || s.status === "working");
+  return missing;
+}
+
 export class Supervisor {
   ownerUid: string;
   callbacks: SupervisorCallbacks;
@@ -580,7 +598,18 @@ export class Supervisor {
     (globalThis as any)[RELOAD_STASH] = undefined;
     if (stash?.guard) clearTimeout(stash.guard);
     if (!stash?.sessions.size) return 0;
+    let adopted = 0;
     for (const [id, s] of stash.sessions) {
+      try {
+      // A parked session was built by the PREVIOUS BUILD of this module — a
+      // hot reload is precisely a version change, so fields added since then
+      // are missing. Normalise explicitly and say what was missing; the first
+      // version spread `s.pendingSteering` straight into a snapshot and took
+      // the whole host offline with "not iterable".
+      const missing = normaliseAdopted(id, s);
+      if (missing.length) {
+        debug(`[remote-code] reload: parked session ${id} came from an older build — defaulted ${missing.join(", ")}`);
+      }
       this.sessions.set(id, s);
       // Drop the previous instance's subscription (kept alive across the gap
       // by stashForReload) and attach this instance's.
@@ -611,12 +640,22 @@ export class Supervisor {
         contextUsage: this.usageWithCompactAt(s),
       });
       this.persistRow(id, { status: s.status === "working" ? "running" : "idle" });
+      adopted += 1;
       debug(`[remote-code] reload: adopted session ${id} (${s.name} @ ${s.cwd}, ${s.status})`);
       // Push history so the app thread refills immediately.
       this.getHistory(s).then((h) =>
         this.callbacks.broadcast({ type: "history", sessionId: id, history: h }),
       ).catch(() => { /* */ });
+      } catch (e) {
+        // One unusable parked session must not take remote control down with
+        // it — report it and leave the row resumable.
+        this.sessions.delete(id);
+        const reason = (e as Error)?.message ?? String(e);
+        debug(`[remote-code] reload: could NOT adopt ${id}: ${reason} — leaving it resumable`);
+        this.callbacks.broadcast({ type: "error", sessionId: id, message: `could not adopt ${id} after reload: ${reason}` });
+        try { this.registry?.upsert({ id, status: "idle" }); } catch { /* registry unusable */ }
+      }
     }
-    return stash.sessions.size;
+    return adopted;
   }
 }
