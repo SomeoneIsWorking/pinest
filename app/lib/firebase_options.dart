@@ -37,7 +37,7 @@ class DefaultFirebaseOptions {
     appId: '1:271491621267:web:3822b177db9e36a57b8866',
     messagingSenderId: '271491621267',
     projectId: 'pinest-app',
-    authDomain: 'pinest-app.firebaseapp.com',
+    authDomain: 'pinest.web.app',
     storageBucket: 'pinest-app.appspot.com',
   );
 
@@ -54,19 +54,19 @@ class DefaultFirebaseOptions {
   );
 
   static const FirebaseOptions ios = FirebaseOptions(
-    apiKey: 'FIREBASE_WEB_API_KEY_REMOVED_FROM_HISTORY',
-    appId: '1:271491621267:web:3822b177db9e36a57b8866',
+    apiKey: 'FIREBASE_IOS_API_KEY_REMOVED_FROM_HISTORY',
+    appId: '1:271491621267:ios:2a99ee36a80675287b8866',
     messagingSenderId: '271491621267',
     projectId: 'pinest-app',
-    storageBucket: 'pinest-app.appspot.com',
+    storageBucket: 'pinest-app.firebasestorage.app',
   );
 
   static const FirebaseOptions macos = FirebaseOptions(
-    apiKey: 'FIREBASE_WEB_API_KEY_REMOVED_FROM_HISTORY',
-    appId: '1:271491621267:web:3822b177db9e36a57b8866',
+    apiKey: 'FIREBASE_IOS_API_KEY_REMOVED_FROM_HISTORY',
+    appId: '1:271491621267:ios:2a99ee36a80675287b8866',
     messagingSenderId: '271491621267',
     projectId: 'pinest-app',
-    storageBucket: 'pinest-app.appspot.com',
+    storageBucket: 'pinest-app.firebasestorage.app',
   );
 
   static const FirebaseOptions windows = FirebaseOptions(

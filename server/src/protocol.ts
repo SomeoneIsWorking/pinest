@@ -105,7 +105,10 @@ export type ServerMessage =
   | { type: "session_deleted"; sessionId: string; deleted: boolean }
   | { type: "history"; sessionId: string; history: HistoryItem[];
       /** Page the client asked for / the server decided to push. */
-      cursor: number; hasMore: boolean; mode: "replace" | "older" }
+      cursor: number; hasMore: boolean; mode: "replace" | "older";
+      /** The transcript was rewritten (compact/clear), so the client must
+       * discard every previously loaded page before applying this one. */
+      reset?: boolean }
   | { type: "stream"; sessionId: string; text: string; status: string }
   | { type: "tool"; sessionId: string; tool: ToolEvent }
   | { type: "models"; sessionId?: string; models: ModelInfo[] }

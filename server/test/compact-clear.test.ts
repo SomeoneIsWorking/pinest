@@ -11,6 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Supervisor } from "../src/supervisor.ts";
+import { HostContextController, type HostContext } from "../src/host-context.ts";
 
 function makeSupervisor(sent: any[]) {
   return new Supervisor("test-uid", {
@@ -30,6 +31,86 @@ function liveSession(session: any) {
   };
 }
 
+function makeHostController(
+  context: HostContext | null,
+  sent: any[],
+  overrides: Partial<ConstructorParameters<typeof HostContextController>[0]> = {},
+) {
+  const calls = { clearedPending: 0, paths: [] as Array<string | null>, states: 0 };
+  const controller = new HostContextController({
+    getContext: () => context,
+    getSessionId: () => "host",
+    compactAtTokens: () => 400_000,
+    getHistory: async () => [],
+    clearPending: () => { calls.clearedPending++; },
+    upsertSession: (id, patch) => sent.push({ type: "upsert", id, patch }),
+    updateSessionPath: (_id, path) => { calls.paths.push(path); },
+    broadcastState: () => { calls.states++; },
+    broadcast: (message) => sent.push(message),
+    ...overrides,
+  });
+  return { controller, calls };
+}
+
+test("host compact refuses when ExtensionContext cannot compact", () => {
+  const sent: any[] = [];
+  const { controller } = makeHostController({}, sent);
+
+  assert.throws(() => controller.compact(), /host session cannot compact/);
+  assert.deepEqual(sent, [], "refused compaction reported success");
+});
+
+test("host clear refuses before mutating queue or reporting success", async () => {
+  const sent: any[] = [];
+  const { controller, calls } = makeHostController({}, sent);
+
+  await assert.rejects(controller.clear(), /host session cannot clear/);
+  assert.equal(calls.clearedPending, 0, "refused clear dropped pending messages");
+  assert.deepEqual(sent, [], "refused clear reported success");
+});
+
+test("host clear resets queue, snapshot, path, and every loaded history page", async () => {
+  const sent: any[] = [];
+  let cleared = 0;
+  const context: HostContext = {
+    newSession: () => { cleared++; },
+    getContextUsage: () => ({ tokens: 0, contextWindow: 1_000_000 }),
+    model: { provider: "opencode-go", id: "glm-5.3-flash", name: "GLM 5.3 Flash" },
+    sessionManager: { getSessionFile: () => "/session/new.jsonl" },
+  };
+  const { controller, calls } = makeHostController(context, sent);
+
+  await controller.clear();
+
+  assert.equal(cleared, 1);
+  assert.equal(calls.clearedPending, 1);
+  assert.deepEqual(calls.paths, ["/session/new.jsonl"]);
+  assert.equal(calls.states, 1);
+  const history = sent.find((message) => message.type === "history");
+  assert.deepEqual(history?.history, []);
+  assert.equal(history?.reset, true, "clear did not invalidate previously loaded pages");
+  assert.ok(sent.some((message) => message.type === "notice" && /clear/i.test(message.message)));
+  assert.ok(sent.some((message) => message.type === "upsert"
+    && message.patch.model === "opencode-go/glm-5.3-flash"
+    && message.patch.contextUsage.compactAt === 400_000));
+});
+
+test("host compaction completion resets history and refreshes usage", async () => {
+  const sent: any[] = [];
+  const { controller } = makeHostController({
+    getContextUsage: () => ({ tokens: 25, contextWindow: 100 }),
+  }, sent);
+
+  await controller.onCompacted({ trigger: "manual" });
+
+  const history = sent.find((message) => message.type === "history");
+  assert.equal(history?.reset, true, "compaction did not invalidate previously loaded pages");
+  assert.ok(sent.some((message) => message.type === "upsert"
+    && message.patch.contextUsage.tokens === 25));
+  assert.ok(sent.some((message) => message.type === "notice"
+    && message.message === "Context compacted (manual)"));
+});
+
 test("session_compact refreshes the transcript and reports it happened", async () => {
   const sent: any[] = [];
   const sup = makeSupervisor(sent);
@@ -45,7 +126,7 @@ test("session_compact refreshes the transcript and reports it happened", async (
   await new Promise((r) => setTimeout(r, 20)); // history push is async
 
   assert.equal(compacted, 1, "compact() was not called");
-  assert.ok(sent.some((m) => m.type === "history" && m.sessionId === "s1"),
+  assert.ok(sent.some((m) => m.type === "history" && m.sessionId === "s1" && m.reset === true),
     `no history push after compact; sent=${JSON.stringify(sent)}`);
   assert.ok(sent.some((m) => m.type === "notice" && /compact/i.test(m.message)),
     `no notice after compact; sent=${JSON.stringify(sent)}`);
@@ -90,6 +171,7 @@ test("session_new drops the old queue and pushes the empty transcript", async ()
   const hist = sent.filter((m) => m.type === "history" && m.sessionId === "s1");
   assert.ok(hist.length > 0, `no history push after clear; sent=${JSON.stringify(sent.map((m) => m.type))}`);
   assert.deepEqual(hist[hist.length - 1].history, [], "cleared session still reported a transcript");
+  assert.equal(hist[hist.length - 1].reset, true, "clear did not invalidate the client's loaded history pages");
   assert.ok(sent.some((m) => m.type === "notice" && /clear/i.test(m.message)), "no notice after clear");
 
   await sup.shutdownAll();

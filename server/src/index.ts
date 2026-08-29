@@ -35,6 +35,8 @@ import { resolveThinkingLevel, reportThinkingLevel } from "./thinking.ts";
 import { Type } from "typebox";
 import type { SessionRow, SessionSnapshot, ClientCommand, ServerMessage } from "./protocol.ts";
 import { installCrashReporter } from "./crash.ts";
+import { DEFAULT_MODEL } from "./product-defaults.ts";
+import { HostContextController } from "./host-context.ts";
 
 const REGISTRY_PATH = process.env.RC_REGISTRY_PATH
   || join(homedir(), ".pi", "agent", "remote-code", "sessions.json");
@@ -184,18 +186,6 @@ function stateMessage(): ServerMessage {
     tunnelUrl: _ws?.tunnelUrl ?? null,
     tunnelProvider: _ws?.tunnel?.provider ?? null,
   };
-}
-
-/** Context usage enriched with the effective auto-compact threshold. */
-function enrichedContextUsage(): Record<string, unknown> | undefined {
-  try {
-    const u = (_ctx as any)?.getContextUsage?.() as any;
-    if (!u) return undefined;
-    const at = loadConfig().compactAtTokens;
-    return { ...u, compactAt: at };
-  } catch {
-    return undefined;
-  }
 }
 
 function broadcastState(): void {
@@ -491,7 +481,7 @@ async function bootstrap(): Promise<void> {
   // NOTE: ExtensionContext has no getThinkingLevel(); the level lives on
   // _ctx.thinkingLevel (currentHostThinkingLevel).
   const initThinking = reportThinkingLevel(initModel, currentHostThinkingLevel());
-  const initCtx = enrichedContextUsage();
+  const initCtx = hostContext.contextUsage();
   const hostPiSessionPath: string | null = (_ctx?.sessionManager as any)?.getSessionFile?.()
     ?? (_ctx?.sessionManager as any)?.sessionFile ?? null;
   const hostName = deriveSessionName(process.cwd(), process.env.RC_NAME);
@@ -758,45 +748,11 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
       break;
     }
     case "session_compact": {
-      // compact/newSession live on ExtensionContext, NOT on ExtensionAPI
-      // (_pi has no .ctx property — the old (_pi as any)?.ctx?.… form was a
-      // silent no-op: clear/compact from the app did literally nothing).
-      // `?.compact?.()` had the same failure mode: an absent method meant
-      // silence. Refuse loudly instead — the client shows the error.
-      const compact = (_ctx as any)?.compact;
-      if (typeof compact !== "function") {
-        throw new Error("host session cannot compact (no compact() on the pi ExtensionContext)");
-      }
-      // ExtensionContext.compact() is fire-and-forget by contract: the result
-      // arrives as pi's session_compact / session_compact_failed events, which
-      // is where the usage + history refresh and the notice happen.
-      compact.call(_ctx);
+      hostContext.compact();
       break;
     }
     case "session_new": {
-      // A fresh session context makes any queued messages stale — drop them.
-      _pendingMessages = [];
-      _pendingSteering = [];
-      upsertSession(_sessionId, { pendingMessages: [], pendingSteering: [] });
-      await (_ctx as any)?.newSession?.();
-      // newSession() replaces the session but runs no agent turn, so no
-      // agent_end fires to refresh the usage — push the reset usage now,
-      // plus the new pi session path and model (fresh session = defaults).
-      const m = (_ctx as any)?.model;
-      const path: string | null = ((_ctx as any)?.sessionManager as any)?.getSessionFile?.()
-        ?? ((_ctx as any)?.sessionManager as any)?.sessionFile ?? null;
-      upsertSession(_sessionId, {
-        contextUsage: enrichedContextUsage(),
-        model: m ? `${m.provider}/${m.id}` : null,
-        modelName: m?.name,
-      });
-      _registry?.upsert({ id: _sessionId, piSessionPath: path });
-      broadcastState();
-      // The transcript is gone on the host — say so to the client, which
-      // otherwise keeps rendering the old thread and reads as "clear did
-      // nothing" (the usage badge dropping was the only tell).
-      await pushInteractiveHistory();
-      broadcast({ type: "notice", sessionId: _sessionId, message: "Session cleared" });
+      await hostContext.clear();
       break;
     }
     case "list_models":
@@ -862,12 +818,21 @@ async function getInteractiveHistory() {
   }
 }
 
-/** Push the host transcript as a replace-page. Anything that rewrites history
- * behind the client's back (compact, clear) MUST call this — the client only
- * ever redraws a thread it was sent. */
-async function pushInteractiveHistory(): Promise<void> {
-  broadcast({ type: "history", sessionId: _sessionId, ...pageHistory(await getInteractiveHistory()) });
-}
+const hostContext = new HostContextController({
+  getContext: () => _ctx as any,
+  getSessionId: () => _sessionId,
+  compactAtTokens: () => loadConfig().compactAtTokens,
+  getHistory: getInteractiveHistory,
+  clearPending: () => {
+    _pendingMessages = [];
+    _pendingSteering = [];
+    upsertSession(_sessionId, { pendingMessages: [], pendingSteering: [] });
+  },
+  upsertSession,
+  updateSessionPath: (id, path) => { _registry?.upsert({ id, piSessionPath: path }); },
+  broadcastState,
+  broadcast,
+});
 
 async function setModel(cmd: Extract<ClientCommand, { type: "model_set" }>): Promise<void> {
   const reg = (_ctx as any)?.modelRegistry;
@@ -882,7 +847,7 @@ async function setModel(cmd: Extract<ClientCommand, { type: "model_set" }>): Pro
   upsertSession(_sessionId, {
     model: `${cmd.provider}/${cmd.modelId}`,
     modelName: m.name,
-    contextUsage: enrichedContextUsage(),
+    contextUsage: hostContext.contextUsage(),
     thinkingLevel: reportThinkingLevel(m, currentHostThinkingLevel()),
   });
 }
@@ -1021,27 +986,14 @@ function bridge(pi: ExtensionAPI): void {
     segmenter.reset();
     _status = "idle";
     debug(`[remote-code] host status: working -> idle (agent_end)`);
-    upsertSession(_sessionId, { streamingText: null, status: "idle", contextUsage: enrichedContextUsage() });
-    maybeAutoCompactHost();
+    upsertSession(_sessionId, { streamingText: null, status: "idle", contextUsage: hostContext.contextUsage() });
+    hostContext.maybeAutoCompact();
     // Send updated history so the completed message sticks
     getInteractiveHistory().then((h) => broadcast({ type: "history", sessionId: _sessionId, ...pageHistory(h) }));
   });
 
-  // Compaction outcome (manual /compact from the app AND the threshold path).
-  // pi runs compaction outside an agent turn, so no agent_end follows it: with
-  // nothing subscribed here the app kept the pre-compaction transcript and
-  // context badge, which is exactly what "compact does nothing" looked like.
-  pi.on("session_compact", (event: any) => {
-    upsertSession(_sessionId, { contextUsage: enrichedContextUsage() });
-    void pushInteractiveHistory();
-    const trigger = event?.trigger ? ` (${event.trigger})` : "";
-    broadcast({ type: "notice", sessionId: _sessionId, message: `Context compacted${trigger}` });
-  });
-
-  pi.on("session_compact_failed", (event: any) => {
-    const why = event?.aborted ? "cancelled" : (event?.error || "unknown error");
-    broadcast({ type: "error", sessionId: _sessionId, message: `Compaction failed: ${why}` });
-  });
+  pi.on("session_compact", (event: any) => { void hostContext.onCompacted(event); });
+  pi.on("session_compact_failed", (event: any) => hostContext.onCompactFailed(event));
 
   pi.on("model_select", (event: any) => {
     const m = event?.model;
@@ -1076,22 +1028,7 @@ function bridge(pi: ExtensionAPI): void {
       });
   });
 
-  // Auto-compact the host session when the context crosses the threshold
-  // (remote-code config, live-changeable — no pi settings reload needed).
-  let _hostCompacting = false;
-  const maybeAutoCompactHost = (): void => {
-    if (_hostCompacting) return;
-    const at = loadConfig().compactAtTokens;
-    if (!at) return;
-    const usage = enrichedContextUsage() as any;
-    if (!usage?.tokens || usage.tokens < at) return;
-    _hostCompacting = true;
-    debug(`[remote-code] auto-compacting host session (${usage.tokens} >= ${at} tokens)`);
-    Promise.resolve((_ctx as any)?.compact?.())
-      .catch((e: unknown) => debug("[remote-code] auto-compact failed:", (e as Error).message))
-      .finally(() => { _hostCompacting = false; });
-  };
-  pi.on("agent_settled", () => maybeAutoCompactHost());
+  pi.on("agent_settled", () => hostContext.maybeAutoCompact());
 
   // Reload tears this instance down; the re-imported instance bootstraps
   // fresh (ws server, tunnel, registry reload). Spawned sessions were parked
@@ -1206,7 +1143,7 @@ const remoteCode = (pi: ExtensionAPI): void => {
           ctx?.ui?.notify?.(`[pinest] not a directory: ${cwd}`, "error");
           return;
         }
-        const model = modelParts.join(" ") || "opencode-go/glm-5.3-flash";
+        const model = modelParts.join(" ") || DEFAULT_MODEL;
 
         const id = randomUUID();
         await _supervisor!.spawn({ sessionId: id, cwd, model });

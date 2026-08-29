@@ -118,6 +118,7 @@ try {
     + `${compactNotice.length} notice(s), ${compactUsage.length} usage refresh(es)`);
   if (compacted >= before) throw new Error(`compaction did not shrink the transcript (${before} → ${compacted})`);
   if (!compactHistory.length) throw new Error("no history push after /compact — the app keeps rendering the pre-compaction thread");
+  if (compactHistory[compactHistory.length - 1].reset !== true) throw new Error("/compact history did not invalidate the client's previously loaded pages");
   if (!compactNotice.length) throw new Error("no notice after /compact — silence is what made it look like a no-op");
   if (!compactUsage.length) throw new Error("no context-usage refresh after /compact — the badge stays stale");
 
@@ -142,6 +143,7 @@ try {
   if ((fresh.session.messages ?? []).length !== 0) throw new Error("cleared session still has a transcript");
   if (!clearHistory.length) throw new Error("no history push after /clear — the app still shows the old thread");
   if (clearHistory[clearHistory.length - 1].history.length !== 0) throw new Error("history push after /clear was not empty");
+  if (clearHistory[clearHistory.length - 1].reset !== true) throw new Error("/clear history did not invalidate the client's previously loaded pages");
   if (!clearNotice.length) throw new Error("no notice after /clear");
   if (fresh.pending.length || fresh.pendingSteering.length) throw new Error("stale queue survived /clear");
 

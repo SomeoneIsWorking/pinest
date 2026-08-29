@@ -545,7 +545,7 @@ export class Supervisor {
     const u = this.usageWithCompactAt(s);
     this.callbacks.upsertSession(id, { ...(u ? { contextUsage: u } : {}) });
     void this.getHistory(s).then((h) =>
-      this.callbacks.broadcast({ type: "history", sessionId: id, ...pageHistory(h) }),
+      this.callbacks.broadcast({ type: "history", sessionId: id, ...pageHistory(h), reset: true }),
     );
     this.callbacks.broadcast({ type: "notice", sessionId: id, message: notice });
   }

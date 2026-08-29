@@ -28,7 +28,7 @@ as `/pinest.apk`. Consequences:
 Only the APK ships from CI. The web client is still deployed locally
 (AGENTS.md, I-015) — nothing here changes that.
 
-## Android app identity (found while making CI green)
+## Application identity (found while making CI green)
 
 The Android target had never been built from a clean checkout: the Google
 Services gradle plugin needs `google-services.json`, which was in no clone at
@@ -45,6 +45,14 @@ settling on **`com.barishamil.pinest`** (user's call):
   same class of value as the already-committed `firebase_options.dart`.
 - `DefaultFirebaseOptions.android` used the WEB app's `apiKey`/`appId`; it now
   carries the real Android ones.
+- Linux's GTK application ID, the iOS Runner bundle ID, and the macOS bundle ID
+  now use the same application identity. Apple test bundles use the derived
+  `com.barishamil.pinest.RunnerTests` identifier.
+- Firebase now has a matching Apple app
+  (`1:271491621267:ios:2a99ee36a80675287b8866`), which supplies the native iOS
+  and macOS options. The obsolete external Firebase registrations for
+  `com.bhamil.remote_pi_app` and `com.bhamil.remotePiApp` were removed rather
+  than retained as alternate identities.
 
 ## Android sign-in
 
@@ -56,22 +64,42 @@ failed sign-in prints its reason on the login screen instead of only reaching
 `debugPrint`. NOT yet exercised on a real device — no Android device is
 attached to this machine.
 
-## Signing (open item)
+## Signing (configured; first publication pending)
 
-Without keystore secrets the release APK is signed with the Flutter template's
-DEBUG key, and every runner has a different one — a new CI build then installs
-only after uninstalling the old app. The workflow logs a `::warning::` saying
-so, and uses a real keystore as soon as these repo secrets exist:
-`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`,
-`ANDROID_KEY_PASSWORD` (`app/android/app/build.gradle.kts` reads
-`android/key.properties` when present, else falls back to debug signing).
+The stable release keystore exists and all four repository secrets are now
+configured: `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
+`ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`. Its certificate SHA-256 is:
 
-## Verification
+`83:98:6D:18:59:DE:4C:E0:97:9A:E4:3C:9E:18:40:36:E4:9B:DE:3C:BC:A3:7E:F2:C8:EF:A9:3F:D7:51:A3:F5`
 
-- Workflow run on `main` (see the Actions tab) — analyze + test + APK build
-  green, `apk-latest` release carries `pinest.apk`.
-- `cd app && flutter analyze && flutter test` locally — clean.
-- A local `flutter build apk` on this machine is NOT the gate: this box has
-  only JDK 25/26 installed (the Android toolchain's jlink step fails on it) and
-  a container run left root-owned files in `app/build/`. CI's JDK 17 is the
-  reference environment.
+Release signing fails closed at both layers: the workflow refuses any missing
+secret and Gradle refuses a release task without `android/key.properties`.
+Pull requests receive no secrets and build only a debug APK; they neither name
+nor publish a release artifact. Non-PR release builds run
+`app/tools/verify_apk.py`, which refuses a package other than
+`com.barishamil.pinest` or a signer other than the recorded certificate before
+upload/publication.
+
+The first stable-key build is not published yet: it awaits the first push that
+triggers this workflow. The current `apk-latest` asset therefore is not
+evidence for the new signing path. An existing debug-signed installation will
+need one uninstall before installing the first stable-key APK; builds signed by
+the stable key after that are intended to update in place.
+
+## Verification state
+
+Verified before publication:
+
+- Firebase and platform registrations/configuration agree on
+  `com.barishamil.pinest`; the new Apple app is recorded above and obsolete
+  external registrations are gone.
+- The signing secrets are configured, Gradle and the workflow fail closed, and
+  the verifier pins package plus certificate rather than trusting a successful
+  build alone.
+- The verifier has negative controls for the old release certificate and a
+  deliberately wrong expected package; both are refused.
+
+Still required after the first push: cite the exact green workflow run,
+download the resulting `apk-latest` asset, run `app/tools/verify_apk.py` on
+that public asset, and record its artifact SHA-256. Until then this is
+implementation-ready, not a verified published release.

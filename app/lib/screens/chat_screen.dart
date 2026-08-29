@@ -3,16 +3,15 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:file_selector/file_selector.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import '../services/agent_service.dart';
+import '../services/attachment_selection.dart';
 import '../services/paste_bridge.dart';
-import '../services/picked_file.dart';
-import '../services/file_pick_bridge.dart' show pickUserFiles, readClipboardImages;
 import '../services/user_preferences.dart';
 import '../models/session.dart';
 import '../models/chat_item.dart';
+import '../models/tool_call_view.dart';
 
 class ChatScreen extends StatefulWidget {
   final String sessionId;
@@ -119,7 +118,9 @@ class _ChatScreenState extends State<ChatScreen> {
         if (!mounted || !_scroll.hasClients) return;
         final grown = _scroll.position.maxScrollExtent > maxBefore + 1;
         if (grown) {
-          _scroll.jumpTo(pixelsBefore + (_scroll.position.maxScrollExtent - maxBefore));
+          _scroll.jumpTo(
+            pixelsBefore + (_scroll.position.maxScrollExtent - maxBefore),
+          );
         } else {
           WidgetsBinding.instance.addPostFrameCallback((_) => correct());
         }
@@ -171,17 +172,19 @@ class _ChatScreenState extends State<ChatScreen> {
   /// attachment strip looks identical to "the listener never fired".
   void _onPasteWithoutImage(String detail) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text('Paste: $detail'),
-      duration: const Duration(seconds: 4),
-    ));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Paste: $detail'),
+        duration: const Duration(seconds: 4),
+      ),
+    );
   }
 
   void _onPastedImage(Uint8List bytes, String mimeType) {
     if (!mounted) return;
-    setState(() => _attachedImages.add(
-          PendingImage(mimeType: mimeType, bytes: bytes),
-        ));
+    setState(
+      () => _attachedImages.add(PendingImage(mimeType: mimeType, bytes: bytes)),
+    );
     // No snackbar: the attachment strip appearing above the input IS the
     // confirmation, and a snackbar here overlaps the text area.
   }
@@ -190,95 +193,51 @@ class _ChatScreenState extends State<ChatScreen> {
   /// text files are inlined into the message as fenced blocks; anything else
   /// is refused BY NAME (no silent drops).
   Future<void> _attachFiles() async {
-    final files = kIsWeb ? await pickUserFiles() : await _browseNativeFiles();
-    await _handlePicked(files);
+    try {
+      _applyAttachmentSelection(
+        prepareAttachments(
+          await pickAttachmentFiles(),
+          currentMessage: _input.text,
+        ),
+      );
+    } on StateError catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.message.toString())));
+    }
   }
 
   /// Explicit clipboard read (web): works even when paste events are
   /// swallowed by the framework, because a button tap is a user gesture.
   Future<void> _pasteClipboardImage() async {
-    final files = await readClipboardImages();
+    final files = await readClipboardAttachmentImages();
     if (files.isEmpty && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text(
-          'No image read from clipboard. On Firefox/Zen use ⌘V in the '
-          'message field instead.',
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'No image read from clipboard. On Firefox/Zen use ⌘V in the '
+            'message field instead.',
+          ),
         ),
-      ));
+      );
       return;
     }
-    await _handlePicked(files);
+    _applyAttachmentSelection(
+      prepareAttachments(files, currentMessage: _input.text),
+    );
   }
 
-  Future<List<PickedFile>> _browseNativeFiles() async {
-    const images = XTypeGroup(label: 'Images', mimeTypes: [
-      'image/png', 'image/jpeg', 'image/gif', 'image/webp',
-    ]);
-    const texts = XTypeGroup(label: 'Text', mimeTypes: ['text/*']);
-    final xfiles = await openFiles(acceptedTypeGroups: [images, texts]);
-    return [
-      for (final f in xfiles)
-        PickedFile(name: f.name, bytes: await f.readAsBytes()),
-    ];
-  }
-
-  /// Route picked files: images to the attachment strip, small text files
-  /// into the message body, everything else refused with a named snackbar.
-  Future<void> _handlePicked(List<PickedFile> files) async {
-    if (files.isEmpty || !mounted) return;
-    const textExt = {
-      'txt', 'md', 'markdown', 'json', 'yaml', 'yml', 'toml', 'csv', 'log',
-      'ts', 'tsx', 'js', 'jsx', 'mjs', 'py', 'rb', 'go', 'rs', 'c', 'h', 'cc',
-      'cpp', 'hpp', 'java', 'kt', 'swift', 'sh', 'bash', 'zsh', 'fish', 'html',
-      'css', 'scss', 'sql', 'xml', 'dart', 'ini', 'conf', 'env', 'lock',
-    };
-    final extraText = StringBuffer();
-    const imageExt = {'png', 'jpg', 'jpeg', 'gif', 'webp'};
-    for (final file in files) {
-      final name = file.name;
-      final ext = name.contains('.')
-          ? name.split('.').last.toLowerCase()
-          : '';
-      final bytes = file.bytes;
-      if (bytes.length > 10 * 1024 * 1024) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: Text('$name is too large (max 10 MB) — skipped')));
-        }
-        continue;
-      }
-      if (imageExt.contains(ext)) {
-        setState(() => _attachedImages.add(PendingImage(
-              mimeType: switch (ext) {
-                'png' => 'image/png',
-                'gif' => 'image/gif',
-                'webp' => 'image/webp',
-                _ => 'image/jpeg',
-              },
-              bytes: bytes,
-            )));
-      } else if (textExt.contains(ext) && bytes.length <= 512 * 1024) {
-        extraText
-          ..writeln()
-          ..writeln('--- file: $name ---')
-          ..writeln('```')
-          ..write(utf8.decode(bytes, allowMalformed: true))
-          ..writeln()
-          ..writeln('```');
-      } else {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: Text(
-                  '$name: unsupported type — images and text files only')));
-        }
-        continue;
-      }
-    }
-    if (extraText.isNotEmpty) {
-      final existing = _input.text;
-      _input.text = existing.isEmpty
-          ? extraText.toString().trimRight()
-          : '$existing\n${extraText.toString().trimRight()}';
+  void _applyAttachmentSelection(AttachmentSelection selection) {
+    if (!mounted) return;
+    setState(() {
+      _attachedImages.addAll(selection.images);
+      _input.text = selection.messageText;
+    });
+    for (final notice in selection.notices) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(notice)));
     }
   }
 
@@ -404,21 +363,12 @@ class _ChatScreenState extends State<ChatScreen> {
         // Show tools from history (expandable)
         if (tools != null) {
           for (final t in tools) {
-            final tm = Map<String, dynamic>.from(t as Map);
             items.add(
-              _ToolCallCard(
-                name: tm['name'] ?? 'tool',
-                args: tm['args'],
-                result: tm['result'] as String?,
-                // An image `read` returns a text note plus the image itself —
-                // history carries both, so a refresh no longer blanks it.
-                images: [
-                  for (final img in (tm['images'] as List? ?? const []))
-                    Map<String, dynamic>.from(img as Map),
-                ],
-                imagesOmitted: (tm['imagesOmitted'] as num?)?.toInt() ?? 0,
-                isError: tm['isError'] as bool? ?? false,
-                running: false,
+              _toolCallCard(
+                ToolCallView.fromPayload(
+                  Map<String, dynamic>.from(t as Map),
+                  source: ToolCallSource.history,
+                ),
               ),
             );
           }
@@ -437,19 +387,9 @@ class _ChatScreenState extends State<ChatScreen> {
         items.add(_bubble(segments[i], Alignment.centerLeft, null));
       }
       if (i < toolCalls.length) {
-        final tc = toolCalls[i];
         items.add(
-          _ToolCallCard(
-            name: tc['name'] ?? 'tool',
-            args: tc['args'],
-            result: tc['result'] as String?,
-            images:
-                (tc['images'] as List?)
-                    ?.map((i) => Map<String, dynamic>.from(i as Map))
-                    .toList() ??
-                const [],
-            isError: tc['isError'] ?? false,
-            running: tc['running'] ?? false,
+          _toolCallCard(
+            ToolCallView.fromPayload(toolCalls[i], source: ToolCallSource.live),
           ),
         );
       }
@@ -469,10 +409,12 @@ class _ChatScreenState extends State<ChatScreen> {
               ? null
               : () {
                   svc.clearQueue(s);
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                    content: Text('Queue cleared'),
-                    duration: Duration(seconds: 2),
-                  ));
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Queue cleared'),
+                      duration: Duration(seconds: 2),
+                    ),
+                  );
                 },
           child: _bubble(
             text,
@@ -490,6 +432,16 @@ class _ChatScreenState extends State<ChatScreen> {
       children: items,
     );
   }
+
+  Widget _toolCallCard(ToolCallView tool) => _ToolCallCard(
+    name: tool.name,
+    args: tool.args,
+    result: tool.result,
+    images: tool.images,
+    imagesOmitted: tool.imagesOmitted,
+    isError: tool.isError,
+    running: tool.running,
+  );
 
   Widget _toolbar(
     BuildContext context,
@@ -522,13 +474,14 @@ class _ChatScreenState extends State<ChatScreen> {
         onTap: (working || s == null)
             ? null
             : () => _confirmContextAction(
-                  context,
-                  title: 'Compact context?',
-                  body: 'The conversation so far is replaced by a summary. '
-                      'The full transcript is not recoverable from the app.',
-                  action: 'Compact',
-                  onConfirm: () => svc.compact(s),
-                ),
+                context,
+                title: 'Compact context?',
+                body:
+                    'The conversation so far is replaced by a summary. '
+                    'The full transcript is not recoverable from the app.',
+                action: 'Compact',
+                onConfirm: () => svc.compact(s),
+              ),
       ),
       BarAction(
         label: '/clear',
@@ -536,13 +489,14 @@ class _ChatScreenState extends State<ChatScreen> {
         onTap: (working || s == null)
             ? null
             : () => _confirmContextAction(
-                  context,
-                  title: 'Clear session?',
-                  body: 'Starts a fresh session with an empty context. '
-                      'The current conversation is dropped from this session.',
-                  action: 'Clear',
-                  onConfirm: () => svc.newSession(s),
-                ),
+                context,
+                title: 'Clear session?',
+                body:
+                    'Starts a fresh session with an empty context. '
+                    'The current conversation is dropped from this session.',
+                action: 'Clear',
+                onConfirm: () => svc.newSession(s),
+              ),
       ),
       if (!working && s != null && !s.isHost)
         BarAction(
@@ -677,8 +631,11 @@ class _ChatScreenState extends State<ChatScreen> {
                         shape: BoxShape.circle,
                       ),
                       padding: const EdgeInsets.all(2),
-                      child: const Icon(Icons.close,
-                          size: 14, color: Colors.white),
+                      child: const Icon(
+                        Icons.close,
+                        size: 14,
+                        color: Colors.white,
+                      ),
                     ),
                   ),
                 ),
@@ -708,7 +665,9 @@ class _ChatScreenState extends State<ChatScreen> {
                         'Reconnecting… ${svc.outboxCount} message(s) will '
                         'send automatically',
                         style: TextStyle(
-                            fontSize: 11, color: Colors.orange.shade700),
+                          fontSize: 11,
+                          color: Colors.orange.shade700,
+                        ),
                       ),
                     ),
                   if (_attachedImages.isNotEmpty) _attachmentStrip(),
@@ -821,6 +780,7 @@ class _ChatScreenState extends State<ChatScreen> {
     bool queued = false,
     bool steering = false,
     List<PendingImage> images = const [],
+
     /// History image attachments (base64 maps from the server) — the in-memory
     /// [images] form dies on refresh; this one survives it.
     List<Map<String, dynamic>> historyImages = const [],
@@ -904,7 +864,8 @@ class _ChatScreenState extends State<ChatScreen> {
                   children: [
                     for (final img in historyImages)
                       InkWell(
-                        onTap: () => showImageDialog(context, img['data'] as String),
+                        onTap: () =>
+                            showImageDialog(context, img['data'] as String),
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(6),
                           child: Image.memory(
@@ -1297,6 +1258,7 @@ class _ToolCallCard extends StatefulWidget {
   final dynamic args;
   final String? result;
   final List<Map<String, dynamic>> images;
+
   /// Images the server left out of this history payload. Shown as a count —
   /// an image that is not there must say so rather than just be absent.
   final int imagesOmitted;
@@ -1469,7 +1431,8 @@ class _ToolCallCardState extends State<_ToolCallCard> {
   }
 
   /// Full-size view of a tool-returned image (tap the thumbnail).
-  void _showImage(BuildContext context, String b64) => showImageDialog(context, b64);
+  void _showImage(BuildContext context, String b64) =>
+      showImageDialog(context, b64);
 
   static const _summaryMaxChars = 160;
 

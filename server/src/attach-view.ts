@@ -15,6 +15,7 @@
  */
 import { Container, Text, Input } from "@earendil-works/pi-tui";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import { extractText } from "./logic.ts";
 
 const MAX_TRANSCRIPT_LINES = 200;
 
@@ -156,10 +157,10 @@ function renderTranscript(
   const out: string[] = [];
   for (const m of messages ?? []) {
     if (m.role === "user") {
-      const text = extractText(m);
+      const text = extractText(m.content);
       out.push(`${fg("cyan", "you")}: ${truncate(text, 500)}`);
     } else if (m.role === "assistant") {
-      const text = extractText(m);
+      const text = extractText(m.content);
       if (text) out.push(`${fg("green", "assistant")}: ${truncate(text, 800)}`);
       // tool calls / results are nested; surface briefly if present
       const toolParts = (m.content ?? []).filter((p: any) => p?.type === "tool_use" || p?.type === "tool_result");
@@ -173,17 +174,6 @@ function renderTranscript(
     out.push(`${fg("green", "assistant")}: ${truncate(pending, 800)}`);
   }
   return out.length ? out : [fg("muted", "(no messages yet — type below to prompt this session)")];
-}
-
-function extractText(m: any): string {
-  if (typeof m.content === "string") return m.content;
-  if (Array.isArray(m.content)) {
-    return m.content
-      .filter((p: any) => p?.type === "text")
-      .map((p: any) => p.text ?? "")
-      .join("");
-  }
-  return "";
 }
 
 function truncate(s: string | undefined, n: number): string {
