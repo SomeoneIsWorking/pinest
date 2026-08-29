@@ -34,6 +34,13 @@ pushes never deployed anything. Fix: `.github/workflows/deploy-web.yml`
 4. **Bash cards show the command.** `_ToolCallCard` renders the bash
    `command` (first 120 chars, newlines joined with ` ; `) in place of the
    bare tool name; full args remain in the expandable body.
+5. **Reload syntax gate (host resilience).** The interrupted-session incident
+   showed a mid-edit broken extension source gets hot-reloaded and stops the
+   host session. `firstSyntaxError` (`server/src/index.ts`) now
+   `node --check`s every watched .ts/.js source before triggering the live
+   reload; a broken state is skipped (logged) and the next file change
+   retries. Tests: `server/test/reload.test.ts` (good → null, broken → path,
+   no checkable files → null).
 
 ## Verification
 
