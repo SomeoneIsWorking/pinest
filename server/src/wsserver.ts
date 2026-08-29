@@ -72,6 +72,12 @@ export class WSServer {
         return;
       }
       if (!ws.authed) return;
+      // Liveness probe from the client: answered at the socket layer so it
+      // works even while sessions are mid-turn.
+      if (msg.type === "ping") {
+        this.send(ws, { type: "pong" });
+        return;
+      }
       if (msg.type === "command" && this.handlers.command) {
         this.handlers.command(msg.cmd);
       }

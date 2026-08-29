@@ -270,6 +270,28 @@ class _ChatScreenState extends State<ChatScreen> {
 
     return Column(
       children: [
+        if (!svc.wsConnected)
+          Material(
+            color: Colors.orange.withAlpha(60),
+            child: const Padding(
+              padding: EdgeInsets.symmetric(vertical: 4),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  SizedBox(
+                    width: 12,
+                    height: 12,
+                    child: CircularProgressIndicator(strokeWidth: 1.5),
+                  ),
+                  SizedBox(width: 8),
+                  Text(
+                    'Connection lost — reconnecting…',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+          ),
         _toolbar(context, svc, s, working, models),
         Expanded(child: _messageList(history, streaming, toolCalls, svc, s)),
         if (history.isEmpty && streaming == null)

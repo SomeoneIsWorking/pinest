@@ -76,6 +76,7 @@ export interface SessionSnapshot {
 
 export type ServerMessage =
   | { type: "authed" }
+  | { type: "pong" }
   | { type: "error"; message: string; sessionId?: string }
   | { type: "state"; online: boolean; hostname: string; homePath?: string; activeSessionId?: string | null; sessions: SessionSnapshot[]; registry: SessionRow[]; tunnelUrl?: string | null; tunnelProvider?: string | null }
   | { type: "session_list"; sessions: SessionRow[] }
@@ -96,6 +97,7 @@ export interface UserImage {
 }
 
 export type ClientCommand =
+  | { type: "ping" }
   | { type: "user_message"; sessionId?: string; text: string; id?: string; images?: UserImage[]; deliverAs?: "steer" | "followUp" }
   | { type: "cancel"; sessionId?: string }
   | { type: "model_set"; sessionId?: string; provider: string; modelId: string }
