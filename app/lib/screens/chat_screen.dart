@@ -336,9 +336,9 @@ class _ChatScreenState extends State<ChatScreen> {
               _ToolCallCard(
                 name: tm['name'] ?? 'tool',
                 args: tm['args'],
-                result: null,
+                result: tm['result'] as String?,
                 images: const [],
-                isError: false,
+                isError: tm['isError'] as bool? ?? false,
                 running: false,
               ),
             );
