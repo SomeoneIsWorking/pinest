@@ -116,6 +116,7 @@ class AgentService extends ChangeNotifier {
   /// True once the WebSocket handshake AND auth both succeeded and the
   /// socket has not died since. UI shows a reconnecting banner while false.
   bool get wsConnected => _connected;
+  int get outboxCount => _outbox.length;
 
   Future<String> _token() async => (await _auth!.user!.getIdToken())!;
 
@@ -201,6 +202,13 @@ class AgentService extends ChangeNotifier {
       case 'authed':
         _connected = true;
         _reconnectDelay = 2; // backoff satisfied — reset
+        if (_outbox.isNotEmpty) {
+          final pending = List<Map<String, dynamic>>.from(_outbox);
+          _outbox.clear();
+          for (final cmd in pending) {
+            _ws?.send({'type': 'command', 'cmd': cmd});
+          }
+        }
         break;
       case 'state':
         _online = msg['online'] ?? false;
@@ -346,7 +354,17 @@ class AgentService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// user_message commands submitted while the socket is down. They are the
+  /// user's words — dropping them silently is what made steers "get lost".
+  /// Flushed in order on reconnect ('authed').
+  final List<Map<String, dynamic>> _outbox = [];
+
   void _send(Map<String, dynamic> cmd) {
+    if (cmd['type'] == 'user_message' && !_connected) {
+      if (_outbox.length < 50) _outbox.add(cmd);
+      notifyListeners();
+      return;
+    }
     _ws?.send({'type': 'command', 'cmd': cmd});
   }
 
