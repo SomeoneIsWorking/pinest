@@ -89,3 +89,13 @@ like pi's own queue in the terminal.
   instead of cropping on narrow screens; tool-card summaries capped at 160
   chars, single line, ellipsized — long bash calls no longer wrap into tall
   blocks.
+
+## Follow-up 4: deterministic clipboard paste (da9f887)
+
+The paste-EVENT listener (capture phase) was deployed but still didn't deliver
+images on desktop; its failure is unobservable from the harness. Added the
+deterministic path: attach 📎 opens a menu — Browse files… / **Paste image
+from clipboard** — the latter reading `navigator.clipboard.read()` via
+package:web (dart:html has no Clipboard bindings). A button tap is a user
+gesture, so the permission prompt flow works on desktop Chrome/Edge/Safari.
+Empty clipboard / permission denial → named snackbar. Event listener kept.
