@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:file_selector/file_selector.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import '../services/agent_service.dart';
@@ -109,6 +110,72 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() => _attachedImages.add(
           PendingImage(mimeType: mimeType, bytes: bytes),
         ));
+  }
+
+  /// Attach files via the platform picker. Images become image attachments;
+  /// small text files are inlined into the message as fenced blocks; anything
+  /// else is refused BY NAME (no silent drops).
+  Future<void> _attachFiles() async {
+    const images = XTypeGroup(label: 'Images', mimeTypes: [
+      'image/png', 'image/jpeg', 'image/gif', 'image/webp',
+    ]);
+    const texts = XTypeGroup(label: 'Text', mimeTypes: ['text/*']);
+    final files = await openFiles(acceptedTypeGroups: [images, texts]);
+    if (files.isEmpty || !mounted) return;
+    const imageExt = {'png', 'jpg', 'jpeg', 'gif', 'webp'};
+    const textExt = {
+      'txt', 'md', 'markdown', 'json', 'yaml', 'yml', 'toml', 'csv', 'log',
+      'ts', 'tsx', 'js', 'jsx', 'mjs', 'py', 'rb', 'go', 'rs', 'c', 'h', 'cc',
+      'cpp', 'hpp', 'java', 'kt', 'swift', 'sh', 'bash', 'zsh', 'fish', 'html',
+      'css', 'scss', 'sql', 'xml', 'dart', 'ini', 'conf', 'env', 'lock',
+    };
+    final extraText = StringBuffer();
+    for (final file in files) {
+      final name = file.name;
+      final ext = name.contains('.')
+          ? name.split('.').last.toLowerCase()
+          : '';
+      final bytes = await file.readAsBytes();
+      if (bytes.length > 10 * 1024 * 1024) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text('$name is too large (max 10 MB) — skipped')));
+        }
+        continue;
+      }
+      if (imageExt.contains(ext)) {
+        setState(() => _attachedImages.add(PendingImage(
+              mimeType: switch (ext) {
+                'png' => 'image/png',
+                'gif' => 'image/gif',
+                'webp' => 'image/webp',
+                _ => 'image/jpeg',
+              },
+              bytes: bytes,
+            )));
+      } else if (textExt.contains(ext) && bytes.length <= 512 * 1024) {
+        extraText
+          ..writeln()
+          ..writeln('--- file: $name ---')
+          ..writeln('```')
+          ..write(utf8.decode(bytes, allowMalformed: true))
+          ..writeln()
+          ..writeln('```');
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text(
+                  '$name: unsupported type — images and text files only')));
+        }
+        continue;
+      }
+    }
+    if (extraText.isNotEmpty) {
+      final existing = _input.text;
+      _input.text = existing.isEmpty
+          ? extraText.toString().trimRight()
+          : '$existing\n${extraText.toString().trimRight()}';
+    }
   }
 
   void _send() {
@@ -416,6 +483,11 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
             const SizedBox(width: 8),
+            IconButton(
+              icon: const Icon(Icons.attach_file),
+              tooltip: 'Attach files (images, or text files inlined)',
+              onPressed: _attachFiles,
+            ),
             // Mid-turn delivery mode: bolt = steer (delivered before the next
             // LLM call), low_priority = queue as follow-up (after the turn).
             // Irrelevant when idle, so only shown while working.
