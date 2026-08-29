@@ -67,8 +67,13 @@
       "public": "build/web",
       "redirects": [
         {
-          "source": "/**",
-          "destination": "https://pinest.web.app/:splat",
+          "source": "/",
+          "destination": "https://pinest.web.app/",
+          "type": 301
+        },
+        {
+          "source": "/:path*",
+          "destination": "https://pinest.web.app/:path",
           "type": 301
         }
       ]
