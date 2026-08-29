@@ -402,7 +402,7 @@ class _ChatScreenState extends State<ChatScreen> {
           Alignment.centerRight,
           Colors.orange.withAlpha(40),
           queued: true,
-          steering: svc.wasSteered(widget.sessionId, text),
+          steering: s?.pendingSteering.contains(text) ?? false,
         ),
       );
     }

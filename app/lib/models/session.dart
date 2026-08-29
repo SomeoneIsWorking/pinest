@@ -21,6 +21,9 @@ class Session {
   /// Messages submitted but not yet delivered into the session — the
   /// server-authoritative queue. The client only renders it.
   final List<String> pendingMessages;
+  /// Subset of [pendingMessages] the server accepted as steers — they land at
+  /// the end of the assistant's current step, not at the end of the turn.
+  final List<String> pendingSteering;
 
   Session({
     required this.id,
@@ -39,6 +42,7 @@ class Session {
     required this.createdAt,
     this.isResumable = false,
     this.pendingMessages = const [],
+    this.pendingSteering = const [],
   });
 
   bool get isWorking => status == 'working';

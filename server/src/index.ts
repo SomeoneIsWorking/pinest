@@ -85,6 +85,8 @@ let _turnStarted = false;
 // not yet delivered into the session). The app renders this instead of doing
 // its own bookkeeping — it must behave like the pi terminal's queue.
 let _pendingMessages: string[] = [];
+/** Subset of _pendingMessages submitted as steers (see protocol note). */
+let _pendingSteering: string[] = [];
 
 /** Serialized user-message submission queue.
  *
@@ -706,7 +708,11 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
       // history (the client clears its "queued" badge by matching text).
       const text = cmd.text.trim().length === 0 ? "[image]" : cmd.text;
       _pendingMessages = pushPending(_pendingMessages, text);
-      upsertSession(_sessionId, { pendingMessages: [..._pendingMessages] });
+      if (deliverAs === "steer") _pendingSteering = pushPending(_pendingSteering, text);
+      upsertSession(_sessionId, {
+        pendingMessages: [..._pendingMessages],
+        pendingSteering: [..._pendingSteering],
+      });
       _submitter?.submit(text, images, deliverAs);
       break;
     }
@@ -733,7 +739,8 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
     case "session_new": {
       // A fresh session context makes any queued messages stale — drop them.
       _pendingMessages = [];
-      upsertSession(_sessionId, { pendingMessages: [] });
+      _pendingSteering = [];
+      upsertSession(_sessionId, { pendingMessages: [], pendingSteering: [] });
       await (_ctx as any)?.newSession?.();
       // newSession() replaces the session but runs no agent turn, so no
       // agent_end fires to refresh the usage — push the reset usage now,
@@ -898,7 +905,11 @@ function bridge(pi: ExtensionAPI): void {
     setTimeout(() => {
       if (delivered && _pendingMessages.includes(delivered)) {
         _pendingMessages = popPending(_pendingMessages, delivered);
-        upsertSession(_sessionId, { pendingMessages: [..._pendingMessages] });
+        _pendingSteering = popPending(_pendingSteering, delivered);
+        upsertSession(_sessionId, {
+          pendingMessages: [..._pendingMessages],
+          pendingSteering: [..._pendingSteering],
+        });
       }
       getInteractiveHistory().then((h) =>
         broadcast({ type: "history", sessionId: _sessionId, history: h }),

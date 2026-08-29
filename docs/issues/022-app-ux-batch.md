@@ -56,8 +56,16 @@ finishing.
 
 **Fix:** the badge no longer calls a steer "queued". It shows `steering` with a
 bolt and the tooltip "delivered when the current step ends"; follow-ups keep
-`queued` / "delivered when the turn ends". The client tracks which pending
-texts it sent as steers and prunes them as the server drops them from pending.
+`queued` / "delivered when the turn ends".
+
+**First attempt was wrong:** the client tracked which texts it had sent as
+steers. That state dies with the page, so after a reload — or on a second
+device — every pending steer read as "queued" again, which is exactly how the
+user saw it still failing. The queue is server-authoritative (the client is a
+terminal); so is the mode. `SessionSnapshot.pendingSteering` now reports the
+subset of `pendingMessages` submitted as steers, maintained on both paths
+(host session in `index.ts`, spawned sessions in `supervisor.ts`) and cleared
+when the message is delivered. Pinned by `teardown.test.ts`.
 
 ## 022e — Tool-returned images were invisible (fixed)
 
