@@ -144,3 +144,32 @@ test("a parked session nobody adopts is ABORTED at the deadline, not left runnin
     else process.env.RC_ADOPT_DEADLINE_MS = prev;
   }
 });
+
+// ── A steer must be DISTINGUISHABLE while it waits (I-022d) ────────────────
+// pi delivers a steer at the end of the assistant's current step, so it sits
+// in the pending list for a while. The client showed every pending message as
+// "queued", which reads as ignored. Which ones are steers is the SERVER's
+// answer — client-side bookkeeping loses it on a page reload.
+test("pending steers are reported separately from queued follow-ups", async () => {
+  const sup = makeSupervisor();
+  const snaps: Array<Record<string, unknown>> = [];
+  (sup as any).callbacks.upsertSession = (_id: string, snap: Record<string, unknown>) => {
+    snaps.push(snap);
+  };
+  const sent: string[] = [];
+  (sup as any).sessions.set("s1", {
+    session: { abort: async () => {}, dispose: () => {} },
+    cwd: process.cwd(), status: "idle", name: "s", model: null, modelName: null,
+    _streamingText: null, _compacting: false,
+    pending: [], pendingSteering: [], turnStarted: false,
+    submitter: { submit: (t: string) => { sent.push(t); } },
+  });
+
+  await sup.handleSessionCommand({ type: "user_message", sessionId: "s1", text: "steer me", deliverAs: "steer" });
+  await sup.handleSessionCommand({ type: "user_message", sessionId: "s1", text: "later please", deliverAs: "followUp" });
+
+  const last = snaps[snaps.length - 1]!;
+  assert.deepEqual(last.pendingMessages, ["steer me", "later please"], "both are pending");
+  assert.deepEqual(last.pendingSteering, ["steer me"], "only the steer is reported as steering");
+  assert.deepEqual(sent, ["steer me", "later please"], "both must actually be submitted");
+});
