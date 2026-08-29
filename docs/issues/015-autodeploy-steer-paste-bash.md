@@ -150,3 +150,24 @@ the socket layer in wsserver.ts; protocol gains ping/pong) with 60s inbound
 staleness → force close; onClose → automatic re-dial with 2→30s backoff,
 reset on `authed`; `wsConnected` getter + "Connection lost — reconnecting…"
 banner in the chat screen.
+
+## Follow-up 7: THE steer-loss root cause + continue-on-reload (4c47c73)
+
+**Spawned sessions could never steer.** `handleSessionCommand` called
+`session.prompt(text)` with no `streamingBehavior`; when the session was
+working, pi threw "Agent is already processing" and the command handler
+swallowed it. Every steer to a spawned session died instantly — the host
+session's path was fixed, but spawned sessions (the ones the app drives)
+never were. Fix: shared serialized submitter (`server/src/submit.ts`),
+`prompt(text, { streamingBehavior, images })`, per-session pending queue +
+turnStarted gate, pending popped at message_end with history refresh.
+
+**Continue on hot reload**: teardown(reason=reload) writes
+`remote-code/reload-resume.json` (live sessions + undelivered pending);
+bootstrap resumes each via `supervisor.resume` and re-submits pending as
+steers, then deletes the marker. Host restarts keep the manual-resume
+contract.
+
+**WS liveness**: server answers `ping`→`pong`; client awaits `channel.ready`
+before declaring open, heartbeats every 20s, force-recycles a socket silent
+>60s, reconnects with backoff (2→30s) reset on authed. `wsConnected` exposed.
