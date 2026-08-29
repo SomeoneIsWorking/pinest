@@ -35,6 +35,19 @@ export function extractText(content: unknown): string {
   return "";
 }
 
+/** Extract the text of a user message for pending-queue matching. */
+export function extractUserText(m: unknown): string {
+  const c = (m as any)?.content;
+  if (typeof c === "string") return c;
+  if (Array.isArray(c)) {
+    return c
+      .filter((p: any) => p?.type === "text" && p.text)
+      .map((p: any) => p.text)
+      .join("\n");
+  }
+  return "";
+}
+
 /**
  * Server-side pending-message queue (the authority for the app's "queued"
  * bubbles — the client is a dumb terminal). pushPending on submit;
