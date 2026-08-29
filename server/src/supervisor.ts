@@ -531,8 +531,12 @@ export class Supervisor {
   stashForReload(): void {
     const sessions = new Map<string, LiveSession>();
     for (const [id, s] of this.sessions) {
-      try { s.unsub?.(); } catch { /* */ }
-      s.unsub = null;
+      // Do NOT unsubscribe here. The old handler mutates THIS SAME
+      // LiveSession object, so keeping it attached across the handoff gap
+      // means an agent_end that lands between park and adopt still flips
+      // s.status to idle. Dropping the subscription froze sessions at
+      // "working" forever — the app showed a busy session doing nothing.
+      // Its broadcasts go to the stopped WS server, which is a no-op.
       s.submitter = null; // re-wired by the adopting instance
       sessions.set(id, s);
     }
@@ -578,15 +582,36 @@ export class Supervisor {
     if (!stash?.sessions.size) return 0;
     for (const [id, s] of stash.sessions) {
       this.sessions.set(id, s);
-      // A session parked mid-run is STILL mid-run — keep the gate closed.
-      this.wire(id, s, { resumeTurn: s.status === "working" });
+      // Drop the previous instance's subscription (kept alive across the gap
+      // by stashForReload) and attach this instance's.
+      try { s.unsub?.(); } catch { /* already gone */ }
+      s.unsub = null;
+      // ASK THE SESSION, don't trust the parked flag: a run that ended during
+      // the handoff would otherwise leave the app showing "working" forever.
+      const idle = (s.session as any)?.isIdle;
+      const working = typeof idle === "boolean" ? !idle : s.status === "working";
+      debug(`[remote-code] reload: ${id} status from ${typeof idle === "boolean" ? "session.isIdle" : "the parked flag (session.isIdle unavailable)"} → ${working ? "working" : "idle"}`);
+      s.status = working ? "working" : "idle";
+      // A session still mid-run keeps its submission gate closed.
+      this.wire(id, s, { resumeTurn: working });
+      // The new instance starts with an EMPTY snapshot map, so this must carry
+      // the session's IDENTITY too. Reporting only status/model is what made
+      // adopted sessions show up as "session" with a blank workspace.
       this.callbacks.upsertSession(id, {
-        status: s.status === "working" ? "working" : "idle",
+        name: s.name,
+        cwd: s.cwd,
+        status: s.status,
         model: s.model,
         modelName: s.modelName,
+        isInteractive: false,
+        isHost: false,
+        resumed: true,
+        pendingMessages: [...s.pending],
+        pendingSteering: [...s.pendingSteering],
         contextUsage: this.usageWithCompactAt(s),
       });
-      debug(`[remote-code] reload: adopted session ${id} (${s.status}) — its run never stopped`);
+      this.persistRow(id, { status: s.status === "working" ? "running" : "idle" });
+      debug(`[remote-code] reload: adopted session ${id} (${s.name} @ ${s.cwd}, ${s.status})`);
       // Push history so the app thread refills immediately.
       this.getHistory(s).then((h) =>
         this.callbacks.broadcast({ type: "history", sessionId: id, history: h }),
