@@ -58,3 +58,29 @@ finishing.
 bolt and the tooltip "delivered when the current step ends"; follow-ups keep
 `queued` / "delivered when the turn ends". The client tracks which pending
 texts it sent as steers and prunes them as the server drops them from pending.
+
+## 022e — Tool-returned images were invisible (fixed)
+
+**Symptom:** reading an image showed only the text note `Read image file
+[image/png]`; the picture never appeared.
+
+**Cause:** two gaps, one on each side.
+1. `messagesToHistory` built tool cards from the `toolCall` part and the
+   result's TEXT only — `extractText` filters to `type === "text"`, so the
+   image part was dropped. The live event carried images, but the next history
+   refresh (message_start, agent_end, reconnect, session switch) replaced that
+   card with an image-less one, which is almost immediately.
+2. The app rendered `images` only inside the `if (_expanded)` block, so even a
+   live card hid the picture behind the expander.
+
+**Fix:** history carries tool-result images (`images[]` on each tool), capped
+at 2 per result and 8 per payload, newest first — a transcript full of image
+reads must not push tens of MB through the tunnel on every refresh. Whatever
+the cap drops is REPORTED as `imagesOmitted`, and the card renders "N image(s)
+not shown — older history" rather than silently showing nothing. The app now
+shows tool images inline (240px, always visible) and opens a zoomable full-size
+view on tap.
+
+**Evidence:** `logic.test.ts` — an image result reaches the app; a text-only
+result stays imageless; over budget, carried + omitted equals the total and the
+NEWEST image is the one kept.

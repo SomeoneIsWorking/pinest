@@ -180,3 +180,40 @@ test("pending queue: popping unknown text is a no-op, not a silent drop", () => 
   assert.deepEqual(popPending(q, "never-submitted"), ["a"]);
   assert.deepEqual(popPending([], "x"), []);
 });
+
+// ── Tool-result images survive a history refresh (I-023) ───────────────────
+// An image `read` returns a text note PLUS an image part. History dropped the
+// image part, so the picture vanished the moment the app refreshed history.
+test("messagesToHistory carries tool-result images, and reports what it drops", () => {
+  const img = (n: string) => ({ type: "image", data: `AAA${n}`, mimeType: "image/png" });
+  const call = (id: string) => ({
+    role: "assistant",
+    content: [{ type: "toolCall", id, name: "read", arguments: { path: `/p/${id}.png` } }],
+  });
+  const result = (id: string, images: unknown[]) => ({
+    role: "toolResult", toolCallId: id,
+    content: [{ type: "text", text: "Read image file [image/png]" }, ...images],
+  });
+
+  const one = messagesToHistory([call("a"), result("a", [img("1")])]);
+  const tool = one[0]!.tools[0]!;
+  assert.equal(tool.images?.length, 1, "the image part must reach the app");
+  assert.equal(tool.images?.[0]?.data, "AAA1");
+  assert.equal(tool.imagesOmitted, undefined, "nothing was dropped, so nothing may be claimed dropped");
+
+  // A text-only result must not sprout an images array with content.
+  const plain = messagesToHistory([call("b"), result("b", [])]);
+  assert.deepEqual(plain[0]!.tools[0]!.images, [], "no images means no images");
+
+  // Over budget: newest kept, older ones REPORT their omission.
+  const many: unknown[] = [];
+  for (let i = 0; i < 12; i++) many.push(call(`c${i}`), result(`c${i}`, [img(String(i))]));
+  const big = messagesToHistory(many);
+  const carried = big.flatMap((h) => h.tools).reduce((n, t) => n + (t.images?.length ?? 0), 0);
+  const omitted = big.flatMap((h) => h.tools).reduce((n, t) => n + (t.imagesOmitted ?? 0), 0);
+  assert.equal(carried, 8, `budget is 8 images per payload, got ${carried}`);
+  assert.equal(carried + omitted, 12, "every image is either carried or counted as omitted");
+  // The NEWEST cards are the ones that keep their image.
+  const last = big[big.length - 1]!.tools[0]!;
+  assert.equal(last.images?.length, 1, "the most recent image must be the one kept");
+});
