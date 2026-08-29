@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -38,12 +39,18 @@ class _ChatScreenState extends State<ChatScreen> {
   Session? _session(AgentService svc) =>
       svc.sessions.where((s) => s.id == widget.sessionId).firstOrNull;
 
+  /// Removes this screen's clipboard listener (web only).
+  void Function()? _disposePaste;
+
   @override
   void initState() {
     super.initState();
     _scroll.addListener(_onScroll);
     if (kIsWeb) {
-      registerImagePasteListener(_onPastedImage);
+      _disposePaste = registerImagePasteListener(
+        _onPastedImage,
+        onNoImage: _onPasteWithoutImage,
+      );
     }
     _steer = context.read<UserPreferences>().steerByDefault;
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -55,6 +62,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    _disposePaste?.call();
     _scroll.removeListener(_onScroll);
     _input.dispose();
     _scroll.dispose();
@@ -105,6 +113,16 @@ class _ChatScreenState extends State<ChatScreen> {
         );
       }
     });
+  }
+
+  /// A paste that carried an image we could not read must SAY so — an empty
+  /// attachment strip looks identical to "the listener never fired".
+  void _onPasteWithoutImage(String detail) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text('Paste: $detail'),
+      duration: const Duration(seconds: 4),
+    ));
   }
 
   void _onPastedImage(Uint8List bytes, String mimeType) {
@@ -378,6 +396,7 @@ class _ChatScreenState extends State<ChatScreen> {
           Alignment.centerRight,
           Colors.orange.withAlpha(40),
           queued: true,
+          steering: svc.wasSteered(widget.sessionId, text),
         ),
       );
     }
@@ -397,70 +416,154 @@ class _ChatScreenState extends State<ChatScreen> {
   ) {
     // If models are empty, re-request once (in case the first request lost).
     if (s != null && models.isEmpty && !_modelsRequested) _requestModels();
+    // ONE definition of the actions, shared by the wide bar and the narrow
+    // sidebar — two copies would drift in what is enabled when.
+    final actions = <_BarAction>[
+      _BarAction(
+        label: '/model ${s?.modelName ?? ""}'.trim(),
+        icon: Icons.memory,
+        onTap: models.isEmpty ? null : () => _showModels(context, svc, models),
+      ),
+      _BarAction(
+        label: '/thinking ${s?.thinkingLevel ?? "off"}',
+        icon: Icons.psychology,
+        color: (s?.thinkingLevel ?? 'off') != 'off' ? Colors.purple : null,
+        onTap: (s == null) ? null : () => _showThinking(context, svc, s),
+      ),
+      _BarAction(
+        label: '/compact',
+        icon: Icons.compress,
+        onTap: (working || s == null) ? null : () => svc.compact(s),
+      ),
+      _BarAction(
+        label: '/clear',
+        icon: Icons.cleaning_services,
+        onTap: (working || s == null) ? null : () => svc.newSession(s),
+      ),
+      if (!working && s != null && !s.isHost)
+        _BarAction(
+          label: '/remove',
+          icon: Icons.delete_outline,
+          color: Colors.red,
+          onTap: _removing ? null : () => _confirmRemove(context, svc, s),
+        ),
+    ];
+    final badge = s?.contextPercent == null
+        ? null
+        : _ContextBadge(
+            percent: s!.contextPercent!,
+            tokens: s.contextTokens,
+            window: s.contextWindow,
+            modelName: s.modelName ?? s.model,
+            compactAt: s.contextCompactAt,
+          );
     return Material(
       color: Theme.of(
         context,
       ).colorScheme.surfaceContainerHighest.withAlpha(80),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        // Horizontal scroll: the button row must never crop on narrow screens.
-        child: SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          reverse: true,
-          child: Row(
-            children: [
-            // Context window usage
-            if (s?.contextPercent != null)
-              Padding(
-                padding: const EdgeInsets.only(right: 8),
-                child: _ContextBadge(
-                  percent: s!.contextPercent!,
-                  tokens: s.contextTokens,
-                  window: s.contextWindow,
-                  modelName: s.modelName ?? s.model,
-                  compactAt: s.contextCompactAt,
-                ),
-              ),
-            Expanded(child: Container()),
-            _ToolButton(
-              label: '/model ${s?.modelName ?? ""}'.trim(),
-              onTap: models.isEmpty
-                  ? null
-                  : () => _showModels(context, svc, models),
-            ),
-            _ToolButton(
-              label: '/thinking ${s?.thinkingLevel ?? "off"}',
-              color: (s?.thinkingLevel ?? 'off') != 'off'
-                  ? Colors.purple
-                  : null,
-              onTap: (s == null) ? null : () => _showThinking(context, svc, s),
-            ),
-            _ToolButton(
-              label: '/compact',
-              onTap: (working || s == null) ? null : () => svc.compact(s),
-            ),
-            _ToolButton(
-              label: '/clear',
-              onTap: (working || s == null) ? null : () => svc.newSession(s),
-            ),
-            if (!working && s != null && !s.isHost)
-              _removing
-                  ? const Padding(
+        // The bar spans the FULL width and never scrolls sideways. Wide
+        // screens have room for every action inline; narrow ones cannot fit
+        // them at any font size, so they move into a slide-in sidebar behind
+        // one button instead of being scrolled off-screen where nobody looks.
+        child: LayoutBuilder(
+          builder: (context, c) {
+            final wide = c.maxWidth >= _wideBarMinWidth;
+            return Row(
+              children: [
+                if (badge != null) Flexible(child: badge),
+                const Spacer(),
+                if (wide)
+                  for (final a in actions)
+                    _ToolButton(label: a.label, color: a.color, onTap: a.onTap)
+                else ...[
+                  if (_removing)
+                    const Padding(
                       padding: EdgeInsets.symmetric(horizontal: 10),
                       child: SizedBox(
                         width: 16,
                         height: 16,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       ),
-                    )
-                  : _ToolButton(
-                      label: '/remove',
-                      color: Colors.red,
-                      onTap: () => _confirmRemove(context, svc, s),
                     ),
-            ],
+                  IconButton(
+                    icon: const Icon(Icons.tune, size: 20),
+                    tooltip: 'Session actions',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () => _showActionSidebar(context, actions),
+                  ),
+                ],
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  /// Narrow-screen home for the toolbar actions: a panel that slides in from
+  /// the right edge, same actions, same enabled/disabled state.
+  Future<void> _showActionSidebar(
+    BuildContext context,
+    List<_BarAction> actions,
+  ) {
+    return showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Session actions',
+      barrierColor: Colors.black54,
+      transitionDuration: const Duration(milliseconds: 180),
+      pageBuilder: (ctx, _, _) => Align(
+        alignment: Alignment.centerRight,
+        child: SizedBox(
+          width: math.min(300, MediaQuery.of(ctx).size.width * 0.8),
+          height: double.infinity,
+          child: Material(
+            color: Theme.of(ctx).colorScheme.surface,
+            child: SafeArea(
+              child: ListView(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                children: [
+                  for (final a in actions)
+                    ListTile(
+                      leading: Icon(
+                        a.icon,
+                        size: 20,
+                        color: a.onTap == null
+                            ? Colors.grey.withAlpha(80)
+                            : (a.color ?? Colors.blue),
+                      ),
+                      title: Text(
+                        a.label,
+                        style: TextStyle(
+                          fontFamily: 'monospace',
+                          fontSize: 13,
+                          color: a.onTap == null
+                              ? Colors.grey.withAlpha(120)
+                              : (a.color ?? Colors.blue),
+                        ),
+                      ),
+                      enabled: a.onTap != null,
+                      onTap: a.onTap == null
+                          ? null
+                          : () {
+                              Navigator.pop(ctx);
+                              a.onTap!();
+                            },
+                    ),
+                ],
+              ),
+            ),
           ),
         ),
+      ),
+      transitionBuilder: (ctx, anim, _, child) => SlideTransition(
+        position: Tween<Offset>(
+          begin: const Offset(1, 0),
+          end: Offset.zero,
+        ).animate(CurvedAnimation(parent: anim, curve: Curves.easeOut)),
+        child: child,
       ),
     );
   }
@@ -637,6 +740,7 @@ class _ChatScreenState extends State<ChatScreen> {
     Color? bg, {
     bool markdown = false,
     bool queued = false,
+    bool steering = false,
     List<PendingImage> images = const [],
   }) {
     return Align(
@@ -655,19 +759,34 @@ class _ChatScreenState extends State<ChatScreen> {
           crossAxisAlignment: CrossAxisAlignment.end,
           mainAxisSize: MainAxisSize.min,
           children: [
+            // A steer is NOT a follow-up: measured, pi delivers it at the end
+            // of the assistant's current step, not at the end of the turn.
+            // Labelling both "queued" made a working steer look ignored.
             if (queued)
-              const Padding(
-                padding: EdgeInsets.only(bottom: 4),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.schedule, size: 12, color: Colors.orange),
-                    SizedBox(width: 4),
-                    Text(
-                      'queued',
-                      style: TextStyle(fontSize: 10, color: Colors.orange),
-                    ),
-                  ],
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Tooltip(
+                  message: steering
+                      ? 'Steering — delivered when the current step ends'
+                      : 'Follow-up — delivered when the turn ends',
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        steering ? Icons.bolt : Icons.schedule,
+                        size: 12,
+                        color: Colors.orange,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        steering ? 'steering' : 'queued',
+                        style: const TextStyle(
+                          fontSize: 10,
+                          color: Colors.orange,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             if (images.isNotEmpty)
@@ -915,6 +1034,25 @@ class _ContextBadge extends StatelessWidget {
       ],
     );
   }
+}
+
+/// Below this width the action labels cannot all fit, so they move into the
+/// slide-in sidebar instead of being scrolled off the right edge.
+const double _wideBarMinWidth = 620;
+
+/// One toolbar action, rendered inline on wide screens and as a sidebar row on
+/// narrow ones. `onTap == null` means disabled in BOTH places.
+class _BarAction {
+  final String label;
+  final IconData icon;
+  final Color? color;
+  final VoidCallback? onTap;
+  const _BarAction({
+    required this.label,
+    required this.icon,
+    this.color,
+    this.onTap,
+  });
 }
 
 class _ToolButton extends StatelessWidget {
