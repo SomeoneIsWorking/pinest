@@ -120,14 +120,14 @@ test("firstSyntaxError: empty dirs and no checkable files → null", () => {
 });
 
 // ── createMessageSubmitter: consecutive submissions must not void ────────────
-import { createMessageSubmitter } from "../src/index.ts";
+import { createMessageSubmitter } from "../src/submit.ts";
 
 test("submitter: rapid consecutive submits serialize; the second waits for the run to start", async () => {
   const calls: Array<{ text: string; deliverAs: string }> = [];
   let turnStarted = false;
   const submitter = createMessageSubmitter({
-    send: (content, deliverAs) => {
-      calls.push({ text: typeof content === "string" ? content : "IMAGE", deliverAs });
+    send: (text, _images, deliverAs) => {
+      calls.push({ text, deliverAs });
       // Simulate session.prompt()'s async init: the run only becomes visible
       // (message_start observed) 30ms AFTER the first send.
       if (!turnStarted) setTimeout(() => { turnStarted = true; }, 30);
@@ -147,9 +147,9 @@ test("submitter: rapid consecutive submits serialize; the second waits for the r
 });
 
 test("submitter: images become a text+image content array; cap does not wedge the queue", async () => {
-  const calls: Array<string | Array<Record<string, string>>> = [];
+  const calls: Array<{ text: string; images?: Array<{ mimeType: string; data: string }> }> = [];
   const submitter = createMessageSubmitter({
-    send: (content) => { calls.push(content); },
+    send: (text, images) => { calls.push({ text, images }); },
     isTurnStarted: () => false, // run never becomes visible
     tickMs: 1,
     maxWaitTicks: 3,
@@ -158,8 +158,8 @@ test("submitter: images become a text+image content array; cap does not wedge th
   submitter.submit("next", undefined, "followUp");
   for (let i = 0; i < 300 && calls.length < 2; i++) await new Promise((r) => setTimeout(r, 5));
   assert.equal(calls.length, 2, "cap must release the queue; both submits must land");
-  const first = calls[0] as Array<Record<string, string>>;
-  assert.ok(Array.isArray(first), "image submit must send a content array");
-  assert.deepEqual(first.map((p) => p.type), ["text", "image"]);
-  assert.equal(calls[1], "next");
+  const first = calls[0];
+  assert.deepEqual(first.text, "look");
+  assert.deepEqual(first.images?.map((i) => i.mimeType), ["image/png"]);
+  assert.equal(calls[1].text, "next");
 });
