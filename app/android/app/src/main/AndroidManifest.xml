@@ -1,6 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application
-        android:label="remote_pi_app"
+        android:label="PiNest"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

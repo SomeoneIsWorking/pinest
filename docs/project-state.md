@@ -315,6 +315,13 @@ release asset, which the web client's Settings → "Android app (APK)" button
 downloads (I-024). `deploy.sh` no longer bundles an APK.
 Partial: CI signs with the debug key until the `ANDROID_KEYSTORE_*` repo
 secrets are set, so a newer CI build cannot install over an older one.
+Making that build work also fixed the Android app's identity — package
+`com.barishamil.pinest`, a matching Firebase Android app plus committed
+`google-services.json`, and `DefaultFirebaseOptions.android` no longer
+carrying the WEB app's key/appId — and its sign-in: `signInWithPopup` is
+web-only, so the APK now uses `signInWithProvider` and shows the failure
+reason on the login screen. Android sign-in is UNVERIFIED on a real device
+(none attached here).
 
 Consecutive user messages no longer void: the extension serializes message
 submissions and waits for the run to start before releasing the next one
