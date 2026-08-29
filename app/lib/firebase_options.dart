@@ -37,7 +37,9 @@ class DefaultFirebaseOptions {
     appId: '1:271491621267:web:3822b177db9e36a57b8866',
     messagingSenderId: '271491621267',
     projectId: 'pinest-app',
-    authDomain: 'pinest.web.app',
+    // The public app is pinest.web.app. Keep the project's registered OAuth
+    // helper here until that client also authorizes pinest.web.app/__/auth/handler.
+    authDomain: 'pinest-app.firebaseapp.com',
     storageBucket: 'pinest-app.appspot.com',
   );
 

@@ -81,10 +81,12 @@ def main() -> int:
     index = fetch(f"{CANONICAL_URL}/?{query}")
     if b"<title>PiNest</title>" not in index:
         raise VerificationError("canonical site did not serve the PiNest index")
+    verify_redirect("/")
     verify_redirect("/release-verification")
 
     print(f"canonical_url={CANONICAL_URL}")
     print(f"bundle_sha256={deployed_hash}")
+    print(f"legacy_redirect={LEGACY_URL}/ -> {CANONICAL_URL}/")
     print(f"legacy_redirect={LEGACY_URL}/release-verification -> {CANONICAL_URL}/release-verification")
     return 0
 
