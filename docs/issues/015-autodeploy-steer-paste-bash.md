@@ -72,3 +72,20 @@ file — no silent drops.
 
 - Run `app/deploy.sh` from the local system so the live site picks up this
   batch, then re-verify the whole batch by hand on the deployed app.
+
+## Follow-up 3: server-side queue + mobile GUI (6d01e03)
+
+User directive: the app is a terminal — queued messages must live server-side,
+like pi's own queue in the terminal.
+
+- `SessionSnapshot.pendingMessages`: pushed on `user_message` submit, popped
+  on pi's `message_start` (first matching text, like pi's accounting), cleared
+  on `session_new`. Helpers `pushPending`/`popPending` in `logic.ts` (tested).
+- Client renders `session.pendingMessages`; all local pending bookkeeping
+  (`_pendingUserMessages`, `PendingMessage`, history-text matching) removed.
+- GUI fixes from user report: attach + steer icons moved INTO the text field
+  (prefix/suffix) so the input row never overflows and the attach button is
+  always visible; send/stop compacted to 40px; toolbar scrolls horizontally
+  instead of cropping on narrow screens; tool-card summaries capped at 160
+  chars, single line, ellipsized — long bash calls no longer wrap into tall
+  blocks.
