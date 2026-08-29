@@ -519,6 +519,16 @@ class _ChatScreenState extends State<ChatScreen> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  if (svc.outboxCount > 0)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Text(
+                        'Reconnecting… \${svc.outboxCount} message(s) will '
+                        'send automatically',
+                        style: TextStyle(
+                            fontSize: 11, color: Colors.orange.shade700),
+                      ),
+                    ),
                   if (_attachedImages.isNotEmpty) _attachmentStrip(),
                   KeyboardListener(
                     focusNode: FocusNode(),
