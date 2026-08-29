@@ -252,6 +252,16 @@ class AgentService extends ChangeNotifier {
             _streamingText.remove(id);
           }
         }
+        // A steer stops being "in flight" the moment the server drops it from
+        // pending — keep the marker set in step, or a later identical message
+        // would inherit the badge.
+        for (final s in _sessions) {
+          final marked = _steered[s.id];
+          if (marked == null) continue;
+          marked.removeWhere((t) => !s.pendingMessages.contains(t));
+          if (marked.isEmpty) _steered.remove(s.id);
+        }
+
         // Durable registry rows (may include sessions not running now)
         _registry.clear();
         for (final raw in (msg['registry'] as List? ?? [])) {
@@ -313,7 +323,15 @@ class AgentService extends ChangeNotifier {
           (t) => t['callId'] == callId,
         );
         if (existingIdx >= 0) {
-          _toolCalls[sid]![existingIdx] = tool;
+          // MERGE, never replace. A tool call arrives as several messages:
+          // start carries `args`, end carries `result`/`isError` and NO args
+          // (pi's ToolExecutionEndEvent has no args field). Replacing wiped
+          // the command off every finished card — that is why completed bash
+          // cards read as a bare "bash".
+          _toolCalls[sid]![existingIdx] = {
+            ..._toolCalls[sid]![existingIdx],
+            ...tool,
+          };
         } else {
           _toolCalls[sid]!.add(tool);
         }
@@ -410,7 +428,18 @@ class AgentService extends ChangeNotifier {
         ],
       'deliverAs': steer ? 'steer' : 'followUp',
     });
+    if (steer) (_steered[s.id] ??= <String>{}).add(text);
   }
+
+  /// Texts this client submitted as a STEER, per session. The server's
+  /// pending list is just strings, so without this a steer and a follow-up
+  /// look identical while they wait — and a steer waiting for the current
+  /// assistant step to end reads as "ignored".
+  final Map<String, Set<String>> _steered = {};
+
+  /// True if `text` is still-pending BECAUSE it was sent as a steer.
+  bool wasSteered(String sessionId, String text) =>
+      _steered[sessionId]?.contains(text) ?? false;
 
   void cancel(Session s) => _send({'type': 'cancel', 'sessionId': s.id});
   void setModel(Session s, String provider, String modelId) => _send({
