@@ -108,6 +108,17 @@ class AgentService extends ChangeNotifier {
     notifyListeners();
   }
 
+  String? _lastUrl;
+  int _reconnectDelay = 2;
+  Timer? _reconnectTimer;
+  bool _connected = false;
+
+  /// True once the WebSocket handshake AND auth both succeeded and the
+  /// socket has not died since. UI shows a reconnecting banner while false.
+  bool get wsConnected => _connected;
+
+  Future<String> _token() async => (await _auth!.user!.getIdToken())!;
+
   void _connect() {
     _urlSub?.cancel();
     final uid = _auth!.user!.uid;
@@ -137,25 +148,8 @@ class AgentService extends ChangeNotifier {
               return;
             }
 
-            // Connect to WebSocket if not already connected or URL changed
-            if (_ws == null || _ws!.url != url) {
-              _ws?.close();
-              _ws = WebSocketConnection(url);
-              await _ws!.connect(
-                token: () async => (await _auth!.user!.getIdToken())!,
-                onMessage: _onWSMessage,
-                onError: (e) {
-                  _error = e;
-                  notifyListeners();
-                },
-                onClose: () {
-                  _online = false;
-                  _ws =
-                      null; // allow the next snapshot to re-dial (reconnect fix)
-                  notifyListeners();
-                },
-              );
-            }
+            _lastUrl = url;
+            await _dial(url);
           },
           onError: (e) {
             _error = e.toString();
@@ -164,10 +158,49 @@ class AgentService extends ChangeNotifier {
         );
   }
 
+  /// Dial the tunnel URL. Safe to call repeatedly — skips if already
+  /// connected to the same URL.
+  Future<void> _dial(String url) async {
+    if (_ws != null && _ws!.url == url && _connected) return;
+    _ws?.close();
+    _ws = WebSocketConnection(url);
+    await _ws!.connect(
+      token: _token,
+      onMessage: _onWSMessage,
+      onError: (e) {
+        _error = e;
+        notifyListeners();
+      },
+      onClose: () {
+        // Dead socket (tunnel idle timeout, host reload, network drop).
+        // The old code waited for a Firestore doc change to re-dial — which
+        // never comes when the doc is unchanged — so the app went silently
+        // deaf and every send vanished. Re-dial on our own with backoff.
+        _connected = false;
+        _online = false;
+        _ws = null;
+        notifyListeners();
+        _scheduleReconnect();
+      },
+    );
+  }
+
+  void _scheduleReconnect() {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = Timer(Duration(seconds: _reconnectDelay), () {
+      _reconnectDelay = (_reconnectDelay * 2).clamp(2, 30);
+      final url = _lastUrl;
+      if (_ws == null && url != null && _auth?.user != null) {
+        _dial(url);
+      }
+    });
+  }
+
   void _onWSMessage(Map<String, dynamic> msg) {
     switch (msg['type']) {
       case 'authed':
-        // Connection established
+        _connected = true;
+        _reconnectDelay = 2; // backoff satisfied — reset
         break;
       case 'state':
         _online = msg['online'] ?? false;
@@ -447,7 +480,10 @@ class WebSocketConnection {
   final String url;
   WebSocketChannel? _channel;
   StreamSubscription? _sub;
+  Timer? _heartbeat;
   bool _open = false;
+  bool _closedByUs = false;
+  DateTime _lastInbound = DateTime.now();
 
   WebSocketConnection(this.url);
 
@@ -462,9 +498,15 @@ class WebSocketConnection {
           .replaceFirst('https://', 'wss://')
           .replaceFirst('http://', 'ws://');
       _channel = WebSocketChannel.connect(Uri.parse(wsUrl));
+      // The handshake completes asynchronously — _open must only become true
+      // once the socket is REAL. Setting it earlier silently dropped sends
+      // into a not-yet-open (or already-failed) socket.
+      await _channel!.ready;
       _open = true;
+      _lastInbound = DateTime.now();
       _sub = _channel!.stream.listen(
         (data) {
+          _lastInbound = DateTime.now();
           try {
             onMessage(jsonDecode(data as String) as Map<String, dynamic>);
           } catch (_) {}
@@ -475,13 +517,27 @@ class WebSocketConnection {
         },
         onDone: () {
           _open = false;
-          onClose();
+          if (!_closedByUs) onClose();
         },
         cancelOnError: true,
       );
       final idToken = await token();
       _channel!.sink.add(jsonEncode({'type': 'auth', 'token': idToken}));
+      // Heartbeat: tunnels idle-timeout and kill the socket server-side while
+      // the client half stays open — every send then vanishes silently.
+      // Ping every 20s; if nothing inbound for 60s, the socket is dead:
+      // close it so onClose fires and the service re-dials.
+      _heartbeat = Timer.periodic(const Duration(seconds: 20), (_) {
+        if (!_open) return;
+        _channel?.sink.add(jsonEncode({'type': 'command', 'cmd': {'type': 'ping'}}));
+        if (DateTime.now().difference(_lastInbound).inSeconds > 60) {
+          _open = false;
+          close();
+          onClose();
+        }
+      });
     } catch (e) {
+      _open = false;
       onError(e.toString());
     }
   }
@@ -491,6 +547,8 @@ class WebSocketConnection {
   }
 
   void close() {
+    _closedByUs = true;
+    _heartbeat?.cancel();
     _sub?.cancel();
     _channel?.sink.close();
     _open = false;

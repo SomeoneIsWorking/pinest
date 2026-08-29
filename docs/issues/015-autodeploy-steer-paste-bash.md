@@ -132,3 +132,21 @@ voided" report.
   is now name row + single-line 160-char summary line; `_bashLabel` removed.
 - **Attachment previews**: input row bottom-aligned so previews growing above
   the field no longer push send/stop off the bar.
+
+## Follow-up 7: lost steers = dead WebSocket, silently (this batch)
+
+User report: steers "don't reach you at all". Root cause in the CLIENT WS
+layer, three compounding defects:
+1. `_open = true` was set before the async handshake; `channel.ready` was
+   never awaited — sends into a not-yet-open/failed socket were dropped.
+2. No heartbeat: tunnels idle-timeout and kill the socket server-side while
+   the client half stays open — sends vanish silently. Steers (sent after
+   idle gaps mid-turn) were exactly that traffic.
+3. Reconnect waited for a Firestore doc change to re-dial, which never comes
+   when the doc is unchanged → app went permanently deaf.
+
+Fixes: handshake-aware `_open`; 20s app-level ping/pong (server answers at
+the socket layer in wsserver.ts; protocol gains ping/pong) with 60s inbound
+staleness → force close; onClose → automatic re-dial with 2→30s backoff,
+reset on `authed`; `wsConnected` getter + "Connection lost — reconnecting…"
+banner in the chat screen.
