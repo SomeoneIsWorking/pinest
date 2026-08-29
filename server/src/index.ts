@@ -11,11 +11,13 @@ import debug from "./log.ts";
  * is real-time WebSocket messages.
  */
 
-import { existsSync, statSync, mkdirSync, readFileSync } from "node:fs";
-import { resolve as resolvePath, isAbsolute, join, dirname as dirnamePath } from "node:path";
+import { existsSync, statSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { resolve as resolvePath, isAbsolute, join, dirname as dirnamePath, basename } from "node:path";
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { hostname, homedir } from "node:os";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { UserImage } from "./protocol.ts";
 import { createFirebase } from "./auth.ts";
 import type { FirebaseAuth } from "./auth.ts";
 import { WSServer } from "./wsserver.ts";
@@ -223,9 +225,47 @@ function startWatcher(): void {
   debug(`[remote-code] watching ${t.dirs.length} dirs + ${t.files.length} files for live reload`);
 }
 
+/** Syntax-validate every .ts/.js/.mjs file under the watched extension dirs.
+ * A broken file (e.g. mid-edit) must NOT trigger the live reload — the running
+ * instance keeps serving, and the next file change retries. Returns the first
+ * broken path, or null when everything parses. */
+export function firstSyntaxError(dirs: string[], files: string[]): string | null {
+  const checkable = new Set<string>();
+  const exts = [".ts", ".mts", ".cts", ".js", ".mjs", ".cjs"];
+  const walk = (p: string, depth: number): void => {
+    if (depth > 8) return;
+    let st: import("node:fs").Stats;
+    try { st = statSync(p); } catch { return; }
+    if (st.isDirectory()) {
+      if (["node_modules", ".git", "build", "dist", "scratch"].includes(basename(p))) return;
+      try { for (const c of readdirSync(p)) walk(join(p, c), depth + 1); } catch { /* unreadable dir: skip */ }
+    } else if (exts.some((e) => p.endsWith(e))) {
+      checkable.add(p);
+    }
+  };
+  for (const d of dirs) walk(d, 0);
+  for (const f of files) {
+    if (exts.some((e) => f.endsWith(e))) checkable.add(f);
+  }
+  for (const f of checkable) {
+    const r = spawnSync(process.execPath, ["--check", f], { timeout: 10_000 });
+    if (r.status !== 0) return f;
+  }
+  return null;
+}
+
 function queueReload(): void {
   if (!_pi) return;
   try {
+    // Gate: if any watched source is currently unparseable (mid-edit), skip
+    // this reload. The watcher refires on the next change, so completing the
+    // edit applies it; the running instance never tears down on broken code.
+    const t = watcherTargets();
+    const broken = firstSyntaxError(t.dirs, t.files);
+    if (broken) {
+      debug(`[remote-code] reload skipped — syntax error in ${broken}; waiting for next change`);
+      return;
+    }
     // expandPromptTemplates: true is REQUIRED — sendUserMessage defaults it to
     // false, which skips pi's extension-command dispatch; "/pinest-reload" would
     // then reach the LLM as literal text instead of executing.
@@ -532,13 +572,36 @@ async function deleteSession(cmd: Extract<ClientCommand, { type: "session_delete
 
 async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
   switch (cmd.type) {
-    case "user_message":
+    case "user_message": {
       _currentTurnId = cmd.id || randomUUID();
       _streamingText = "";
       _status = "working";
       upsertSession(_sessionId, { status: "working", streamingText: "" });
-      _pi?.sendUserMessage?.(cmd.text, { deliverAs: "steer" });
+      // deliverAs: "steer" queues behind the current assistant segment's tool
+      // calls and is delivered before the next LLM call; "followUp" waits for
+      // the whole agent turn to finish. When idle both behave identically.
+      const deliverAs = cmd.deliverAs === "followUp" ? "followUp" : "steer";
+      const images = cmd.images ?? [];
+      // Image-only messages need a text part that also appears in session
+      // history (the client clears its "queued" badge by matching text).
+      const text = cmd.text.trim().length === 0 ? "[image]" : cmd.text;
+      if (images.length > 0) {
+        _pi?.sendUserMessage?.(
+          [
+            { type: "text", text },
+            ...images.map((img: UserImage) => ({
+              type: "image" as const,
+              mimeType: img.mimeType,
+              data: img.data,
+            })),
+          ],
+          { deliverAs },
+        );
+      } else {
+        _pi?.sendUserMessage?.(cmd.text, { deliverAs });
+      }
       break;
+    }
     case "cancel":
       // NOTE: ExtensionAPI has no abort(); it lives on ExtensionContext.
       // (pinest used _pi?.abort?.() — a silent no-op on the host.)
@@ -672,6 +735,9 @@ function bridge(pi: ExtensionAPI): void {
       _streamingText = "";
       _status = "working";
       upsertSession(_sessionId, { streamingText: "", status: "working" });
+      // The message just became part of the session — push history so the
+      // client can drop its "queued" badge for it NOW instead of at agent_end.
+      getInteractiveHistory().then((h) => broadcast({ type: "history", sessionId: _sessionId, history: h }));
     } else if (event?.message?.role === "assistant") {
       _streamingText = "";
       _status = "working";

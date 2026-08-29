@@ -86,8 +86,15 @@ export type ServerMessage =
   | { type: "path_check"; cmdId?: string; exists: boolean; isDirectory: boolean }
   | { type: "folder_created"; cmdId?: string; path?: string; error?: string };
 
+/** An image attached by the client to a user_message (paste/upload). */
+export interface UserImage {
+  mimeType: string;
+  /** base64-encoded image bytes */
+  data: string;
+}
+
 export type ClientCommand =
-  | { type: "user_message"; sessionId?: string; text: string; id?: string }
+  | { type: "user_message"; sessionId?: string; text: string; id?: string; images?: UserImage[]; deliverAs?: "steer" | "followUp" }
   | { type: "cancel"; sessionId?: string }
   | { type: "model_set"; sessionId?: string; provider: string; modelId: string }
   | { type: "thinking_set"; sessionId?: string; level: string }

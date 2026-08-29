@@ -97,3 +97,24 @@ test("watcher: nonexistent watched dirs are tolerated", () => {
   assert.doesNotThrow(() => w.start());
   w.stop();
 });
+
+// ── firstSyntaxError: broken source must block reload, good source must not ──
+import { firstSyntaxError } from "../src/index.ts";
+
+test("firstSyntaxError: returns the broken file, null when all parse", () => {
+  const good = join(DIR, "ok.ts");
+  const bad = join(DIR, "broken.ts");
+  writeFileSync(good, "export const ok: number = 1;\n");
+  // A file importing a missing module is a RUNTIME error, not syntax — must pass.
+  writeFileSync(
+    join(DIR, "imports-missing.ts"),
+    'import { nope } from "./does-not-exist.ts";\nexport const x = nope;\n',
+  );
+  writeFileSync(bad, "const x: number = ;\n");
+  assert.equal(firstSyntaxError([], [good]), null, "good file must not block reload");
+  assert.equal(firstSyntaxError([DIR], []), bad, "broken file must be reported by path");
+});
+
+test("firstSyntaxError: empty dirs and no checkable files → null", () => {
+  assert.equal(firstSyntaxError([], [join(DIR, "notes.md")]), null);
+});

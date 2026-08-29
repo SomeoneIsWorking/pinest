@@ -1,9 +1,11 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import '../services/agent_service.dart';
+import '../services/paste_bridge.dart';
 import '../services/user_preferences.dart';
 import '../models/session.dart';
 import '../models/chat_item.dart';
@@ -22,6 +24,8 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _removing = false;
   bool _modelsRequested = false;
   bool _wasWorking = false;
+  bool _steer = true; // send mid-turn messages as steer (vs follow-up)
+  final List<PendingImage> _attachedImages = [];
   bool _atBottom = true; // track whether user is scrolled to bottom
   final Map<String, int> _prevHistoryLen = {};
 
@@ -35,6 +39,9 @@ class _ChatScreenState extends State<ChatScreen> {
   void initState() {
     super.initState();
     _scroll.addListener(_onScroll);
+    if (kIsWeb) {
+      registerImagePasteListener(_onPastedImage);
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _jumpToBottom(); // load scrolled to bottom
       _requestModels();
@@ -96,13 +103,29 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  void _onPastedImage(Uint8List bytes, String mimeType) {
+    if (!mounted) return;
+    setState(() => _attachedImages.add(
+          PendingImage(mimeType: mimeType, bytes: bytes),
+        ));
+  }
+
   void _send() {
     final text = _input.text.trim();
-    if (text.isEmpty) return;
+    final hasImages = _attachedImages.isNotEmpty;
+    if (text.isEmpty && !hasImages) return;
     final svc = context.read<AgentService>();
     final s = _session(svc);
-    if (s != null) svc.sendMessage(s, text);
+    if (s != null) {
+      svc.sendMessage(
+        s,
+        text,
+        images: List<PendingImage>.from(_attachedImages),
+        steer: _steer,
+      );
+    }
     _input.clear();
+    setState(() => _attachedImages.clear());
     _atBottom = true; // sending a message forces scroll to bottom
     _scrollDown();
   }
@@ -216,13 +239,14 @@ class _ChatScreenState extends State<ChatScreen> {
       items.add(_StreamingBubble(text: streaming));
     }
     // Queued messages at the very end (sent but not yet processed)
-    for (final text in queued) {
+    for (final p in queued) {
       items.add(
         _bubble(
-          text,
+          p.text,
           Alignment.centerRight,
           Colors.orange.withAlpha(40),
           queued: true,
+          images: p.images,
         ),
       );
     }
@@ -305,6 +329,70 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  Widget _attachmentStrip() {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 6,
+        children: [
+          for (var i = 0; i < _attachedImages.length; i++)
+            Stack(
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: Image.memory(
+                    _attachedImages[i].bytes,
+                    width: 72,
+                    height: 72,
+                    fit: BoxFit.cover,
+                  ),
+                ),
+                Positioned(
+                  right: 0,
+                  top: 0,
+                  child: GestureDetector(
+                    onTap: () => setState(() => _attachedImages.removeAt(i)),
+                    child: Container(
+                      decoration: const BoxDecoration(
+                        color: Colors.black54,
+                        shape: BoxShape.circle,
+                      ),
+                      padding: const EdgeInsets.all(2),
+                      child: const Icon(Icons.close,
+                          size: 14, color: Colors.white),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _steerToggle() {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(
+          _steer ? Icons.bolt : Icons.low_priority,
+          size: 14,
+          color: _steer ? Colors.deepOrange : Colors.grey,
+        ),
+        const SizedBox(width: 4),
+        Text(
+          _steer ? 'Steer' : 'Queue as follow-up',
+          style: TextStyle(fontSize: 11, color: Colors.grey.shade700),
+        ),
+        Switch(
+          value: _steer,
+          onChanged: (v) => setState(() => _steer = v),
+        ),
+      ],
+    );
+  }
+
   Widget _inputBar(bool working, AgentService svc, Session? s) {
     return SafeArea(
       child: Padding(
@@ -312,18 +400,23 @@ class _ChatScreenState extends State<ChatScreen> {
         child: Row(
           children: [
             Expanded(
-              child: KeyboardListener(
-                focusNode: FocusNode(),
-                onKeyEvent: (event) {
-                  if (event is KeyDownEvent &&
-                      event.logicalKey == LogicalKeyboardKey.enter &&
-                      (_isMacOS
-                          ? HardwareKeyboard.instance.isMetaPressed
-                          : HardwareKeyboard.instance.isControlPressed)) {
-                    _send();
-                  }
-                },
-                child: TextField(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (_attachedImages.isNotEmpty) _attachmentStrip(),
+                  KeyboardListener(
+                    focusNode: FocusNode(),
+                    onKeyEvent: (event) {
+                      if (event is KeyDownEvent &&
+                          event.logicalKey == LogicalKeyboardKey.enter &&
+                          (_isMacOS
+                              ? HardwareKeyboard.instance.isMetaPressed
+                              : HardwareKeyboard.instance.isControlPressed)) {
+                        _send();
+                      }
+                    },
+                    child: TextField(
                   controller: _input,
                   minLines: 1,
                   maxLines: 5,
@@ -338,7 +431,14 @@ class _ChatScreenState extends State<ChatScreen> {
                     ),
                   ),
                   onSubmitted: (_) => _send(),
+                  ),
                 ),
+                  if (working)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: _steerToggle(),
+                    ),
+                ],
               ),
             ),
             const SizedBox(width: 8),
@@ -385,6 +485,7 @@ class _ChatScreenState extends State<ChatScreen> {
     Color? bg, {
     bool markdown = false,
     bool queued = false,
+    List<PendingImage> images = const [],
   }) {
     return Align(
       alignment: align,
@@ -417,9 +518,33 @@ class _ChatScreenState extends State<ChatScreen> {
                   ],
                 ),
               ),
-            markdown
-                ? MarkdownBody(data: text, shrinkWrap: true, selectable: true)
-                : Text(text),
+            if (images.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  alignment: WrapAlignment.end,
+                  children: [
+                    for (final img in images)
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(6),
+                        child: Image.memory(
+                          img.bytes,
+                          width: 96,
+                          height: 96,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, _, _) =>
+                              const Icon(Icons.broken_image, size: 24),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            if (text.isNotEmpty)
+              markdown
+                  ? MarkdownBody(data: text, shrinkWrap: true, selectable: true)
+                  : Text(text),
           ],
         ),
       ),
@@ -727,7 +852,9 @@ class _ToolCallCardState extends State<_ToolCallCard> {
                   icon,
                   const SizedBox(width: 6),
                   Text(
-                    widget.name,
+                    widget.name == 'bash'
+                        ? _bashLabel(widget.args)
+                        : widget.name,
                     style: const TextStyle(
                       fontSize: 12,
                       fontFamily: 'monospace',
@@ -810,6 +937,15 @@ class _ToolCallCardState extends State<_ToolCallCard> {
         ),
       ),
     );
+  }
+
+  String _bashLabel(dynamic args) {
+    // Show WHAT the bash tool ran, not just its name.
+    if (args is Map && args['command'] is String) {
+      final cmd = (args['command'] as String).replaceAll('\n', ' ; ').trim();
+      return cmd.length > 120 ? '${cmd.substring(0, 120)}…' : cmd;
+    }
+    return 'bash';
   }
 
   String _argSummary(String toolName, dynamic args) {

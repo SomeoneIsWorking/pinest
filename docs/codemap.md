@@ -14,6 +14,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Headless session spawn/resume/kill/route/stream (SDK sessions in-process) | `server` | `server/src/supervisor.ts` |
 | Session registry persistence (sessions.json on disk, atomic, corrupt-refusing) | `server` | `server/src/registry.ts` |
 | Hot-reload watcher (debounced file watch → reload trigger) | `server` | `server/src/reload.ts` |
+| Reload safety gate (syntax-check watched sources; broken edits don't tear down the host) | `server` | `firstSyntaxError` in `server/src/index.ts` |
 | Pure helpers (history shaping, model mapping, path completion) | `server` | `server/src/logic.ts` |
 | Thinking-level resolution ("Default" = omit reasoning override, opencode semantics) | `server` | `server/src/thinking.ts` |
 | Config (tunnel provider prefs; paths, env escapes) | `server` | `server/src/config.ts` |
@@ -21,7 +22,10 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Type shims for untyped deps | `server` | `server/src/types-shims.d.ts` |
 | Launcher (slim shim → `pi -e server/src/index.ts`) | repo root | `run.sh` |
 | Flutter client (chat, sessions, spawn, auth) | `app` | `app/lib/` (forked from PiNest) |
+| Web image paste capture | `app` | `app/lib/services/paste_bridge.dart` (conditional export: `paste_web.dart` / `paste_stub.dart`) |
 | Durable-session UI + reconnect | `app` | `app/lib/screens/main_shell.dart` (`SessionHistorySheet`), `app/lib/services/agent_service.dart` |
+| Image paste → message attachments (web) | `app` | `app/lib/services/paste_bridge.dart` (conditional import: `paste_web.dart` / `paste_stub.dart`) |
+| Web client auto-deploy on push to main | CI | `.github/workflows/deploy-web.yml` (needs `FIREBASE_SERVICE_ACCOUNT` secret) |
 | Firebase web config (public) for the app | `app` | `app/lib/firebase_options.dart` |
 | Provider entry (OpenCode Go / glm-5.3-flash), compact settings | user machine config | `PI_AGENT_DIR/models.json`, `settings.json` — to be provisioned by `server/scripts/provision.ts` (I-005); API keys live in `PI_AGENT_DIR/auth.json` (`type: "api_key"`) |
 | Hosted discovery rules (owner-writable presence doc) | repo root | `firestore.rules` — deploy to pinest-app (I-008) |
@@ -30,7 +34,5 @@ Goals/status/work live in the other `docs/` registries, not here.
 
 - Multi-machine identity (currently one `users/{uid}` doc) — future goal; do not
   shoehorn into `auth.ts`; it will want its own discovery module.
-- Stream delta protocol (currently cumulative `stream` text) — change together
-  with the app, never server-only.
 - Stream delta protocol (currently cumulative `stream` text) — change together
   with the app, never server-only.

@@ -171,14 +171,34 @@ threshold editable in Settings (`set_compact_threshold`).
 
 The client now persists the last selected model and thinking level locally,
 uses `⌘+Enter` on macOS for sending, and exposes a per-tab edit dialog with the
-workspace path and durable session renaming (I-012).
+workspace path and durable session renaming (I-012). (2026-08-29: the deployed
+pinest-app.web.app bundle was found stale, predating these commits — features
+verified in code but absent live until the deploy pipeline lands, I-015.)
 
 Spawn validates host directories, offers host-side folder creation, and shows
 the active workspace under `~` when it belongs to the host home directory.
 Session selection is server-authoritative rather than device-local (I-013).
 
+Mid-turn messages are steerable (deliverAs steer/followUp with an app-side
+toggle), the "queued" badge clears the moment a message joins the session
+(history broadcast on user message_start), image pastes from the web client
+reach the agent as content-array user messages, bash tool cards show the
+command that ran, and pushes to `main` auto-deploy the web client via GitHub
+Actions (I-015) — pending the FIREBASE_SERVICE_ACCOUNT secret and a live
+browser re-verification.
+
 The repository tip and reachable history passed the publication audit after a
 history-preserving rewrite removed the historical findings (I-014).
+
+The web client now: steers or queues mid-turn messages by explicit toggle and
+drops the "queued" badge as soon as pi accepts a message (history broadcast on
+`message_start`, I-015); accepts pasted clipboard images as message
+attachments (web paste bridge → `UserImage[]` → pi content array, I-015); and
+shows the executed command on bash tool cards (I-015). The extension's reload
+watcher skips the live reload while any watched source fails a syntax check,
+so mid-edit broken states no longer stop the host session (I-015).
+Auto-deploy of the web client on push to main is wired via GitHub Actions but
+BLOCKED on the `FIREBASE_SERVICE_ACCOUNT` repo secret being added.
 
 Gaps: run against the live host from an actual phone; hosted (RestImpl)
 backend not yet exercised by a real browser sign-in; stream deltas
