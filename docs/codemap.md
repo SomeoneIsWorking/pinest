@@ -13,7 +13,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Firebase backends (HOSTED zero-config + ADMIN self-host), owner identity, browser login, presence publish | `server` | `server/src/auth.ts` |
 | Headless session spawn/resume/kill/route/stream (SDK sessions in-process) | `server` | `server/src/supervisor.ts` |
 | Session registry persistence (sessions.json on disk, atomic, corrupt-refusing) | `server` | `server/src/registry.ts` |
-| Hot-reload watcher (debounced file watch → reload trigger) | `server` | `server/src/reload.ts` |
+| Harness source-change watcher (debounced file watch → pending-change notice; never reloads) | `server` | `server/src/watch.ts` |
 | Reload safety gate (syntax-check watched sources; broken edits don't tear down the host) | `server` | `firstSyntaxError` in `server/src/index.ts` |
 | Pure helpers (history shaping, model mapping, path completion) | `server` | `server/src/logic.ts` |
 | Thinking-level resolution ("Default" = omit reasoning override, opencode semantics) | `server` | `server/src/thinking.ts` |
