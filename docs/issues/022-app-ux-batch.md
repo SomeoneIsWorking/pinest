@@ -123,3 +123,33 @@ tunnel is still coming up — it says "tunnel still starting…", because
 
 **Why it matters beyond cosmetics:** a stale status bar is what made the I-021
 outage look like a hang instead of a dead extension.
+
+## 022g — Adopted sessions lost their name/workspace and froze as "working" (fixed)
+
+**Symptom (regression from I-021's handoff):** after a reload, sessions that
+had been `pvz` and `psx` showed as "session" with a blank workspace in the edit
+dialog, and displayed "working" forever with no new chat entries.
+
+**Two causes, both in `adoptStashedSessions()`:**
+1. It pushed only `status`/`model`/`contextUsage`. The re-imported instance
+   starts with an EMPTY snapshot map, so the app received a session with no
+   `name` and no `cwd` — hence "session" and a blank workspace.
+2. It trusted the parked `status` flag. `stashForReload()` had also dropped the
+   event subscription, so an `agent_end` landing between park and adopt was
+   lost and the session stayed "working" with nothing running.
+
+**Fix:**
+- Adoption reports identity — `name`, `cwd`, `isInteractive`, `isHost`, pending
+  queues — and persists the registry row.
+- Status is READ FROM THE SESSION (`AgentSession.isIdle`), not from the parked
+  flag, and the debug line names which source answered.
+- `stashForReload()` no longer unsubscribes; the old handler mutates the same
+  `LiveSession` object, so a gap `agent_end` still flips it to idle. The
+  subscription is swapped at adoption instead. Its broadcasts go to the stopped
+  WS server, which is a no-op.
+
+**Evidence:** `teardown.test.ts` — adoption carries name/cwd and reports idle
+when the session says idle despite a "working" parked flag; a still-streaming
+session stays working with its submission gate closed; park keeps the old
+subscription and adopt drops it. `drills/reload-midrun.mjs` still passes in both
+directions.
