@@ -27,7 +27,7 @@ class AgentService extends ChangeNotifier {
   final Map<String, String> _streamingText = {};
   final Map<String, List<PinestModel>> _models = {};
   final Map<String, List<Map<String, dynamic>>> _history = {};
-  final Map<String, List<String>> _pendingUserMessages = {};
+  final Map<String, List<PendingMessage>> _pendingUserMessages = {};
   final Map<String, List<Map<String, dynamic>>> _toolCalls = {};
   final Map<String, List<String>> _pathSuggestions = {};
   final Map<String, Completer<bool>> _pathChecks = {};
@@ -66,7 +66,8 @@ class AgentService extends ChangeNotifier {
   List<PinestModel> modelsFor(String id) => _models[id] ?? [];
   List<Map<String, dynamic>> historyFor(String id) => _history[id] ?? [];
   List<Map<String, dynamic>> toolCallsFor(String id) => _toolCalls[id] ?? [];
-  List<String> queuedMessagesFor(String id) => _pendingUserMessages[id] ?? [];
+  List<PendingMessage> queuedMessagesFor(String id) =>
+      _pendingUserMessages[id] ?? [];
 
   void updateAuth(AuthService auth) {
     final wasAuthed = _auth?.isAuthenticated ?? false;
@@ -251,15 +252,19 @@ class AgentService extends ChangeNotifier {
         _history[sid] = history
             .map((x) => Map<String, dynamic>.from(x as Map))
             .toList();
-        // Clear pending messages that are now in history
+        // Clear pending messages that are now in history. A user message
+        // carrying only images is rendered server-side as text '[image]'.
+        final histTexts = _history[sid]!
+            .where((h) => h['role'] == 'user')
+            .map((h) => h['text'] as String)
+            .toSet();
         final pending = _pendingUserMessages[sid];
         if (pending != null && pending.isNotEmpty) {
-          final histTexts = _history[sid]!
-              .where((h) => h['role'] == 'user')
-              .map((h) => h['text'] as String)
-              .toSet();
           _pendingUserMessages[sid] = pending
-              .where((t) => !histTexts.contains(t))
+              .where(
+                (p) => !(histTexts.contains(p.text) ||
+                    (p.images.isNotEmpty && histTexts.contains('[image]'))),
+              )
               .toList();
           if (_pendingUserMessages[sid]!.isEmpty) {
             _pendingUserMessages.remove(sid);
@@ -353,10 +358,26 @@ class AgentService extends ChangeNotifier {
       _send({'type': 'session_rename', 'sessionId': s.id, 'name': name});
   void selectSession(String sessionId) =>
       _send({'type': 'session_select', 'sessionId': sessionId});
-  void sendMessage(Session s, String text) {
-    _pendingUserMessages.putIfAbsent(s.id, () => []).add(text);
+  void sendMessage(
+    Session s,
+    String text, {
+    List<PendingImage> images = const [],
+    bool steer = true,
+  }) {
+    _pendingUserMessages.putIfAbsent(s.id, () => []).add(
+          PendingMessage(text: text, images: images),
+        );
     notifyListeners();
-    _send({'type': 'user_message', 'sessionId': s.id, 'text': text});
+    _send({
+      'type': 'user_message',
+      'sessionId': s.id,
+      'text': text,
+      if (images.isNotEmpty)
+        'images': [
+          for (final img in images) {'mimeType': img.mimeType, 'data': img.base64},
+        ],
+      'deliverAs': steer ? 'steer' : 'followUp',
+    });
   }
 
   void cancel(Session s) => _send({'type': 'cancel', 'sessionId': s.id});
@@ -496,4 +517,20 @@ class WebSocketConnection {
     _channel?.sink.close();
     _open = false;
   }
+}
+
+/// An image the user attached to a message, base64-encoded for the wire.
+class PendingImage {
+  final String mimeType;
+  final Uint8List bytes;
+  PendingImage({required this.mimeType, required this.bytes});
+
+  String get base64 => base64Encode(bytes);
+}
+
+/// A message the client has sent but has not yet seen confirmed in history.
+class PendingMessage {
+  final String text;
+  final List<PendingImage> images;
+  PendingMessage({required this.text, this.images = const []});
 }

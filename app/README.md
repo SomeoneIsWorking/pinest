@@ -48,7 +48,11 @@ node server.js
 
 ## Deployment
 
-Push to `main` branch to auto-deploy to Firebase Hosting.
+Pushes to `main` touching `app/` auto-deploy to Firebase Hosting via
+`.github/workflows/deploy-web.yml`. The workflow needs the repo secret
+`FIREBASE_SERVICE_ACCOUNT` (service-account JSON with the Firebase Hosting
+Admin role). Manual fallback: `flutter build web && firebase deploy --only
+hosting` from `app/`.
 
 ## License
 
