@@ -70,6 +70,8 @@ export interface SessionSnapshot {
   isHost?: boolean;
   createdAt?: number;
   resumed?: boolean;
+  /** Messages submitted but not yet delivered into the session (server-authoritative queue). */
+  pendingMessages?: string[];
 }
 
 export type ServerMessage =

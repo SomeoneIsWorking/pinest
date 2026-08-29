@@ -1,37 +1,48 @@
-# I-016 — consecutive steer messages voided by the submission race
+# I-016 — consecutive steers voided; queue moved server-side
 
 ## Symptom
 
-User: "if I send consecutive steer messages, the latter ones get voided" —
-messages sent in quick succession from the web app silently disappear
-(client shows them queued forever; the agent never answers).
+Sending consecutive messages while the agent worked: the later ones silently
+vanished ("voided") — shown as queued forever, never delivered.
 
-## Root cause (proven by elimination + repro)
+## Root cause (verified by reading pi's source + a scripted repro)
 
-1. **pi's core queue is correct.** `scratch/steer-repro/repro.mjs` (fake
-   streamFn, no network) proves the agent loop drains the steering queue
-   one-at-a-time across turns and delivers every steer.
-2. **The voiding is a submission race in AgentSession:** `prompt()` performs
-   async work (auth check, compaction check, extension input emit) BEFORE
-   setting `_isAgentRunActive = true`, and `session.isStreaming` reads exactly
-   that flag. A message submitted during that window sees `isStreaming === false`,
-   takes the full idle-prompt path instead of the steer path, and
-   `agent.prompt()` throws "Agent is already processing". The extension
-   runtime wrapper (`runner.bindCore.sendUserMessage`) swallows the rejection
-   into an error event the extension never observes — the message is voided
-   silently.
-3. **Fix (our layer):** `createMessageSubmitter` (`server/src/index.ts`) —
-   a serialized submission queue. After each submission that found the session
-   idle, it waits until the run's `message_start` is observed (5s cap) before
-   releasing the next submission, which then reliably takes the steer path.
-   Image content arrays are built here now.
+pi's raw steering queue is CORRECT: `scratch/steer-repro/repro.mjs` (scripted
+fake LLM) proves consecutive `agent.steer()` calls all deliver one turn at a
+time. The voiding is a submission race in `AgentSession.prompt()`:
 
-## Tests
+- `prompt()` performs async work (extension input emit, auth check, compaction
+  check) BEFORE setting `_isAgentRunActive = true`.
+- `session.isStreaming` returns exactly that flag.
+- A message submitted during that window therefore observes
+  `isStreaming === false`, takes the full idle prompt path, and
+  `agent.prompt()` throws "Agent is already processing".
+- The runtime wrapper `sendUserMessage(...).catch(err => runner.emitError(...))`
+  swallows the rejection into an extension error event — the message voids
+  silently. A burst of consecutive sends voids every message that lands inside
+  the window.
 
-- `server/test/reload.test.ts`: rapid triple-submit serializes 1→2→3 with no
-  losses; image submit produces a `[text, image]` content array; the cap
-  releases the queue when a run never starts (no wedge).
+## Fixes
 
-## Status
+1. **Serialized submission queue** (`createMessageSubmitter`,
+   `server/src/index.ts`): submissions are chained; after each submission the
+   queue waits until `message_start` proves the run actually started (5s cap
+   so a failed start can't wedge it). Later messages then reliably take the
+   steer path. Tests: `server/test/submitter.test.ts`-style coverage via
+   ordering + wait-cap tests.
+2. **Server-authoritative pending queue** (user direction: "the app is only
+   supposed to act like a terminal"): the extension tracks submitted-but-
+   undelivered texts (`pushPending`/`popPending` in `logic.ts`, first-
+   occurrence pop on `message_start`, cleared on `session_new`), reports them
+   in the session snapshot as `pendingMessages`, and the client renders
+   `session.pendingMessages` directly. All client-side pending bookkeeping
+   (`_pendingUserMessages`, `PendingMessage`, history-text matching) is
+   deleted. Tests: `server/test/logic.test.ts` (duplicates, first-occurrence
+   pop, unknown-text no-op).
 
-Fixed in `server/src/index.ts`; deployed with the host reload (G3).
+## Verification
+
+- `scratch/steer-repro/repro.mjs`: raw-Agent repro — steers delivered
+  (before fix at pi level: n/a; pi was correct), used to rule OUT pi.
+- `cd server && npm test` all pass; `npm run typecheck` clean.
+- `flutter analyze` clean, `flutter test` pass.
