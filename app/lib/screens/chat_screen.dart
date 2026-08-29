@@ -939,15 +939,19 @@ class _ToolCallCardState extends State<_ToolCallCard> {
                     ),
                   ),
                   if (argStr.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(left: 6),
-                      child: Text(
-                        _argSummary(widget.name, widget.args),
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Colors.grey.shade600,
+                    Flexible(
+                      child: Padding(
+                        padding: const EdgeInsets.only(left: 6),
+                        child: Text(
+                          _argSummary(widget.name, widget.args),
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Colors.grey.shade600,
+                          ),
+                          maxLines: 1,
+                          softWrap: false,
+                          overflow: TextOverflow.ellipsis,
                         ),
-                        overflow: TextOverflow.ellipsis,
                       ),
                     ),
                   const SizedBox(width: 4),
@@ -1025,23 +1029,38 @@ class _ToolCallCardState extends State<_ToolCallCard> {
     return 'bash';
   }
 
+  static const _summaryMaxChars = 160;
+
   String _argSummary(String toolName, dynamic args) {
     if (args == null) return '';
+    String? summary;
     if (args is Map) {
       // Show the most relevant field
       for (final key in [
+        'command',
         'path',
         'file',
-        'command',
         'url',
         'query',
         'pattern',
       ]) {
-        if (args[key] != null) return '${args[key]}';
+        if (args[key] != null) {
+          // Bash commands keep their newlines visible as separators.
+          summary = key == 'command'
+              ? (args[key] as String).replaceAll('\n', ' ; ').trim()
+              : '${args[key]}';
+          break;
+        }
       }
-      if (args.length == 1) return '${args.values.first}';
+      summary ??= args.length == 1 ? '${args.values.first}' : null;
     }
-    return '';
+    summary ??= '';
+    // Hard character cap: long terminal calls must fit one line, not wrap the
+    // card into a tall block. The full args stay in the expandable body.
+    if (summary.length > _summaryMaxChars) {
+      summary = '${summary.substring(0, _summaryMaxChars)}…';
+    }
+    return summary;
   }
 }
 
