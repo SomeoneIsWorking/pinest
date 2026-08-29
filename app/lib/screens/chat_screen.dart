@@ -371,28 +371,6 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _steerToggle() {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(
-          _steer ? Icons.bolt : Icons.low_priority,
-          size: 14,
-          color: _steer ? Colors.deepOrange : Colors.grey,
-        ),
-        const SizedBox(width: 4),
-        Text(
-          _steer ? 'Steer' : 'Queue as follow-up',
-          style: TextStyle(fontSize: 11, color: Colors.grey.shade700),
-        ),
-        Switch(
-          value: _steer,
-          onChanged: (v) => setState(() => _steer = v),
-        ),
-      ],
-    );
-  }
-
   Widget _inputBar(bool working, AgentService svc, Session? s) {
     return SafeArea(
       child: Padding(
@@ -417,33 +395,40 @@ class _ChatScreenState extends State<ChatScreen> {
                       }
                     },
                     child: TextField(
-                  controller: _input,
-                  minLines: 1,
-                  maxLines: 5,
-                  decoration: InputDecoration(
-                    hintText: working
-                        ? 'Agent is working… (steer or wait)'
-                        : 'Message… ($_sendShortcutLabel to send)',
-                    border: const OutlineInputBorder(),
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 10,
+                      controller: _input,
+                      minLines: 1,
+                      maxLines: 5,
+                      decoration: InputDecoration(
+                        hintText: working
+                            ? 'Agent is working… (steer or wait)'
+                            : 'Message… ($_sendShortcutLabel to send)',
+                        border: const OutlineInputBorder(),
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
+                      ),
+                      onSubmitted: (_) => _send(),
                     ),
                   ),
-                  onSubmitted: (_) => _send(),
-                  ),
-                ),
-                  if (working)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 4),
-                      child: _steerToggle(),
-                    ),
                 ],
               ),
             ),
             const SizedBox(width: 8),
-            // When working: stop button (same style as send, right of it would be itself)
-            // So: send button always, stop button to its RIGHT when working
+            // Mid-turn delivery mode: bolt = steer (delivered before the next
+            // LLM call), low_priority = queue as follow-up (after the turn).
+            // Irrelevant when idle, so only shown while working.
+            if (working)
+              IconButton(
+                icon: Icon(
+                  _steer ? Icons.bolt : Icons.low_priority,
+                  color: _steer ? Colors.deepOrange : Colors.grey,
+                ),
+                tooltip: _steer
+                    ? 'Steering — tap to queue as follow-up'
+                    : 'Queued follow-up — tap to steer mid-turn',
+                onPressed: () => setState(() => _steer = !_steer),
+              ),
             IconButton.filled(icon: const Icon(Icons.send), onPressed: _send),
             if (working) ...[
               const SizedBox(width: 8),
