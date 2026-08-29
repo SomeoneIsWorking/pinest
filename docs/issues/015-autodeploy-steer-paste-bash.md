@@ -117,3 +117,18 @@ messages vanished from the UI until turn end or refresh (and steered messages
 for the whole turn). History broadcast + pending-pop moved to message_end
 (+100ms settle). This also retroactively explains the "consecutive steers
 voided" report.
+
+## Follow-up 6: invisible delivered messages + tool card layout (1a34745)
+
+- **Messages invisible until refresh (root cause found).** The history
+  broadcast fired at `message_start`, but pi persists the message at
+  `message_end` — so the broadcast carried history WITHOUT the message while
+  the pending pop removed the queued bubble at the same instant: the message
+  vanished from the UI until turn end/refresh. Pop + history now happen at
+  `message_end` (+100ms settle). This also re-explains "consecutive steers
+  get voided" — they were delivered but invisible.
+- **Tool cards**: command shown as card name without maxLines wrapped into
+  tall blocks while the summary starved to zero width in a Flexible. Header
+  is now name row + single-line 160-char summary line; `_bashLabel` removed.
+- **Attachment previews**: input row bottom-aligned so previews growing above
+  the field no longer push send/stop off the bar.
