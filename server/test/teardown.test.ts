@@ -72,22 +72,27 @@ test("session_new on a spawned session stops the old session before replacing it
 // be handed to the new instance instead of being killed and re-opened. What
 // must never happen: a parked session that nobody adopts keeps running.
 
-function liveStub(calls: string[], status: "idle" | "working" = "idle") {
+function liveStub(
+  calls: string[],
+  status: "idle" | "working" = "idle",
+  sessionIsIdle?: boolean,
+) {
   const subs: Array<(e: unknown) => void> = [];
   return {
     session: {
       abort: async () => { calls.push("abort"); },
       dispose: () => { calls.push("dispose"); },
       subscribe: (fn: (e: unknown) => void) => { subs.push(fn); return () => { calls.push("unsub"); }; },
+      ...(sessionIsIdle === undefined ? {} : { isIdle: sessionIsIdle }),
     },
     currentTurnId: null,
     unsub: () => { calls.push("unsub-old"); },
-    cwd: process.cwd(),
+    cwd: "/work/pvz",
     status,
-    name: "stub",
+    name: "pvz",
     model: null, modelName: null,
     _streamingText: null, _compacting: false,
-    pending: [], turnStarted: status === "working", submitter: null,
+    pending: [], pendingSteering: [], turnStarted: status === "working", submitter: null,
   };
 }
 
@@ -172,4 +177,58 @@ test("pending steers are reported separately from queued follow-ups", async () =
   assert.deepEqual(last.pendingMessages, ["steer me", "later please"], "both are pending");
   assert.deepEqual(last.pendingSteering, ["steer me"], "only the steer is reported as steering");
   assert.deepEqual(sent, ["steer me", "later please"], "both must actually be submitted");
+});
+
+// ── Adoption must report IDENTITY and the REAL status ─────────────────────
+// The new instance starts with an empty snapshot map. Reporting only
+// status/model made adopted sessions appear as "session" with a blank
+// workspace, and a run that ended during the handoff left them stuck
+// "working" with nothing happening.
+test("adoption reports name/cwd and takes status from the session, not the parked flag", () => {
+  const sup = makeSupervisor();
+  const snaps: Array<[string, Record<string, unknown>]> = [];
+  (sup as any).callbacks.upsertSession = (id: string, snap: Record<string, unknown>) => {
+    snaps.push([id, snap]);
+  };
+  const calls: string[] = [];
+  // Parked as "working", but the session itself has since gone idle.
+  (sup as any).sessions.set("s1", liveStub(calls, "working", true));
+  sup.stashForReload();
+
+  const sup2 = makeSupervisor();
+  const snaps2: Array<[string, Record<string, unknown>]> = [];
+  (sup2 as any).callbacks.upsertSession = (id: string, snap: Record<string, unknown>) => {
+    snaps2.push([id, snap]);
+  };
+  assert.equal(sup2.adoptStashedSessions(), 1);
+
+  const snap = snaps2.find(([id]) => id === "s1")?.[1];
+  assert.ok(snap, "adoption must push a snapshot");
+  assert.equal(snap!.name, "pvz", "the session keeps its name across a reload");
+  assert.equal(snap!.cwd, "/work/pvz", "the workspace must not go blank");
+  assert.equal(snap!.status, "idle", "status comes from session.isIdle, not the stale parked flag");
+  assert.equal((sup2 as any).sessions.get("s1").turnStarted, false, "an idle session must not keep the gate closed");
+});
+
+test("a session still streaming at adoption stays working", () => {
+  const sup = makeSupervisor();
+  (sup as any).sessions.set("s2", liveStub([], "working", false)); // isIdle false = still running
+  sup.stashForReload();
+  const sup2 = makeSupervisor();
+  const snaps: Array<Record<string, unknown>> = [];
+  (sup2 as any).callbacks.upsertSession = (_id: string, snap: Record<string, unknown>) => snaps.push(snap);
+  sup2.adoptStashedSessions();
+  assert.equal(snaps[0]!.status, "working");
+  assert.equal((sup2 as any).sessions.get("s2").turnStarted, true, "a live run keeps the submission gate closed");
+});
+
+test("parking keeps the old subscription so a gap agent_end is not lost", () => {
+  const sup = makeSupervisor();
+  const calls: string[] = [];
+  (sup as any).sessions.set("s3", liveStub(calls, "working", true));
+  sup.stashForReload();
+  assert.ok(!calls.includes("unsub-old"), `park must NOT unsubscribe; calls=${calls}`);
+  const sup2 = makeSupervisor();
+  sup2.adoptStashedSessions();
+  assert.ok(calls.includes("unsub-old"), `adopt must drop the old subscription; calls=${calls}`);
 });
