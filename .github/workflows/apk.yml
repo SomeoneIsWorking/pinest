@@ -54,6 +54,7 @@ jobs:
       # not something to retry past.
       - run: flutter analyze
       - run: flutter test
+      - run: python3 -m unittest discover -s tools -p "test_*.py"
 
       # Release signing is mandatory. The stable key makes later builds
       # installable as in-place updates and keeps one cryptographic identity.
