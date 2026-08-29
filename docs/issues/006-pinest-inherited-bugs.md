@@ -3,14 +3,16 @@
 Known-defective in PiNest at clone time (commit 2026-07-11). Disposition
 after the port to `server/` (TypeScript):
 
-1. `start_pinest.sh` broken path — FIXED: replaced by `run.sh` at repo root
-   (`pi -e server/src/index.ts`), no hardcoded project list, `RC_START_DIR`
-   env to choose the working directory.
+1. `start_pinest.sh` broken path — FIXED: removed instead of replacing it with
+   another project-specific launcher. The root pi package manifest owns
+   installation (`pi install git:github.com/SomeoneIsWorking/pinest`); pi then
+   loads `server/src/index.ts` on ordinary launches.
 2. `listPaths` defined nowhere → `list_paths` always errored — FIXED:
    implemented in `server/src/logic.ts` (descend/sibling/typo-walk-up
    semantics) + tests.
 3. package.json `bin` → nonexistent cli, `build: tsc` with no tsconfig —
-   FIXED: manifest cleaned; `main`/`pi.extensions` point at `src/index.ts`.
+   FIXED: one root manifest owns install/runtime/test dependencies and
+   `main`/`pi.extensions` point at `server/src/index.ts`.
 4. App never re-dials after WS close — OPEN, app-side (I-007).
 5. `stream` messages carry full accumulated text per delta (O(n²) over the
    tunnel) — OPEN, protocol+app change together (I-007).

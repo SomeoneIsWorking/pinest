@@ -7,7 +7,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const ROOT = resolve(dirname(new URL(import.meta.url).pathname), "..");
+const ROOT = resolve(dirname(new URL(import.meta.url).pathname), "../..");
 const pkg = JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf-8"));
 
 test("package.json declares a 'pi.extensions' manifest", () => {

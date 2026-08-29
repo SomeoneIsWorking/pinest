@@ -13,6 +13,8 @@ holds rules.
 
 - `server/` — the pi extension (Node ESM, erasable TypeScript, no build step:
   pi loads `.ts` via jiti, tests run via Node's native type stripping).
+- `package.json` — the pi package manifest and one dependency/test authority;
+  `pi install git:github.com/SomeoneIsWorking/pinest` is the shipping install path.
 - `app/` — Flutter client (forked from PiNest; added later).
 - `docs/` — goals, state ledger, issues, codemap.
 - `scratch/` — gitignored. All run artifacts go here (`scratch/logs/`, `scratch/raw/`). Never `/tmp`.
@@ -20,10 +22,10 @@ holds rules.
 ## Gates (run before declaring any server change done)
 
 ```sh
-cd server && npm install        # first time only
-cd server && npm test           # node --test (runs .ts directly), includes extension-load test with stubbed pi API
-cd server && npm run typecheck  # tsc --noEmit over src/ + support/ (erasable TS only — no enums/namespaces)
-./run.sh                        # smoke the real host when pi is installed
+npm install                     # first time only
+npm test                        # node --test (runs .ts directly), includes extension-load test with stubbed pi API
+npm run typecheck               # tsc --noEmit over server/src + support (erasable TS only — no enums/namespaces)
+pi -e server/src/index.ts       # development smoke; users install through pi's package manager
 node drills/reload-midrun.mjs   # reload/handoff changes: must PASS, and --negative must fail
 ```
 
@@ -68,6 +70,9 @@ identity. The release certificate SHA-256 is
 
 ## Rules specific to this repo
 
+- This is a pi extension, not a standalone or game project. Do not add a
+  `run.sh`; installation and updates go through pi's package manager and the
+  root package manifest.
 - The agent core is **pi**. Do not reintroduce opencode/pi forks or child-process
   `pi --mode rpc` spawning; sessions are in-process pi SDK `createAgentSession()` objects.
 - Model target is **GLM-5.3-Flash via OpenCode Go** (`https://opencode.ai/zen/go/v1`,

@@ -135,3 +135,14 @@ test("presenceToFirestoreFields: pure conversion", () => {
   assert.deepEqual(f.online, { booleanValue: false });
   assert.ok(!("ownerEmail" in f), "unset optional fields omitted");
 });
+
+test("an invalid explicit service account fails instead of changing auth backends", async () => {
+  const { writeFileSync, unlinkSync } = await import("node:fs");
+  const path = join(TMP, "nonexistent-sa.json");
+  writeFileSync(path, "not-json");
+  try {
+    await assert.rejects(() => createFirebase(), SyntaxError);
+  } finally {
+    unlinkSync(path);
+  }
+});

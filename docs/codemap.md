@@ -25,7 +25,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 | TUI attach overlay (drive a headless session from the host TUI) | `server` | `server/src/attach-view.ts` |
 | Type shims for untyped deps | `server` | `server/src/types-shims.d.ts` |
 | Server test fixtures/helpers and Node test suites | `server` | `server/support/`, `server/test/` |
-| Launcher (slim shim → `pi -e server/src/index.ts`) | repo root | `run.sh` |
+| Pi package identity, dependency graph, extension discovery + normal test entry points | repo root | `package.json`, `package-lock.json` (`pi install git:github.com/SomeoneIsWorking/pinest`) |
 | Flutter client (chat, sessions, spawn, auth) | `app` | `app/lib/` (forked from PiNest) |
 | Attachment selection/routing and platform file-byte readers | `app` | `app/lib/services/attachment_selection.dart`, `file_pick_bridge.dart`, `file_reader_bytes.dart`, `picked_file.dart` |
 | Image paste event bridge (web) | `app` | `app/lib/services/paste_bridge.dart` (conditional import: `paste_web.dart` / `paste_stub.dart`) |
@@ -47,7 +47,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Firebase web config (public) for the app | `app` | `app/lib/firebase_options.dart` |
 | Provider entry (OpenCode Go / glm-5.3-flash), compact settings + auth-store provisioning | user machine config | `server/scripts/provision.ts` (I-005) writes pi's resolved user configuration |
 | Hosted discovery rules (owner-writable presence doc) | repo root | `firestore.rules` — deploy to pinest-app (I-008) |
-| Source-size structure gate (1,200 default + non-growing legacy ceilings) | repo root | `tools/check_structure.py`, `tools/test_check_structure.py`; entered by `server/package.json` |
+| Source-size structure gate (1,200 default + non-growing legacy ceilings) | repo root | `tools/check_structure.py`, `tools/test_check_structure.py`; entered by root `package.json` |
 | Public project overview + reproducible mocked screenshots | repo root | `README.md`, `docs/screenshots/`, `app/test/readme_screenshots_test.dart` |
 
 ## Intended (not yet placed)
