@@ -24,11 +24,21 @@ cd server && npm install        # first time only
 cd server && npm test           # node --test (runs .ts directly), includes extension-load test with stubbed pi API
 cd server && npm run typecheck  # tsc --noEmit over src/ + support/ (erasable TS only — no enums/namespaces)
 ./run.sh                        # smoke the real host when pi is installed
+node drills/reload-midrun.mjs   # reload/handoff changes: must PASS, and --negative must fail
 ```
 
 The extension-load test stubs the pi API; it proves the module loads and routes,
 NOT that pi accepts it. Changes to extension registration surface must also be
-smoked against a real `pi -e server/src/index.ts` run when pi is available.
+smoked against a real `pi -e server/src/index.ts` run when pi is available —
+`drills/reload-explicit-rpc.mjs` does exactly that. Drills are instruments and
+live in git (`drills/README.md`); only their output belongs in `scratch/`. Run
+a drill in BOTH directions (`--negative`) before trusting its verdict.
+
+Reload is EXPLICIT, never automatic: the watcher records changed files, the
+agent reloads itself with `reload_runtime` when its edits are complete. Do not
+re-wire a file change to a reload — that is I-021, and it kills the host
+mid-edit. On reload, live sessions are HANDED OVER (parked on `globalThis`,
+adopted by the re-imported instance), never stopped and re-opened.
 
 The web client deploys from the LOCAL system only — no CI. After any `app/`
 change lands on `main`, run `cd app && ./deploy.sh` (analyze + test + build +

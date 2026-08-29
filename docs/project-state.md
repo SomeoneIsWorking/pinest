@@ -76,8 +76,9 @@ Status: `verified`
 `server/src/watch.ts` + index wiring: watcher over global/project extension
 dirs, this extension's own source, and settings files (debounced 1.5s, arm
 delay, `RC_NO_WATCH=1` opt-out). The watcher NEVER reloads — it records the
-changed paths (`_changedSources`), which the `state` broadcast carries as
-`pendingReload {count, files, watching}` and `reload_runtime` reports back.
+changed paths (`_changedSources`), which
+`reload_runtime` reports back to the agent (the app has no reload UI by
+design — self-modification is the agent's, so the reload is the agent's).
 Reload is explicit only: `/pinest-reload` calls `ctx.reload()` after
 `waitForIdle`; the `reload_runtime` LLM tool and the app's `reload` WS
 command queue that command. `queueReload()` returns `{ok, message}` — a
@@ -94,8 +95,13 @@ aborting, `adoptStashedSessions()` re-wires them into the re-imported instance
 opened twice. A stash nobody adopts is aborted at `ADOPT_DEADLINE_MS` (30s,
 `RC_ADOPT_DEADLINE_MS` for tests) — an unadopted run is the I-020 zombie. A row
 that was `running` when its host went away is resumed with a nudge to continue.
-Evidence: real-host drill parked 3 → adopted 3, duplicate re-opens blocked,
-zero `extension_error`. Mid-RUN adoption is unit-tested only.
+Evidence: `drills/reload-explicit-rpc.mjs` on a real `pi --mode rpc` host
+parked 3 → adopted 3, duplicate re-opens blocked, zero `extension_error`; and
+`drills/reload-midrun.mjs` (real AgentSession, local fake SSE model) reloaded
+MID-RUN — 3 tokens before, 21 NEW tokens after on the adopted instance, 24/24
+total, the old instance silent, and the adopted session still accepted a new
+message. Its `--negative` control (park, then kill the run anyway) fails at the
+survival assertion, so the drill discriminates.
 
 Auto-reload-on-change was REMOVED (2026-08-29) after it took the host down:
 every edit the agent made to its own source fired a reload, tearing down the
@@ -115,9 +121,9 @@ queued "/rc-reload" would have reached the LLM as literal text; queueReload
 now passes `expandPromptTemplates: true`. The watcher also no longer depends
 on Firebase bootstrap succeeding.
 
-Gaps: reload during an ACTIVE remote session (spawned sessions parking +
-app reconnect) exercised end-to-end — blocked on S6. The app has no UI for
-`pendingReload` yet; the field is broadcast but unused by the client.
+Gaps: reload during an ACTIVE remote session with the APP attached
+(reconnect across the reload) is still unexercised — the drills cover the
+server side only.
 
 Reload teardown correctness (found 2026-08-28, fixed): supervisor teardown
 called `(session as any).shutdown?.()` — the SDK AgentSession has NO
