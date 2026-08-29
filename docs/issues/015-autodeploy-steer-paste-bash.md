@@ -180,7 +180,7 @@ re-rendered every stale call inline + at the bottom. Clear-on-history shipped
 earlier; history cards now ALSO carry tool results (paired by toolCallId in
 messagesToHistory) so they match live cards exactly.
 
-## Follow-up 8: canonical `pinest.web.app` Hosting site (pre-deploy)
+## Follow-up 8: canonical `pinest.web.app` Hosting site
 
 The original Firebase project ID is `pinest-app`, so its default Hosting site
 was `pinest-app.web.app`. The user-facing URL is now owned separately from that
@@ -200,8 +200,11 @@ project ID:
   local release bundle, checks the PiNest index, and refuses unless a legacy
   path returns the exact canonical 301.
 
-Delivery state is pre-deploy: the site, auth-domain entry, mapping, redirect,
-and verifier exist, but this tree has not yet been deployed to the two Hosting
-targets. Public bundle equality and the live 301 remain pending; the opening
-`pinest-app.web.app` stale-site account above is historical evidence and is
-deliberately preserved.
+The two Hosting targets are deployed. `tools/verify_hosting.py` matched the
+public bundle to the local release at SHA-256
+`abb6f8f5157aff4983b977c43952ad1c3e10cf5160062a9e61fc8c37eb754a3f` and
+verified exact legacy 301 redirects for `/` and `/release-verification`. Its
+wrong-hash control fails, and the earlier malformed wildcard redirect produced
+a real nested-path 404 before the routing fix, so both outcomes have been
+observed. The opening `pinest-app.web.app` stale-site account above remains as
+historical evidence.

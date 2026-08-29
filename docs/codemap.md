@@ -49,6 +49,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Hosted discovery rules (owner-writable presence doc) | repo root | `firestore.rules` — deploy to pinest-app (I-008) |
 | Source-size structure gate (1,200 default + non-growing legacy ceilings) | repo root | `tools/check_structure.py`, `tools/test_check_structure.py`; entered by root `package.json` |
 | Public project overview + reproducible mocked screenshots | repo root | `README.md`, `docs/screenshots/`, `app/test/readme_screenshots_test.dart` |
+| Verified factual claims and trusted-instrument evidence | repo root | `docs/info/claims/`, `docs/info/instruments/` |
 
 ## Intended (not yet placed)
 

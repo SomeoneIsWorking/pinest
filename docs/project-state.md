@@ -200,12 +200,15 @@ PiNest's app forked to `app/` (dead code not carried): reconnect fix landed
 default model `opencode-go/glm-5.3-flash`, and `firebase_options.dart`
 checked in (public web config — pinest gitignored it, breaking fresh
 clones). Verified with `flutter analyze` (0 issues) and `flutter build web`,
-and previously deployed to `pinest-app.web.app` (deploy verified by
-string-match in the served `main.dart.js`). The new canonical Hosting site
-`pinest` now exists in Firebase project `pinest-app`, `pinest.web.app` is an
-authorized auth domain, and the checked-in multisite configuration maps the
-canonical site plus a 301 redirect from the former default site. The first
-deployment and public verification of that configuration are still pending.
+then deployed to the canonical `pinest.web.app` Hosting site. Public
+verification matched the served `main.dart.js` to the local release bundle at
+SHA-256
+`abb6f8f5157aff4983b977c43952ad1c3e10cf5160062a9e61fc8c37eb754a3f`.
+The former `pinest-app.web.app` site returns an exact 301 to the canonical host
+for both `/` and a nested-path control. `pinest.web.app` is an authorized auth
+domain. The internal Firebase Auth helper remains
+`pinest-app.firebaseapp.com` because that callback is registered with the
+Google OAuth client; it does not determine the public app URL.
 
 First real-user test against the deployed app surfaced and fixed four
 defects: (1) the host `model_set` updated the label without awaiting or
@@ -240,7 +243,8 @@ command that ran. The web client deploys locally via `app/deploy.sh` (analyze
 + test + build + `firebase deploy -P pinest-app`); Firebase targets in
 `app/.firebaserc` deploy the canonical `pinest` site and the legacy redirect
 together. Run it after every update to `app/`; there is no CI deploy (I-015).
-Live deployment and browser re-verification of this batch are still pending.
+The deployed bundle and both redirect controls pass `tools/verify_hosting.py`;
+its wrong-hash negative control fails as required.
 
 The repository tip and reachable history passed the publication audit after a
 history-preserving rewrite removed the historical findings (I-014).
@@ -329,8 +333,13 @@ All four `ANDROID_KEYSTORE_*` GitHub secrets are configured for the stable
 release certificate, SHA-256
 `83:98:6D:18:59:DE:4C:E0:97:9A:E4:3C:9E:18:40:36:E4:9B:DE:3C:BC:A3:7E:F2:C8:EF:A9:3F:D7:51:A3:F5`,
 and CI runs `app/tools/verify_apk.py` against the package and certificate before
-publication. The first newly signed `apk-latest` publication is pending the
-first push, so no published artifact is yet cited as proof.
+publication. GitHub Actions run
+[`33280431296`](https://github.com/SomeoneIsWorking/pinest/actions/runs/33280431296)
+published the stable-signed rolling release. The independently downloaded
+public `pinest.apk` verifies as package `com.barishamil.pinest`, signer SHA-256
+`83986D1859DE4CE0979AE43C9E184036E49BDE3CBCA37EF2C8EFA93FD751A3F5`,
+and artifact SHA-256
+`04c1a7ec562ad36a82e0a9850620e93d02114c5a4b16562207098e3b625f89d6`.
 
 The application identity is now `com.barishamil.pinest` across Android,
 Linux, iOS and macOS (Apple test bundles use the derived `.RunnerTests`
@@ -360,12 +369,9 @@ raced "Agent is already processing" and the runtime swallowed the error).
 
 Gaps: run against the live host from an actual phone; hosted (RestImpl)
 backend not yet exercised by a real browser sign-in; stream deltas
-(I-006 item 5) still cumulative — protocol+app change together; publish and
-inspect the first stable-key `apk-latest`; deploy and publicly verify
-`pinest.web.app` plus the former site's 301 redirect (I-015, I-024).
+(I-006 item 5) still cumulative — protocol+app change together.
 
 ## Current focus
 
-Publish and verify the first stable-signed APK and canonical Hosting deploy,
-then run the app against the live host from a phone and exercise one real
-hosted (RestImpl) browser sign-in end-to-end.
+Run the app against the live host from a phone and exercise one real hosted
+(RestImpl) browser sign-in end-to-end.

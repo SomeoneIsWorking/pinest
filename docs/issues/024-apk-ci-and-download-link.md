@@ -64,7 +64,7 @@ failed sign-in prints its reason on the login screen instead of only reaching
 `debugPrint`. NOT yet exercised on a real device — no Android device is
 attached to this machine.
 
-## Signing (configured; first publication pending)
+## Signing and publication
 
 The stable release keystore exists and all four repository secrets are now
 configured: `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
@@ -80,15 +80,15 @@ nor publish a release artifact. Non-PR release builds run
 `com.barishamil.pinest` or a signer other than the recorded certificate before
 upload/publication.
 
-The first stable-key build is not published yet: it awaits the first push that
-triggers this workflow. The current `apk-latest` asset therefore is not
-evidence for the new signing path. An existing debug-signed installation will
-need one uninstall before installing the first stable-key APK; builds signed by
-the stable key after that are intended to update in place.
+GitHub Actions run
+[`33280431296`](https://github.com/SomeoneIsWorking/pinest/actions/runs/33280431296)
+built, verified, and published the first stable-key `apk-latest` release. An
+existing debug-signed installation needs one uninstall before installing this
+stable-key APK; subsequent builds signed by the stable key update in place.
 
 ## Verification state
 
-Verified before publication:
+Verified after publication:
 
 - Firebase and platform registrations/configuration agree on
   `com.barishamil.pinest`; the new Apple app is recorded above and obsolete
@@ -98,8 +98,9 @@ Verified before publication:
   build alone.
 - The verifier has negative controls for the old release certificate and a
   deliberately wrong expected package; both are refused.
-
-Still required after the first push: cite the exact green workflow run,
-download the resulting `apk-latest` asset, run `app/tools/verify_apk.py` on
-that public asset, and record its artifact SHA-256. Until then this is
-implementation-ready, not a verified published release.
+- The public `pinest.apk` downloaded from the rolling release passes the same
+  verifier independently of CI: package `com.barishamil.pinest`, signer
+  SHA-256
+  `83986D1859DE4CE0979AE43C9E184036E49BDE3CBCA37EF2C8EFA93FD751A3F5`,
+  artifact SHA-256
+  `04c1a7ec562ad36a82e0a9850620e93d02114c5a4b16562207098e3b625f89d6`.
