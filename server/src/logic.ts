@@ -65,21 +65,44 @@ export function popPending(list: string[], text: string): string[] {
   return [...list.slice(0, idx), ...list.slice(idx + 1)];
 }
 
+/** Images a single tool result may contribute to history. */
+const MAX_IMAGES_PER_RESULT = 2;
+/** Images carried by ONE history payload, newest first. Transcripts can hold
+ * dozens of image reads; sending every one on every history push would put
+ * tens of MB through the tunnel per refresh. Whatever is dropped is REPORTED
+ * per tool (`imagesOmitted`) — a card that just shows nothing is a lie. */
+const MAX_IMAGES_PER_HISTORY = 8;
+
+function extractImages(content: unknown): Array<{ data: string; mimeType: string }> {
+  if (!Array.isArray(content)) return [];
+  const out: Array<{ data: string; mimeType: string }> = [];
+  for (const p of content as any[]) {
+    if (p?.type === "image" && typeof p.data === "string" && p.data) {
+      out.push({ data: p.data, mimeType: p.mimeType || "image/png" });
+      if (out.length >= MAX_IMAGES_PER_RESULT) break;
+    }
+  }
+  return out;
+}
+
 /** Convert pi messages array → simple {role, text, tools} pairs for the app. */
 export function messagesToHistory(messages: unknown): HistoryItem[] {
   if (!Array.isArray(messages)) return [];
   // Pair each tool call with its result (role:"toolResult", matched by
-  // toolCallId) so history cards match what live cards showed.
-  const results = new Map<string, { result: string; isError: boolean }>();
+  // toolCallId) so history cards match what live cards showed — INCLUDING the
+  // images a result carried (an image `read` is a text note plus an image
+  // part; dropping the part made the picture vanish on the next refresh).
+  const results = new Map<string, { result: string; isError: boolean; images: Array<{ data: string; mimeType: string }> }>();
   for (const m of messages as any[]) {
     if (m?.role === "toolResult" && m.toolCallId) {
       results.set(m.toolCallId, {
         result: extractText(m.content).slice(0, 10_000),
         isError: !!m.isError,
+        images: extractImages(m.content),
       });
     }
   }
-  return (messages as any[])
+  const items: HistoryItem[] = (messages as any[])
     .filter((m) => m.role === "user" || m.role === "assistant")
     .map((m) => {
       const text = extractText(m.content) ||
@@ -93,13 +116,42 @@ export function messagesToHistory(messages: unknown): HistoryItem[] {
         for (const p of m.content) {
           if (p.type === "toolCall") {
             const r = results.get(p.id);
-            tools.push({ name: p.name, args: p.arguments, id: p.id, result: r?.result, isError: r?.isError });
+            tools.push({
+              name: p.name, args: p.arguments, id: p.id,
+              result: r?.result, isError: r?.isError,
+              images: r?.images ?? [],
+            });
           }
         }
       }
       return { role: m.role as "user" | "assistant", text, tools };
     })
     .filter((m) => m.text.length > 0 || m.tools.length > 0);
+  return budgetHistoryImages(items);
+}
+
+/** Keep the newest images within the payload budget; older tool cards keep a
+ * COUNT of what was dropped so the app can say "2 images not shown" instead of
+ * rendering an empty card. */
+function budgetHistoryImages(items: HistoryItem[]): HistoryItem[] {
+  let budget = MAX_IMAGES_PER_HISTORY;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const tools = items[i]?.tools ?? [];
+    for (let j = tools.length - 1; j >= 0; j--) {
+      const t = tools[j];
+      if (!t) continue;
+      const have = t.images?.length ?? 0;
+      if (!have) continue;
+      if (budget >= have) {
+        budget -= have;
+      } else {
+        t.imagesOmitted = have - budget;
+        t.images = budget > 0 ? t.images!.slice(0, budget) : [];
+        budget = 0;
+      }
+    }
+  }
+  return items;
 }
 
 /** Derive a session display name: explicit name, else cwd basename, else 'session'. */

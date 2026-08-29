@@ -355,7 +355,13 @@ class _ChatScreenState extends State<ChatScreen> {
                 name: tm['name'] ?? 'tool',
                 args: tm['args'],
                 result: tm['result'] as String?,
-                images: const [],
+                // An image `read` returns a text note plus the image itself —
+                // history carries both, so a refresh no longer blanks it.
+                images: [
+                  for (final img in (tm['images'] as List? ?? const []))
+                    Map<String, dynamic>.from(img as Map),
+                ],
+                imagesOmitted: (tm['imagesOmitted'] as num?)?.toInt() ?? 0,
                 isError: tm['isError'] as bool? ?? false,
                 running: false,
               ),
@@ -1090,6 +1096,9 @@ class _ToolCallCard extends StatefulWidget {
   final dynamic args;
   final String? result;
   final List<Map<String, dynamic>> images;
+  /// Images the server left out of this history payload. Shown as a count —
+  /// an image that is not there must say so rather than just be absent.
+  final int imagesOmitted;
   final bool isError;
   final bool running;
   const _ToolCallCard({
@@ -1099,6 +1108,7 @@ class _ToolCallCard extends StatefulWidget {
     required this.images,
     required this.isError,
     required this.running,
+    this.imagesOmitted = 0,
   });
 
   @override
@@ -1181,6 +1191,32 @@ class _ToolCallCardState extends State<_ToolCallCard> {
                 ],
               ),
             ),
+            // Images a tool RETURNED (an image `read`) are the point of the
+            // card — always visible, not hidden behind the expander. Tap to
+            // open full size.
+            for (final img in widget.images)
+              Padding(
+                padding: const EdgeInsets.only(left: 20, top: 4),
+                child: InkWell(
+                  onTap: () => _showImage(context, img['data'] as String),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(6),
+                    child: Image.memory(
+                      base64Decode(img['data'] as String),
+                      width: 240,
+                      fit: BoxFit.contain,
+                    ),
+                  ),
+                ),
+              ),
+            if (widget.imagesOmitted > 0)
+              Padding(
+                padding: const EdgeInsets.only(left: 20, top: 4),
+                child: Text(
+                  '${widget.imagesOmitted} image(s) not shown — older history',
+                  style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                ),
+              ),
             if (_expanded) ...[
               if (argStr.isNotEmpty)
                 Container(
@@ -1223,16 +1259,22 @@ class _ToolCallCardState extends State<_ToolCallCard> {
                     ),
                   ),
                 ),
-              for (final img in widget.images)
-                Container(
-                  margin: const EdgeInsets.only(top: 4),
-                  child: Image.memory(
-                    base64Decode(img['data'] as String),
-                    width: 200,
-                  ),
-                ),
             ],
           ],
+        ),
+      ),
+    );
+  }
+
+  /// Full-size view of a tool-returned image (tap the thumbnail).
+  void _showImage(BuildContext context, String b64) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => Dialog(
+        insetPadding: const EdgeInsets.all(12),
+        child: InteractiveViewer(
+          maxScale: 8,
+          child: Image.memory(base64Decode(b64)),
         ),
       ),
     );

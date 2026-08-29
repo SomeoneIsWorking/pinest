@@ -31,7 +31,17 @@ export interface ToolEvent {
 export interface HistoryItem {
   role: "user" | "assistant";
   text: string;
-  tools: Array<{ name: string; args?: unknown; id?: string; result?: string; isError?: boolean }>;
+  tools: Array<{
+    name: string;
+    args?: unknown;
+    id?: string;
+    result?: string;
+    isError?: boolean;
+    /** Images the tool result carried (base64), e.g. an image `read`. */
+    images?: Array<{ data: string; mimeType: string }>;
+    /** Images dropped to keep the payload sane — reported, never silent. */
+    imagesOmitted?: number;
+  }>;
 }
 
 /** Registry row (durable, on disk). */
