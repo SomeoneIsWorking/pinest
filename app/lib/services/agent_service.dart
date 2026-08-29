@@ -243,6 +243,10 @@ class AgentService extends ChangeNotifier {
               createdAt: (m['createdAt'] as num?)?.toInt() ?? 0,
               pendingMessages:
                   (m['pendingMessages'] as List?)?.cast<String>() ?? const [],
+              // Which of those are steers is the SERVER's answer — tracking it
+              // in the client lost the distinction on every page reload.
+              pendingSteering:
+                  (m['pendingSteering'] as List?)?.cast<String>() ?? const [],
             ),
           );
           final st = m['streamingText'] as String?;
@@ -252,16 +256,6 @@ class AgentService extends ChangeNotifier {
             _streamingText.remove(id);
           }
         }
-        // A steer stops being "in flight" the moment the server drops it from
-        // pending — keep the marker set in step, or a later identical message
-        // would inherit the badge.
-        for (final s in _sessions) {
-          final marked = _steered[s.id];
-          if (marked == null) continue;
-          marked.removeWhere((t) => !s.pendingMessages.contains(t));
-          if (marked.isEmpty) _steered.remove(s.id);
-        }
-
         // Durable registry rows (may include sessions not running now)
         _registry.clear();
         for (final raw in (msg['registry'] as List? ?? [])) {
@@ -428,18 +422,7 @@ class AgentService extends ChangeNotifier {
         ],
       'deliverAs': steer ? 'steer' : 'followUp',
     });
-    if (steer) (_steered[s.id] ??= <String>{}).add(text);
   }
-
-  /// Texts this client submitted as a STEER, per session. The server's
-  /// pending list is just strings, so without this a steer and a follow-up
-  /// look identical while they wait — and a steer waiting for the current
-  /// assistant step to end reads as "ignored".
-  final Map<String, Set<String>> _steered = {};
-
-  /// True if `text` is still-pending BECAUSE it was sent as a steer.
-  bool wasSteered(String sessionId, String text) =>
-      _steered[sessionId]?.contains(text) ?? false;
 
   void cancel(Session s) => _send({'type': 'cancel', 'sessionId': s.id});
   void setModel(Session s, String provider, String modelId) => _send({

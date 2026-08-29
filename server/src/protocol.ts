@@ -82,6 +82,11 @@ export interface SessionSnapshot {
   resumed?: boolean;
   /** Messages submitted but not yet delivered into the session (server-authoritative queue). */
   pendingMessages?: string[];
+  /** The subset of `pendingMessages` submitted as STEERS. A steer waits for
+   * the assistant's current step to end, not for the whole turn, so the client
+   * must be able to tell the two apart — and it must survive a client reload,
+   * which client-side bookkeeping does not. */
+  pendingSteering?: string[];
 }
 
 export type ServerMessage =

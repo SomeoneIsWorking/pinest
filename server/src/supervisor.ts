@@ -71,6 +71,8 @@ interface LiveSession {
   _compacting: boolean;
   /** Server-authoritative queue: submitted, not yet delivered (see logic.ts). */
   pending: string[];
+  /** Subset of `pending` that was submitted as a steer. */
+  pendingSteering: string[];
   /** True between a run's message_start and agent_end (submission gate). */
   turnStarted: boolean;
   submitter: MessageSubmitter | null;
@@ -161,7 +163,7 @@ export class Supervisor {
     const s: LiveSession = {
       session, currentTurnId: null, unsub: null, cwd, status: "idle", name,
       model: null, modelName: null, _streamingText: null, _compacting: false,
-      pending: [], turnStarted: false, submitter: null,
+      pending: [], pendingSteering: [], turnStarted: false, submitter: null,
     };
     this.sessions.set(id, s);
 
@@ -197,7 +199,7 @@ export class Supervisor {
     const s: LiveSession = {
       session, currentTurnId: null, unsub: null, cwd, status: "idle", name,
       model: null, modelName: null, _streamingText: null, _compacting: false,
-      pending: [], turnStarted: false, submitter: null,
+      pending: [], pendingSteering: [], turnStarted: false, submitter: null,
     };
     this.sessions.set(id, s);
 
@@ -244,9 +246,13 @@ export class Supervisor {
           s.status = "working";
           const images = (cmd.images ?? []) as UserImage[];
           const text = cmd.text.trim().length === 0 ? "[image]" : cmd.text;
+          const asSteer = cmd.deliverAs !== "followUp";
           s.pending = pushPending(s.pending, text);
+          if (asSteer) s.pendingSteering = pushPending(s.pendingSteering, text);
           this.callbacks.upsertSession(cmd.sessionId, {
-            status: "working", pendingMessages: [...s.pending],
+            status: "working",
+            pendingMessages: [...s.pending],
+            pendingSteering: [...s.pendingSteering],
           });
           this.callbacks.broadcast({ type: "stream", sessionId: cmd.sessionId, text: "", status: "working" });
           // prompt(streamingBehavior) covers BOTH cases: idle → new turn,
@@ -343,7 +349,11 @@ export class Supervisor {
         setTimeout(() => {
           if (s.pending.includes(delivered)) {
             s.pending = popPending(s.pending, delivered);
-            this.callbacks.upsertSession(id, { pendingMessages: [...s.pending] });
+            s.pendingSteering = popPending(s.pendingSteering, delivered);
+            this.callbacks.upsertSession(id, {
+              pendingMessages: [...s.pending],
+              pendingSteering: [...s.pendingSteering],
+            });
           }
           this.getHistory(s).then((h) =>
             this.callbacks.broadcast({ type: "history", sessionId: id, history: h }),
