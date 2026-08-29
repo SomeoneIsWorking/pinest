@@ -30,6 +30,11 @@ The extension-load test stubs the pi API; it proves the module loads and routes,
 NOT that pi accepts it. Changes to extension registration surface must also be
 smoked against a real `pi -e server/src/index.ts` run when pi is available.
 
+The web client deploys from the LOCAL system only — no CI. After any `app/`
+change lands on `main`, run `cd app && ./deploy.sh` (analyze + test + build +
+`firebase deploy -P pinest-app`). An undeployed app change means users see the
+old client — that was the I-015 stale-site incident.
+
 ## Rules specific to this repo
 
 - The agent core is **pi**. Do not reintroduce opencode/pi forks or child-process

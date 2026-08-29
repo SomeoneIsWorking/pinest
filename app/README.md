@@ -48,11 +48,13 @@ node server.js
 
 ## Deployment
 
-Pushes to `main` touching `app/` auto-deploy to Firebase Hosting via
-`.github/workflows/deploy-web.yml`. The workflow needs the repo secret
-`FIREBASE_SERVICE_ACCOUNT` (service-account JSON with the Firebase Hosting
-Admin role). Manual fallback: `flutter build web && firebase deploy --only
-hosting` from `app/`.
+Deploying is local-only — nothing deploys on push:
+
+```sh
+cd app && ./deploy.sh   # analyze + test + build web + firebase deploy -P pinest-app
+```
+
+Run it after every change to `app/` that lands on `main`.
 
 ## License
 

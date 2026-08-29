@@ -24,7 +24,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Flutter client (chat, sessions, spawn, auth) | `app` | `app/lib/` (forked from PiNest) |
 | Image paste → message attachments (web) | `app` | `app/lib/services/paste_bridge.dart` (conditional import: `paste_web.dart` / `paste_stub.dart`) |
 | Durable-session UI + reconnect | `app` | `app/lib/screens/main_shell.dart` (`SessionHistorySheet`), `app/lib/services/agent_service.dart` |
-| Web client auto-deploy on push to main | CI | `.github/workflows/deploy-web.yml` (needs `FIREBASE_SERVICE_ACCOUNT` secret) |
+| Web client local deploy | `app` | `app/deploy.sh` (analyze + test + build + `firebase deploy -P pinest-app`) |
 | Firebase web config (public) for the app | `app` | `app/lib/firebase_options.dart` |
 | Provider entry (OpenCode Go / glm-5.3-flash), compact settings | user machine config | `PI_AGENT_DIR/models.json`, `settings.json` — to be provisioned by `server/scripts/provision.ts` (I-005); API keys live in `PI_AGENT_DIR/auth.json` (`type: "api_key"`) |
 | Hosted discovery rules (owner-writable presence doc) | repo root | `firestore.rules` — deploy to pinest-app (I-008) |
