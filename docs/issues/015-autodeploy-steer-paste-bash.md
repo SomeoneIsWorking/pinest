@@ -13,6 +13,14 @@ release build + `firebase deploy --only hosting -P pinest-app`, run from the
 local system after every update to `app/` (CI was considered and rejected by
 the user: deploy is local-only).
 
+## Follow-up 2: attach button (5deb89b)
+
+Paperclip beside send opens the platform file picker (`file_selector`, all
+platforms incl. web). Images join the same attachment strip as pastes; text
+files ≤512KB are inlined into the message as fenced blocks with a filename
+header; >10MB or unsupported types are refused with a snackbar naming the
+file — no silent drops.
+
 ## Follow-up (user-observed, fixed e301db7)
 
 - **Paste didn't work in the browser.** The document-level paste listener was
