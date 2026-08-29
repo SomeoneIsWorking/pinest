@@ -68,6 +68,17 @@ export function popPending(list: string[], text: string): string[] {
 /** Convert pi messages array → simple {role, text, tools} pairs for the app. */
 export function messagesToHistory(messages: unknown): HistoryItem[] {
   if (!Array.isArray(messages)) return [];
+  // Pair each tool call with its result (role:"toolResult", matched by
+  // toolCallId) so history cards match what live cards showed.
+  const results = new Map<string, { result: string; isError: boolean }>();
+  for (const m of messages as any[]) {
+    if (m?.role === "toolResult" && m.toolCallId) {
+      results.set(m.toolCallId, {
+        result: extractText(m.content).slice(0, 10_000),
+        isError: !!m.isError,
+      });
+    }
+  }
   return (messages as any[])
     .filter((m) => m.role === "user" || m.role === "assistant")
     .map((m) => {
@@ -81,7 +92,8 @@ export function messagesToHistory(messages: unknown): HistoryItem[] {
       if (Array.isArray(m.content)) {
         for (const p of m.content) {
           if (p.type === "toolCall") {
-            tools.push({ name: p.name, args: p.arguments, id: p.id });
+            const r = results.get(p.id);
+            tools.push({ name: p.name, args: p.arguments, id: p.id, result: r?.result, isError: r?.isError });
           }
         }
       }
