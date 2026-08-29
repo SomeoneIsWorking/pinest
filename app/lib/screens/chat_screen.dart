@@ -22,6 +22,20 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
+/// Full-size viewer for a base64 image (tool results, user attachments).
+void showImageDialog(BuildContext context, String b64) {
+  showDialog<void>(
+    context: context,
+    builder: (ctx) => Dialog(
+      insetPadding: const EdgeInsets.all(12),
+      child: InteractiveViewer(
+        maxScale: 8,
+        child: Image.memory(base64Decode(b64)),
+      ),
+    ),
+  );
+}
+
 class _ChatScreenState extends State<ChatScreen> {
   final _input = TextEditingController();
   final _scroll = ScrollController();
@@ -74,7 +88,45 @@ class _ChatScreenState extends State<ChatScreen> {
       // Considered "at bottom" if within 80px of the max scroll extent
       _atBottom =
           _scroll.position.pixels >= _scroll.position.maxScrollExtent - 80;
+      // Scrolled to the top with older history available → pull the previous
+      // page (server-side cursor pagination, HISTORY_PAGE_SIZE at a time).
+      if (_scroll.position.pixels <= 0 &&
+          !_loadingOlder &&
+          context.read<AgentService>().historyHasMore(widget.sessionId)) {
+        _loadOlderHistory();
+      }
     }
+  }
+
+  bool _loadingOlder = false;
+
+  void _loadOlderHistory() {
+    final svc = context.read<AgentService>();
+    final s = _session(svc);
+    if (s == null) return;
+    _loadingOlder = true;
+    // Prepending shifts everything down — remember the viewport metrics so the
+    // user stays on the message they were reading instead of jumping.
+    final pixelsBefore = _scroll.position.pixels;
+    final maxBefore = _scroll.position.maxScrollExtent;
+    final cursor = svc.historyCursor(widget.sessionId);
+    svc.getHistory(s, cursor: cursor);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _loadingOlder = false;
+      // History applies asynchronously (WS reply); keep correcting until the
+      // extent actually grew, then stop so normal scrolling is never fought.
+      void correct() {
+        if (!mounted || !_scroll.hasClients) return;
+        final grown = _scroll.position.maxScrollExtent > maxBefore + 1;
+        if (grown) {
+          _scroll.jumpTo(pixelsBefore + (_scroll.position.maxScrollExtent - maxBefore));
+        } else {
+          WidgetsBinding.instance.addPostFrameCallback((_) => correct());
+        }
+      }
+
+      correct();
+    });
   }
 
   void _jumpToBottom() {
@@ -130,13 +182,8 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() => _attachedImages.add(
           PendingImage(mimeType: mimeType, bytes: bytes),
         ));
-    // Observable confirmation that the paste event fired and was captured —
-    // an image strip that silently stays empty is indistinguishable from a
-    // listener that never fired.
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text('Image attached from clipboard ($mimeType)'),
-      duration: const Duration(seconds: 2),
-    ));
+    // No snackbar: the attachment strip appearing above the input IS the
+    // confirmation, and a snackbar here overlaps the text area.
   }
 
   /// Attach files via the paperclip. Images become image attachments; small
@@ -343,7 +390,15 @@ class _ChatScreenState extends State<ChatScreen> {
       final tools = msg['tools'] as List?;
       if (role == 'user') {
         items.add(
-          _bubble(text, Alignment.centerRight, Colors.blueGrey.withAlpha(40)),
+          _bubble(
+            text,
+            Alignment.centerRight,
+            Colors.blueGrey.withAlpha(40),
+            historyImages: [
+              for (final img in (msg['images'] as List? ?? const []))
+                Map<String, dynamic>.from(img as Map),
+            ],
+          ),
         );
       } else {
         // Show tools from history (expandable)
@@ -373,36 +428,59 @@ class _ChatScreenState extends State<ChatScreen> {
         }
       }
     }
-    // Live tool calls (not yet in history)
-    for (final tc in toolCalls) {
-      items.add(
-        _ToolCallCard(
-          name: tc['name'] ?? 'tool',
-          args: tc['args'],
-          result: tc['result'] as String?,
-          images:
-              (tc['images'] as List?)
-                  ?.map((i) => Map<String, dynamic>.from(i as Map))
-                  .toList() ??
-              const [],
-          isError: tc['isError'] ?? false,
-          running: tc['running'] ?? false,
-        ),
-      );
+    // Live tool calls (not yet in history), interleaved with the speech
+    // segments the assistant finished before each tool call — the streamed
+    // text stays visible while tools run instead of vanishing.
+    final segments = svc.streamingSegmentsFor(widget.sessionId);
+    for (var i = 0; i < toolCalls.length || i < segments.length; i++) {
+      if (i < segments.length) {
+        items.add(_bubble(segments[i], Alignment.centerLeft, null));
+      }
+      if (i < toolCalls.length) {
+        final tc = toolCalls[i];
+        items.add(
+          _ToolCallCard(
+            name: tc['name'] ?? 'tool',
+            args: tc['args'],
+            result: tc['result'] as String?,
+            images:
+                (tc['images'] as List?)
+                    ?.map((i) => Map<String, dynamic>.from(i as Map))
+                    .toList() ??
+                const [],
+            isError: tc['isError'] ?? false,
+            running: tc['running'] ?? false,
+          ),
+        );
+      }
     }
     if (streaming != null) {
       items.add(_StreamingBubble(text: streaming));
     }
     // Queued messages at the very end — reported by the server, not tracked
     // locally. Image-only messages arrive as the server's '[image]' text.
+    // LONG-PRESS clears the queue: pi dequeues by text-match at message_start,
+    // so a message can get genuinely stuck in its steering/followUp queues;
+    // the server-side queue_clear drains pi's own queue (the honest fix).
     for (final text in queued) {
       items.add(
-        _bubble(
-          text,
-          Alignment.centerRight,
-          Colors.orange.withAlpha(40),
-          queued: true,
-          steering: s?.pendingSteering.contains(text) ?? false,
+        GestureDetector(
+          onLongPress: s == null
+              ? null
+              : () {
+                  svc.clearQueue(s);
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                    content: Text('Queue cleared'),
+                    duration: Duration(seconds: 2),
+                  ));
+                },
+          child: _bubble(
+            text,
+            Alignment.centerRight,
+            Colors.orange.withAlpha(40),
+            queued: true,
+            steering: s?.pendingSteering.contains(text) ?? false,
+          ),
         ),
       );
     }
@@ -439,12 +517,32 @@ class _ChatScreenState extends State<ChatScreen> {
       BarAction(
         label: '/compact',
         icon: Icons.compress,
-        onTap: (working || s == null) ? null : () => svc.compact(s),
+        // Both of these rewrite the transcript irreversibly and are one tap
+        // away from /model in the same bar — confirm before firing.
+        onTap: (working || s == null)
+            ? null
+            : () => _confirmContextAction(
+                  context,
+                  title: 'Compact context?',
+                  body: 'The conversation so far is replaced by a summary. '
+                      'The full transcript is not recoverable from the app.',
+                  action: 'Compact',
+                  onConfirm: () => svc.compact(s),
+                ),
       ),
       BarAction(
         label: '/clear',
         icon: Icons.cleaning_services,
-        onTap: (working || s == null) ? null : () => svc.newSession(s),
+        onTap: (working || s == null)
+            ? null
+            : () => _confirmContextAction(
+                  context,
+                  title: 'Clear session?',
+                  body: 'Starts a fresh session with an empty context. '
+                      'The current conversation is dropped from this session.',
+                  action: 'Clear',
+                  onConfirm: () => svc.newSession(s),
+                ),
       ),
       if (!working && s != null && !s.isHost)
         BarAction(
@@ -723,6 +821,9 @@ class _ChatScreenState extends State<ChatScreen> {
     bool queued = false,
     bool steering = false,
     List<PendingImage> images = const [],
+    /// History image attachments (base64 maps from the server) — the in-memory
+    /// [images] form dies on refresh; this one survives it.
+    List<Map<String, dynamic>> historyImages = const [],
   }) {
     return Align(
       alignment: align,
@@ -788,6 +889,32 @@ class _ChatScreenState extends State<ChatScreen> {
                           fit: BoxFit.cover,
                           errorBuilder: (_, _, _) =>
                               const Icon(Icons.broken_image, size: 24),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            if (historyImages.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  alignment: WrapAlignment.end,
+                  children: [
+                    for (final img in historyImages)
+                      InkWell(
+                        onTap: () => showImageDialog(context, img['data'] as String),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(6),
+                          child: Image.memory(
+                            base64Decode(img['data'] as String),
+                            width: 96,
+                            height: 96,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, _, _) =>
+                                const Icon(Icons.broken_image, size: 24),
+                          ),
                         ),
                       ),
                   ],
@@ -901,6 +1028,38 @@ class _ChatScreenState extends State<ChatScreen> {
           context.read<UserPreferences>().saveModel('${m.provider}/${m.id}');
           Navigator.pop(context);
         },
+      ),
+    );
+  }
+
+  /// Shared confirm for the two destructive context actions (/compact, /clear).
+  /// The server answers with a `notice` once it really happened — the shell
+  /// snackbars it, so a confirmed action is never silent either way.
+  void _confirmContextAction(
+    BuildContext context, {
+    required String title,
+    required String body,
+    required String action,
+    required VoidCallback onConfirm,
+  }) {
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(title),
+        content: Text(body),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.pop(dialogContext);
+              onConfirm();
+            },
+            child: Text(action),
+          ),
+        ],
       ),
     );
   }
@@ -1233,24 +1392,25 @@ class _ToolCallCardState extends State<_ToolCallCard> {
                 ],
               ),
             ),
-            // Images a tool RETURNED (an image `read`) are the point of the
-            // card — always visible, not hidden behind the expander. Tap to
-            // open full size.
-            for (final img in widget.images)
-              Padding(
-                padding: const EdgeInsets.only(left: 20, top: 4),
-                child: InkWell(
-                  onTap: () => _showImage(context, img['data'] as String),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(6),
-                    child: Image.memory(
-                      base64Decode(img['data'] as String),
-                      width: 240,
-                      fit: BoxFit.contain,
+            // Images a tool RETURNED (an image `read`) collapse WITH the card:
+            // expanded shows them, collapsed shows the file summary line only.
+            // Tap to open full size.
+            if (_expanded)
+              for (final img in widget.images)
+                Padding(
+                  padding: const EdgeInsets.only(left: 20, top: 4),
+                  child: InkWell(
+                    onTap: () => _showImage(context, img['data'] as String),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(6),
+                      child: Image.memory(
+                        base64Decode(img['data'] as String),
+                        width: 240,
+                        fit: BoxFit.contain,
+                      ),
                     ),
                   ),
                 ),
-              ),
             if (widget.imagesOmitted > 0)
               Padding(
                 padding: const EdgeInsets.only(left: 20, top: 4),
@@ -1309,18 +1469,7 @@ class _ToolCallCardState extends State<_ToolCallCard> {
   }
 
   /// Full-size view of a tool-returned image (tap the thumbnail).
-  void _showImage(BuildContext context, String b64) {
-    showDialog<void>(
-      context: context,
-      builder: (ctx) => Dialog(
-        insetPadding: const EdgeInsets.all(12),
-        child: InteractiveViewer(
-          maxScale: 8,
-          child: Image.memory(base64Decode(b64)),
-        ),
-      ),
-    );
-  }
+  void _showImage(BuildContext context, String b64) => showImageDialog(context, b64);
 
   static const _summaryMaxChars = 160;
 
