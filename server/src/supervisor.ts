@@ -18,6 +18,22 @@ import { resolveThinkingLevel, reportThinkingLevel } from "./thinking.ts";
 import type { SessionRegistry } from "./registry.ts";
 import type { SessionSnapshot, SessionRow, UserImage } from "./protocol.ts";
 
+/** Where live sessions are parked across an extension re-import (hot reload).
+ * globalThis survives the re-import; module-level state does not. */
+const RELOAD_STASH = Symbol.for("remote-code.live-sessions");
+
+/** How long a parked session may wait for the re-imported instance to adopt
+ * it. Past this the run is aborted: an unadopted session is still executing
+ * tools with nobody listening — that is the I-020 zombie.
+ * `RC_ADOPT_DEADLINE_MS` shortens it for tests; it changes timing only. */
+const ADOPT_DEADLINE_MS = Number(process.env.RC_ADOPT_DEADLINE_MS) || 30_000;
+
+interface ReloadStash {
+  sessions: Map<string, LiveSession>;
+  /** Fires if nobody adopts; cleared by adoptStashedSessions(). */
+  guard: NodeJS.Timeout | null;
+}
+
 export interface SpawnCommand {
   sessionId?: string;
   cwd?: string;
@@ -284,8 +300,13 @@ export class Supervisor {
     return true;
   }
 
-  private wire(id: string, s: LiveSession): void {
-    s.turnStarted = false;
+  /** Subscribe + build the submitter for a session. `resumeTurn` keeps the
+   * submission gate closed for a session that is ALREADY mid-run (adopted
+   * across a reload): its `message_start` fired under the previous instance,
+   * so treating it as idle would make the next submit call prompt() into a
+   * busy session ("Agent is already processing"). */
+  private wire(id: string, s: LiveSession, opts: { resumeTurn?: boolean } = {}): void {
+    s.turnStarted = !!opts.resumeTurn;
     s.submitter = createMessageSubmitter({
       send: (text, images, deliverAs) => {
         void s.session
@@ -477,7 +498,8 @@ export class Supervisor {
   async shutdownAll(): Promise<void> {
     for (const [id, s] of this.sessions) {
       try { s.unsub?.(); } catch { /* */ }
-      await this.stopSession(id, s);      // Host is exiting: keep rows resumable — status idle, not user-closed.
+      await this.stopSession(id, s);
+      // Host is exiting: keep rows resumable — status idle, not user-closed.
       if (this.registry) {
         const row = this.registry.get(id);
         if (row && row.status !== "closed") this.registry.upsert({ id, status: "idle" });
@@ -485,5 +507,81 @@ export class Supervisor {
       this.callbacks.removeSession(id);
     }
     this.sessions.clear();
+  }
+
+  /**
+   * Hot-reload handoff, park phase. Park LIVE sessions on globalThis WITHOUT
+   * stopping them: the AgentSession objects survive the extension re-import,
+   * so an in-flight run keeps going (same transcript, same agent) and the
+   * next instance adopts them. The old park-and-resume mechanism aborted
+   * nothing (silent-no-op shutdown()) and then resumed the same pi session
+   * file in a SECOND agent — zombie/parallel edits and "already finished"
+   * transcript confusion.
+   */
+  stashForReload(): void {
+    const sessions = new Map<string, LiveSession>();
+    for (const [id, s] of this.sessions) {
+      try { s.unsub?.(); } catch { /* */ }
+      s.unsub = null;
+      s.submitter = null; // re-wired by the adopting instance
+      sessions.set(id, s);
+    }
+    // Clear BEFORE teardown's shutdownAll() runs — it must not abort the very
+    // sessions we are keeping alive.
+    this.sessions.clear();
+    if (!sessions.size) return;
+    const stash: ReloadStash = { sessions, guard: null };
+    // Nobody adopting = invisible run. Bounded, not hoped-for.
+    stash.guard = setTimeout(() => { void this.abandonStash(stash); }, ADOPT_DEADLINE_MS);
+    stash.guard.unref?.();
+    (globalThis as any)[RELOAD_STASH] = stash;
+    debug(`[remote-code] reload: parked ${sessions.size} live session(s) for adoption (deadline ${ADOPT_DEADLINE_MS}ms)`);
+  }
+
+  /**
+   * Deadline expired: the re-imported instance never adopted these sessions
+   * (bootstrap failed, auth failed, the reload never completed). Abort them —
+   * a session nobody is wired to keeps running tools and editing files with no
+   * transcript, status, or stop button (I-020). The registry rows go back to
+   * `idle`, so the next bootstrap resumes them from disk with a nudge.
+   */
+  private async abandonStash(stash: ReloadStash): Promise<void> {
+    if ((globalThis as any)[RELOAD_STASH] !== stash) return; // adopted in time
+    (globalThis as any)[RELOAD_STASH] = undefined;
+    debug(`[remote-code] reload: NOBODY adopted ${stash.sessions.size} parked session(s) within ${ADOPT_DEADLINE_MS}ms — aborting them so no run continues invisibly`);
+    for (const [id, s] of stash.sessions) {
+      await this.stopSession(id, s);
+      try { this.registry?.upsert({ id, status: "idle" }); } catch { /* registry unusable */ }
+    }
+    stash.sessions.clear();
+  }
+
+  /**
+   * Hot-reload handoff, adopt phase. Re-wire each parked session into THIS
+   * instance (fresh event subscription + submitter) and report its live
+   * status/usage. Returns how many sessions were adopted.
+   */
+  adoptStashedSessions(): number {
+    const stash = (globalThis as any)[RELOAD_STASH] as ReloadStash | undefined;
+    (globalThis as any)[RELOAD_STASH] = undefined;
+    if (stash?.guard) clearTimeout(stash.guard);
+    if (!stash?.sessions.size) return 0;
+    for (const [id, s] of stash.sessions) {
+      this.sessions.set(id, s);
+      // A session parked mid-run is STILL mid-run — keep the gate closed.
+      this.wire(id, s, { resumeTurn: s.status === "working" });
+      this.callbacks.upsertSession(id, {
+        status: s.status === "working" ? "working" : "idle",
+        model: s.model,
+        modelName: s.modelName,
+        contextUsage: this.usageWithCompactAt(s),
+      });
+      debug(`[remote-code] reload: adopted session ${id} (${s.status}) — its run never stopped`);
+      // Push history so the app thread refills immediately.
+      this.getHistory(s).then((h) =>
+        this.callbacks.broadcast({ type: "history", sessionId: id, history: h }),
+      ).catch(() => { /* */ });
+    }
+    return stash.sessions.size;
   }
 }

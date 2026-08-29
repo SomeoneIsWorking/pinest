@@ -1,11 +1,12 @@
-// Tests for ReloadWatcher — the trigger behind live harness self-modification.
+// Tests for SourceWatcher — the change DETECTOR behind harness self-modification.
+// It must report changes and never reload: reload is explicit only.
 // Run with: npm test
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { makeTempDir, removeTempDir } from "../support/tmp.ts";
-import { ReloadWatcher } from "../src/reload.ts";
+import { SourceWatcher } from "../src/watch.ts";
 
 const DIR = makeTempDir("rc-reload-");
 const FILE = join(DIR, "settings.json");
@@ -22,24 +23,29 @@ function touch(): void {
   writeFileSync(FILE, JSON.stringify({ ts: Date.now() + Math.random() }));
 }
 
-test("watcher: a file change fires exactly once after the debounce window", async () => {
+test("watcher: a file change reports exactly once, naming the changed path", async () => {
   let fired = 0;
-  const w = new ReloadWatcher({
+  let reported: string[] = [];
+  const w = new SourceWatcher({
     dirs: [DIR], debounceMs: 40, armDelayMs: 0,
-    onReload: () => { fired += 1; },
+    onChange: (paths) => { fired += 1; reported = paths; },
   });
   w.start();
   touch();
   await sleep(150);
   w.stop();
   assert.equal(fired, 1, `expected exactly one fire, got ${fired}`);
+  assert.ok(
+    reported.some((p) => p.endsWith("settings.json")),
+    `the report must name what changed; got ${JSON.stringify(reported)}`,
+  );
 });
 
 test("watcher: N rapid changes inside the window collapse to one fire", async () => {
   let fired = 0;
-  const w = new ReloadWatcher({
+  const w = new SourceWatcher({
     dirs: [DIR], debounceMs: 60, armDelayMs: 0,
-    onReload: () => { fired += 1; },
+    onChange: () => { fired += 1; },
   });
   w.start();
   touch();
@@ -52,9 +58,9 @@ test("watcher: N rapid changes inside the window collapse to one fire", async ()
 
 test("watcher: no file change → no fire (the negative must print nothing)", async () => {
   let fired = 0;
-  const w = new ReloadWatcher({
+  const w = new SourceWatcher({
     dirs: [DIR], debounceMs: 30, armDelayMs: 0,
-    onReload: () => { fired += 1; },
+    onChange: () => { fired += 1; },
   });
   w.start();
   await sleep(120);
@@ -64,9 +70,9 @@ test("watcher: no file change → no fire (the negative must print nothing)", as
 
 test("watcher: stop() prevents pending fires", async () => {
   let fired = 0;
-  const w = new ReloadWatcher({
+  const w = new SourceWatcher({
     dirs: [DIR], debounceMs: 50, armDelayMs: 0,
-    onReload: () => { fired += 1; },
+    onChange: () => { fired += 1; },
   });
   w.start();
   touch();
@@ -77,9 +83,9 @@ test("watcher: stop() prevents pending fires", async () => {
 
 test("watcher: arm delay swallows startup noise", async () => {
   let fired = 0;
-  const w = new ReloadWatcher({
+  const w = new SourceWatcher({
     dirs: [DIR], debounceMs: 30, armDelayMs: 500,
-    onReload: () => { fired += 1; },
+    onChange: () => { fired += 1; },
   });
   w.start();
   touch(); // within the arm window — must be ignored
@@ -89,10 +95,10 @@ test("watcher: arm delay swallows startup noise", async () => {
 });
 
 test("watcher: nonexistent watched dirs are tolerated", () => {
-  const w = new ReloadWatcher({
+  const w = new SourceWatcher({
     dirs: [join(DIR, "nope"), "/nonexistent/rc"], files: [join(DIR, "nope.json")],
     debounceMs: 30, armDelayMs: 0,
-    onReload: () => {},
+    onChange: () => {},
   });
   assert.doesNotThrow(() => w.start());
   w.stop();
@@ -162,4 +168,38 @@ test("submitter: images become a text+image content array; cap does not wedge th
   assert.deepEqual(first.text, "look");
   assert.deepEqual(first.images?.map((i) => i.mimeType), ["image/png"]);
   assert.equal(calls[1].text, "next");
+});
+
+// ── Policy: a source change reports, it does NOT reload ─────────────────────
+// This is the regression that took the host down: the watcher fired
+// /pinest-reload on every write, so an agent editing its own extension tore
+// its host down mid-edit. A change must only be RECORDED.
+import { noteChangedSources, pendingReloadState } from "../src/index.ts";
+
+test("a watched source change records a pending edit and queues NO reload", async () => {
+  const mod = await import("../src/index.ts");
+  const sentUser: string[] = [];
+  const pi = {
+    on() {},
+    registerCommand() {},
+    registerTool() {},
+    sendMessage() {},
+    sendUserMessage(text: string) { sentUser.push(text); },
+  };
+  (mod.default as (p: unknown) => void)(pi);
+
+  const before = pendingReloadState().count;
+  noteChangedSources([join(DIR, "edited-by-the-agent.ts")]);
+  const after = pendingReloadState();
+
+  assert.equal(after.count, before + 1, "the change must be recorded as pending");
+  assert.ok(
+    after.files.some((f) => f.endsWith("edited-by-the-agent.ts")),
+    `pending files must name the change; got ${JSON.stringify(after.files)}`,
+  );
+  assert.deepEqual(
+    sentUser.filter((t) => t.includes("pinest-reload")),
+    [],
+    "a file change must never queue /pinest-reload — reload is explicit only",
+  );
 });

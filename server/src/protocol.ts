@@ -74,11 +74,22 @@ export interface SessionSnapshot {
   pendingMessages?: string[];
 }
 
+/** Harness sources edited since the host instance started. Reload is explicit:
+ * a non-zero count means "edits are waiting", never "a reload is coming". */
+export interface PendingReload {
+  count: number;
+  /** Up to 20 changed paths, for display. */
+  files: string[];
+  /** false when watching is disabled (RC_NO_WATCH) — count 0 then means
+   * "not watched", not "nothing changed". */
+  watching: boolean;
+}
+
 export type ServerMessage =
   | { type: "authed" }
   | { type: "pong" }
   | { type: "error"; message: string; sessionId?: string }
-  | { type: "state"; online: boolean; hostname: string; homePath?: string; activeSessionId?: string | null; sessions: SessionSnapshot[]; registry: SessionRow[]; tunnelUrl?: string | null; tunnelProvider?: string | null }
+  | { type: "state"; online: boolean; hostname: string; homePath?: string; activeSessionId?: string | null; sessions: SessionSnapshot[]; registry: SessionRow[]; tunnelUrl?: string | null; tunnelProvider?: string | null; pendingReload?: PendingReload }
   | { type: "session_list"; sessions: SessionRow[] }
   | { type: "session_deleted"; sessionId: string; deleted: boolean }
   | { type: "history"; sessionId: string; history: HistoryItem[] }
