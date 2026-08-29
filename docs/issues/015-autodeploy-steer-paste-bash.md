@@ -179,3 +179,29 @@ the whole connection and was never cleared when history landed, so turn end
 re-rendered every stale call inline + at the bottom. Clear-on-history shipped
 earlier; history cards now ALSO carry tool results (paired by toolCallId in
 messagesToHistory) so they match live cards exactly.
+
+## Follow-up 8: canonical `pinest.web.app` Hosting site (pre-deploy)
+
+The original Firebase project ID is `pinest-app`, so its default Hosting site
+was `pinest-app.web.app`. The user-facing URL is now owned separately from that
+project ID:
+
+- Firebase Hosting site `pinest` exists in project `pinest-app`, and
+  `pinest.web.app` is configured as an authorized Firebase Authentication
+  domain.
+- `app/.firebaserc` maps Hosting target `app` to `pinest` and target `legacy`
+  to the former default site `pinest-app`; `app/firebase.json` serves the built
+  Flutter client from `app` and makes every legacy path a 301 to the same path
+  on `https://pinest.web.app`.
+- `app/deploy.sh` remains the one local deploy interface. Its existing
+  `firebase deploy --only hosting -P pinest-app` now deploys both named targets
+  through that multisite configuration.
+- `tools/verify_hosting.py` compares the public `main.dart.js` SHA-256 with the
+  local release bundle, checks the PiNest index, and refuses unless a legacy
+  path returns the exact canonical 301.
+
+Delivery state is pre-deploy: the site, auth-domain entry, mapping, redirect,
+and verifier exist, but this tree has not yet been deployed to the two Hosting
+targets. Public bundle equality and the live 301 remain pending; the opening
+`pinest-app.web.app` stale-site account above is historical evidence and is
+deliberately preserved.

@@ -27,20 +27,26 @@ void main() async {
   );
 }
 
+ThemeData buildPiNestTheme({String? fontFamily}) => ThemeData(
+  colorScheme: ColorScheme.fromSeed(
+    seedColor: const Color(0xFF6366F1),
+    brightness: Brightness.dark,
+  ),
+  useMaterial3: true,
+  fontFamily: fontFamily,
+);
+
 class PiNestApp extends StatelessWidget {
-  const PiNestApp({super.key});
+  final ThemeData? theme;
+
+  const PiNestApp({super.key, this.theme});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'PiNest',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF6366F1),
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
-      ),
+      debugShowCheckedModeBanner: false,
+      theme: theme ?? buildPiNestTheme(),
       home: Consumer<AuthService>(
         builder: (context, auth, _) {
           if (auth.isLoading) {

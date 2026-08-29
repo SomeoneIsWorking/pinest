@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/agent_service.dart';
@@ -24,6 +26,8 @@ class _SpawnDialogState extends State<SpawnDialog> {
   bool? _pathValid;
   bool _creatingFolder = false;
   String? _pathError;
+  int _pathQueryGeneration = 0;
+  int _pathCheckGeneration = 0;
 
   @override
   void initState() {
@@ -53,14 +57,19 @@ class _SpawnDialogState extends State<SpawnDialog> {
         _pathError = null;
       });
     }
-    _queryPaths(input);
+    unawaited(_queryPaths(input));
     if (input.isNotEmpty) _checkPath(input);
   }
 
   Future<void> _checkPath(String input) async {
+    final generation = ++_pathCheckGeneration;
     final svc = context.read<AgentService>();
     final valid = await svc.checkPath(input);
-    if (!mounted || _cwdController.text.trim() != input) return;
+    if (!mounted ||
+        generation != _pathCheckGeneration ||
+        _cwdController.text.trim() != input) {
+      return;
+    }
     setState(() => _pathValid = valid);
   }
 
@@ -78,42 +87,23 @@ class _SpawnDialogState extends State<SpawnDialog> {
       _pathValid = created != null;
       _pathError = created == null ? 'Could not create this folder.' : null;
     });
-    if (created != null) _queryPaths(input);
+    if (created != null) unawaited(_queryPaths(input));
   }
 
-  void _queryPaths(String input) {
+  Future<void> _queryPaths(String input) async {
+    final generation = ++_pathQueryGeneration;
     final svc = context.read<AgentService>();
-    // Send a list_paths command; the reply comes back in the state doc's
-    // pathSuggestions field for this session. We poll for the result.
-    final cmdId = svc.listPaths(input);
     setState(() => _loading = true);
-    // Check for the reply after a short delay
-    _pollSuggestions(cmdId, input);
-  }
-
-  void _pollSuggestions(String cmdId, String input) async {
-    final svc = context.read<AgentService>();
-    for (var i = 0; i < 10; i++) {
-      await Future.delayed(const Duration(milliseconds: 150));
-      if (!mounted) return;
-      final result = svc.pathSuggestionsFor(cmdId);
-      if (result != null) {
-        // Only show if the input hasn't changed since the query
-        if (_cwdController.text == input) {
-          setState(() {
-            _suggestions = result;
-            _loading = false;
-          });
-        }
-        return;
-      }
+    final result = await svc.listPaths(input);
+    if (!mounted ||
+        generation != _pathQueryGeneration ||
+        _cwdController.text.trim() != input) {
+      return;
     }
-    if (mounted && _cwdController.text == input) {
-      setState(() {
-        _suggestions = [];
-        _loading = false;
-      });
-    }
+    setState(() {
+      _suggestions = result;
+      _loading = false;
+    });
   }
 
   @override

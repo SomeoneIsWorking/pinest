@@ -1,0 +1,17 @@
+{
+  "projects": {
+    "default": "pinest-app"
+  },
+  "targets": {
+    "pinest-app": {
+      "hosting": {
+        "app": [
+          "pinest"
+        ],
+        "legacy": [
+          "pinest-app"
+        ]
+      }
+    }
+  }
+}

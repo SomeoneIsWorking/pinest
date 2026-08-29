@@ -6,7 +6,7 @@ After I-017 the two commands reached pi, but in the app they still looked like
 nothing happened: the thread kept showing the pre-compaction messages, the
 context badge kept its old value, and a refused command said nothing at all.
 
-## Root causes (three, all "silence")
+## Root causes (four, all "silence" or stale state)
 
 1. **No refresh after a context rewrite.** pi runs compaction outside an agent
    turn, so no `agent_end` follows it — and the extension subscribed to neither
@@ -20,34 +20,42 @@ context badge kept its old value, and a refused command said nothing at all.
 3. **The client never rendered server errors.** `AgentService._error` was
    assigned from the `error` message and read by no widget — every server-side
    failure in the whole app was invisible.
+4. **Paged history had no rewrite discriminator.** Even after the server sent
+   the compacted/empty newest page, the client preserved its previously loaded
+   prefix and spliced those obsolete messages back in. A replacement page and
+   a transcript rewrite were indistinguishable on the wire.
 
 Also found: a cleared spawned session kept its old pending/steering queue and
 turn state, so ghost "queued" bubbles survived the clear.
 
 ## Fix
 
-- Server: `notice` added to the protocol; host subscribes to
-  `session_compact` / `session_compact_failed`; both paths refuse loudly when
-  the underlying method is absent; a single `afterContextRewrite()` in the
-  supervisor (and the host's `pushInteractiveHistory()`) pushes transcript +
-  usage + notice after compact, clear, and auto-compaction.
+- Server: `notice` and history `reset` added to the protocol. Spawned sessions
+  converge on `afterContextRewrite()`; host compact/clear/auto-compact,
+  capability refusal, usage, history and notices are owned by the extracted
+  `HostContextController`. Host clear checks `newSession()` before dropping the
+  queue, and host compact checks `compact()` before reporting success.
 - Client: `AgentService.notices` stream → snackbars in `MainShell` (errors in
-  red), an empty replace-page also drops leftover streaming text, and both
-  toolbar actions now go through a confirm dialog before firing.
+  red), `mergeHistoryPage(reset: true)` discards every loaded prefix, an empty
+  rewrite also drops leftover streaming text, and both toolbar actions now go
+  through a confirm dialog before firing.
 
 ## Verification
 
 - `drills/compact-clear.mjs` — a real `AgentSession` against a local fake model:
   4 turns, then `/compact` (8 → 6 messages) and `/clear` (→ 0), asserting the
-  client received history + usage + notice for each. PASS.
-- `node drills/compact-clear.mjs --negative` performs the same two operations
-  directly on the session (the pre-fix path): FAILS on the missing notice, as
-  it must.
-- `server/test/compact-clear.test.ts` — 3 tests incl. "cannot compact → error,
-  never a notice". Removing either `afterContextRewrite` call makes 2 of them
-  fail (checked).
-- `cd server && npm test` (181 tests, 0 fail) and `npm run typecheck` — clean.
-  `cd app && flutter analyze && flutter test` — clean.
+  client received reset history + usage + notice for each. Positive path PASS.
+- `node drills/compact-clear.mjs --negative` performs the same rewrites outside
+  the shipping command path. The control PASSes only because the old silent
+  path fails the required client-observability assertions, proving the drill
+  can show the other answer.
+- `server/test/compact-clear.test.ts` covers spawned compact/clear, host
+  compact/clear, missing host capabilities, queue/path/model refresh and
+  `reset: true`. `app/test/history_merge_test.dart` proves a reset drops the
+  loaded prefix while an ordinary newest-page refresh preserves it.
+- The extracted host owner reduced `server/src/index.ts` from 1,357 to 1,294
+  lines; the normal server test command now enters the source-size structure
+  gate as well as the Node tests.
 - Real pi host (`drills/reload-explicit-rpc.mjs`, pi 0.84.3): extension loads,
   commands execute, explicit reload works. Step 4 of that drill fails in this
   environment for a reason unrelated to this change — it needs a live spawned

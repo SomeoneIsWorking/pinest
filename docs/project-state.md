@@ -196,8 +196,12 @@ PiNest's app forked to `app/` (dead code not carried): reconnect fix landed
 default model `opencode-go/glm-5.3-flash`, and `firebase_options.dart`
 checked in (public web config — pinest gitignored it, breaking fresh
 clones). Verified with `flutter analyze` (0 issues) and `flutter build web`,
-and deployed to `pinest-app.web.app` (deploy verified by string-match in the
-served `main.dart.js`).
+and previously deployed to `pinest-app.web.app` (deploy verified by
+string-match in the served `main.dart.js`). The new canonical Hosting site
+`pinest` now exists in Firebase project `pinest-app`, `pinest.web.app` is an
+authorized auth domain, and the checked-in multisite configuration maps the
+canonical site plus a 301 redirect from the former default site. The first
+deployment and public verification of that configuration are still pending.
 
 First real-user test against the deployed app surfaced and fixed four
 defects: (1) the host `model_set` updated the label without awaiting or
@@ -229,9 +233,10 @@ toggle), the "queued" badge clears the moment a message joins the session
 (history broadcast on user message_start), image pastes from the web client
 reach the agent as content-array user messages, bash tool cards show the
 command that ran. The web client deploys locally via `app/deploy.sh` (analyze
-+ test + build + `firebase deploy -P pinest-app`) — run it after every update
-to `app/`; there is no CI deploy (I-015). Live browser re-verification of
-this batch still pending.
++ test + build + `firebase deploy -P pinest-app`); Firebase targets in
+`app/.firebaserc` deploy the canonical `pinest` site and the legacy redirect
+together. Run it after every update to `app/`; there is no CI deploy (I-015).
+Live deployment and browser re-verification of this batch are still pending.
 
 The repository tip and reachable history passed the publication audit after a
 history-preserving rewrite removed the historical findings (I-014).
@@ -253,19 +258,21 @@ fresh model and new pi session path to the app and registry.
 Both commands are also OBSERVABLE now (I-025): compaction runs outside an
 agent turn, so nothing refreshed the client afterwards and the app kept
 rendering the pre-compaction thread and a stale context badge. The host
-subscribes to pi's `session_compact` / `session_compact_failed`; the
-supervisor funnels compact, clear and auto-compaction through
-`afterContextRewrite()`; both push the rewritten transcript + refreshed usage
-+ a `notice`, refuse loudly when the underlying method is missing, and clear
-the stale queue/turn state of a cleared session. The client renders notices
-and errors as snackbars (`AgentService.notices` → `MainShell`) — the `error`
-message used to be parsed into a field no widget read — and both toolbar
-actions now ask for confirmation first.
+subscribes to pi's `session_compact` / `session_compact_failed` and delegates
+all host rewrite policy to `HostContextController`; the supervisor funnels
+compact, clear and auto-compaction through `afterContextRewrite()`. Both paths
+push rewritten history with `reset: true`, refreshed usage and a `notice`, so
+the client discards every previously loaded history prefix instead of splicing
+old pages back onto the rewrite. Both refuse loudly before mutation when the
+underlying operation is absent, and clear drops stale queue/turn state. The
+client renders notices and errors as snackbars (`AgentService.notices` →
+`MainShell`) and both toolbar actions ask for confirmation first.
 
 Evidence: `drills/compact-clear.mjs` (real AgentSession + fake model: 8 → 6
-messages on /compact, → 0 on /clear, each with history+usage+notice) PASSes
-and `--negative` (same operations straight on the session) FAILs;
-`server/test/compact-clear.test.ts`.
+messages on /compact, → 0 on /clear, each with reset history + usage +
+notice) passes; its `--negative` control rejects the silent pre-fix path.
+`server/test/compact-clear.test.ts` covers spawned and host success/refusal,
+and `app/test/history_merge_test.dart` pins reset-prefix invalidation.
 
 The app's thinking label no longer flips to "off" on every hot reload:
 bootstrap reported a raw (and, via a nonexistent `getThinkingLevel()`, always
@@ -313,15 +320,34 @@ update; the earlier GitHub Actions deploy path was removed by user decision
 on every `main` push touching `app/**`) as the rolling `apk-latest` GitHub
 release asset, which the web client's Settings → "Android app (APK)" button
 downloads (I-024). `deploy.sh` no longer bundles an APK.
-Partial: CI signs with the debug key until the `ANDROID_KEYSTORE_*` repo
-secrets are set, so a newer CI build cannot install over an older one.
-Making that build work also fixed the Android app's identity — package
-`com.barishamil.pinest`, a matching Firebase Android app plus committed
-`google-services.json`, and `DefaultFirebaseOptions.android` no longer
-carrying the WEB app's key/appId — and its sign-in: `signInWithPopup` is
-web-only, so the APK now uses `signInWithProvider` and shows the failure
-reason on the login screen. Android sign-in is UNVERIFIED on a real device
-(none attached here).
+Release signing now fails closed rather than falling back to the debug key.
+All four `ANDROID_KEYSTORE_*` GitHub secrets are configured for the stable
+release certificate, SHA-256
+`83:98:6D:18:59:DE:4C:E0:97:9A:E4:3C:9E:18:40:36:E4:9B:DE:3C:BC:A3:7E:F2:C8:EF:A9:3F:D7:51:A3:F5`,
+and CI runs `app/tools/verify_apk.py` against the package and certificate before
+publication. The first newly signed `apk-latest` publication is pending the
+first push, so no published artifact is yet cited as proof.
+
+The application identity is now `com.barishamil.pinest` across Android,
+Linux, iOS and macOS (Apple test bundles use the derived `.RunnerTests`
+suffix). Firebase has matching Android and Apple registrations; the Apple app
+is `1:271491621267:ios:2a99ee36a80675287b8866`, and obsolete external
+`com.bhamil.remote_pi_app` / `com.bhamil.remotePiApp` registrations were
+removed. `DefaultFirebaseOptions.android` and the Apple targets now carry
+their native app IDs instead of reusing the web app. Android sign-in uses
+`signInWithProvider` rather than the web-only `signInWithPopup`, but is still
+UNVERIFIED on a real device.
+
+The current refactor also moved one-source-of-truth behavior out of the large
+entry/UI files: host context rewrites into `HostContextController`, attachment
+routing and browser file bytes into dedicated services, tool payload decoding
+into `ToolCallView`, and AgentService request correlation/session eviction into
+`CorrelatedRequestBroker` and `SessionCache`. `server/src/index.ts` fell from
+1,357 to 1,294 lines, `chat_screen.dart` from 1,632 to 1,595, and the normal
+server test command now runs `tools/check_structure.py` (1,200-line default,
+explicit non-growing legacy ceilings). The root README uses two deterministic
+widget-golden screenshots produced from the real logged-out shell and a mocked
+authenticated agent state (`app/test/readme_screenshots_test.dart`).
 
 Consecutive user messages no longer void: the extension serializes message
 submissions and waits for the run to start before releasing the next one
@@ -330,10 +356,12 @@ raced "Agent is already processing" and the runtime swallowed the error).
 
 Gaps: run against the live host from an actual phone; hosted (RestImpl)
 backend not yet exercised by a real browser sign-in; stream deltas
-(I-006 item 5) still cumulative — protocol+app change together; Android
-release signing key not yet provisioned as repo secrets (I-024).
+(I-006 item 5) still cumulative — protocol+app change together; publish and
+inspect the first stable-key `apk-latest`; deploy and publicly verify
+`pinest.web.app` plus the former site's 301 redirect (I-015, I-024).
 
 ## Current focus
 
-Phone run of the app against the live host; one real browser sign-in to
-exercise the hosted (RestImpl) path end-to-end.
+Publish and verify the first stable-signed APK and canonical Hosting deploy,
+then run the app against the live host from a phone and exercise one real
+hosted (RestImpl) browser sign-in end-to-end.

@@ -7,6 +7,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
+import { DEFAULT_COMPACT_AT_TOKENS } from "./product-defaults.ts";
 
 const CONFIG_PATH = process.env.RC_CONFIG_PATH
   || join(homedir(), ".pi", "agent", "remote-code", "config.json");
@@ -19,12 +20,10 @@ export interface Config {
   [key: string]: unknown;
 }
 
-export const DEFAULT_COMPACT_AT = 400_000;
-
 const DEFAULTS: Config = {
   tunnelProvider: "cloudflared",
   /** Auto-compact a session when its context reaches this many tokens. */
-  compactAtTokens: DEFAULT_COMPACT_AT,
+  compactAtTokens: DEFAULT_COMPACT_AT_TOKENS,
 };
 
 export function loadConfig(): Config {
