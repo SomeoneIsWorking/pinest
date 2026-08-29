@@ -112,6 +112,13 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() => _attachedImages.add(
           PendingImage(mimeType: mimeType, bytes: bytes),
         ));
+    // Observable confirmation that the paste event fired and was captured —
+    // an image strip that silently stays empty is indistinguishable from a
+    // listener that never fired.
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text('Image attached from clipboard ($mimeType)'),
+      duration: const Duration(seconds: 2),
+    ));
   }
 
   /// Attach files via the paperclip. Images become image attachments; small
@@ -128,7 +135,10 @@ class _ChatScreenState extends State<ChatScreen> {
     final files = await readClipboardImages();
     if (files.isEmpty && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('No image on the clipboard (or permission denied)'),
+        content: Text(
+          'No image read from clipboard. On Firefox/Zen use ⌘V in the '
+          'message field instead.',
+        ),
       ));
       return;
     }
