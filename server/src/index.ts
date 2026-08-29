@@ -806,13 +806,6 @@ function bridge(pi: ExtensionAPI): void {
   pi.on("message_start", (event: any) => {
     _turnStarted = true;
     if (event?.message?.role === "user") {
-      // A queued message just became part of the session — pop it from the
-      // pending queue (first matching occurrence, like pi's own accounting).
-      const delivered = extractUserText(event.message);
-      if (delivered && _pendingMessages.includes(delivered)) {
-        _pendingMessages = popPending(_pendingMessages, delivered);
-        upsertSession(_sessionId, { pendingMessages: [..._pendingMessages] });
-      }
       _streamingText = "";
       _status = "working";
       upsertSession(_sessionId, { streamingText: "", status: "working" });
@@ -824,6 +817,26 @@ function bridge(pi: ExtensionAPI): void {
       _status = "working";
       upsertSession(_sessionId, { status: "working" });
     }
+  });
+
+  // message_end is when pi persists the user message into the transcript —
+  // message_start is too early (buildSessionContext won't contain it yet, so
+  // a history broadcast there makes the delivered message INVISIBLE: popped
+  // from the pending queue before it exists in history). Pop the pending
+  // entry and push history together, once the message actually exists.
+  // The small delay lets the session's own persistence subscriber settle.
+  pi.on("message_end", (event: any) => {
+    if (event?.message?.role !== "user") return;
+    const delivered = extractUserText(event.message);
+    setTimeout(() => {
+      if (delivered && _pendingMessages.includes(delivered)) {
+        _pendingMessages = popPending(_pendingMessages, delivered);
+        upsertSession(_sessionId, { pendingMessages: [..._pendingMessages] });
+      }
+      getInteractiveHistory().then((h) =>
+        broadcast({ type: "history", sessionId: _sessionId, history: h }),
+      );
+    }, 100);
   });
 
   pi.on("message_update", (event: any) => {
