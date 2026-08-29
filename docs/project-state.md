@@ -183,9 +183,10 @@ Mid-turn messages are steerable (deliverAs steer/followUp with an app-side
 toggle), the "queued" badge clears the moment a message joins the session
 (history broadcast on user message_start), image pastes from the web client
 reach the agent as content-array user messages, bash tool cards show the
-command that ran, and pushes to `main` auto-deploy the web client via GitHub
-Actions (I-015) — pending the FIREBASE_SERVICE_ACCOUNT secret and a live
-browser re-verification.
+command that ran. The web client deploys locally via `app/deploy.sh` (analyze
++ test + build + `firebase deploy -P pinest-app`) — run it after every update
+to `app/`; there is no CI deploy (I-015). Live browser re-verification of
+this batch still pending.
 
 The repository tip and reachable history passed the publication audit after a
 history-preserving rewrite removed the historical findings (I-014).
@@ -197,8 +198,9 @@ attachments (web paste bridge → `UserImage[]` → pi content array, I-015); an
 shows the executed command on bash tool cards (I-015). The extension's reload
 watcher skips the live reload while any watched source fails a syntax check,
 so mid-edit broken states no longer stop the host session (I-015).
-Auto-deploy of the web client on push to main is wired via GitHub Actions but
-BLOCKED on the `FIREBASE_SERVICE_ACCOUNT` repo secret being added.
+The web client deploys from the local system via `app/deploy.sh` after every
+update; the earlier GitHub Actions deploy path was removed by user decision
+(I-015).
 
 Gaps: run against the live host from an actual phone; hosted (RestImpl)
 backend not yet exercised by a real browser sign-in; stream deltas
