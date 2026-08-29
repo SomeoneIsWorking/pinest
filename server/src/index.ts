@@ -349,11 +349,11 @@ async function resumeAfterReload(): Promise<void> {
 
 /** Stop everything this instance owns. Used on host shutdown AND on reload
  * (the re-imported instance bootstraps fresh; sessions become resumable). */
-function teardownRemote(reason: "reload" | "shutdown" = "shutdown"): void {
+async function teardownRemote(reason: "reload" | "shutdown" = "shutdown"): Promise<void> {
   if (reason === "reload") persistReloadResume();
   stopWatcher();
   if (_heartbeat) { clearInterval(_heartbeat); _heartbeat = null; }
-  try { _supervisor?.shutdownAll(); } catch { /* */ }
+  try { await _supervisor?.shutdownAll(); } catch { /* */ }
   _supervisor = null;
   try { _ws?.stop(); } catch { /* */ }
   _ws = null;
@@ -447,7 +447,11 @@ async function bootstrap(): Promise<void> {
 
   // Register this interactive session
   const initModel = _ctx?.model;
-  const initThinking = (_ctx as any)?.getThinkingLevel?.() ?? "off";
+  // Report via the same mapping as thinking_set/model_set — a raw pi level
+  // here flips the app's display ("default" → "off") on every hot reload.
+  // NOTE: ExtensionContext has no getThinkingLevel(); the level lives on
+  // _ctx.thinkingLevel (currentHostThinkingLevel).
+  const initThinking = reportThinkingLevel(initModel, currentHostThinkingLevel());
   const initCtx = enrichedContextUsage();
   const hostPiSessionPath: string | null = (_ctx?.sessionManager as any)?.getSessionFile?.()
     ?? (_ctx?.sessionManager as any)?.sessionFile ?? null;
@@ -496,7 +500,7 @@ async function bootstrap(): Promise<void> {
   // Offline on exit
   const shutdown = async (): Promise<void> => {
     try {
-      teardownRemote();
+      await teardownRemote();
       await publishPresence(false);
     } catch { /* best effort */ }
     process.exit(0);
@@ -679,14 +683,31 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
       break;
     }
     case "session_compact":
-      await (_pi as any)?.ctx?.compact?.() ?? (_pi as any)?.compact?.();
+      // compact/newSession live on ExtensionContext, NOT on ExtensionAPI
+      // (_pi has no .ctx property — the old (_pi as any)?.ctx?.… form was a
+      // silent no-op: clear/compact from the app did literally nothing).
+      (_ctx as any)?.compact?.();
       break;
-    case "session_new":
+    case "session_new": {
       // A fresh session context makes any queued messages stale — drop them.
       _pendingMessages = [];
       upsertSession(_sessionId, { pendingMessages: [] });
-      await (_pi as any)?.ctx?.newSession?.() ?? (_pi as any)?.newSession?.();
+      await (_ctx as any)?.newSession?.();
+      // newSession() replaces the session but runs no agent turn, so no
+      // agent_end fires to refresh the usage — push the reset usage now,
+      // plus the new pi session path and model (fresh session = defaults).
+      const m = (_ctx as any)?.model;
+      const path: string | null = ((_ctx as any)?.sessionManager as any)?.getSessionFile?.()
+        ?? ((_ctx as any)?.sessionManager as any)?.sessionFile ?? null;
+      upsertSession(_sessionId, {
+        contextUsage: enrichedContextUsage(),
+        model: m ? `${m.provider}/${m.id}` : null,
+        modelName: m?.name,
+      });
+      _registry?.upsert({ id: _sessionId, piSessionPath: path });
+      broadcastState();
       break;
+    }
     case "list_models":
       broadcast({ type: "models", sessionId: _sessionId, models: listModels() });
       break;
@@ -881,6 +902,7 @@ function bridge(pi: ExtensionAPI): void {
     if (_currentTurnId) _currentTurnId = null;
     _streamingText = "";
     _status = "idle";
+    debug(`[remote-code] host status: working -> idle (agent_end)`);
     upsertSession(_sessionId, { streamingText: null, status: "idle", contextUsage: enrichedContextUsage() });
     maybeAutoCompactHost();
     // Send updated history so the completed message sticks
@@ -941,7 +963,7 @@ function bridge(pi: ExtensionAPI): void {
   // fresh (ws server, tunnel, registry reload). Spawned sessions were parked
   // idle in the registry by teardownRemote → resumable from the app.
   pi.on("session_shutdown", (event: any) => {
-    if (event?.reason === "reload") teardownRemote("reload");
+    if (event?.reason === "reload") void teardownRemote("reload");
   });
 }
 

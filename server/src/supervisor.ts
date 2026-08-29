@@ -202,7 +202,7 @@ export class Supervisor {
     const s = this.sessions.get(sessionId);
     if (!s) return;
     try { s.unsub?.(); } catch { /* */ }
-    try { await (s.session as any).shutdown?.(); } catch { /* */ }
+    await this.stopSession(sessionId, s);
     this.sessions.delete(sessionId);
     // Keep the registry row: history on disk stays listable/resumable.
     this.registry?.close(sessionId);
@@ -259,7 +259,7 @@ export class Supervisor {
         case "session_new": {
           const id = cmd.sessionId as string;
           try { s.unsub?.(); } catch { /* */ }
-          try { await (s.session as any).shutdown?.(); } catch { /* */ }
+          await this.stopSession(id, s);
           const { session } = await createAgentSession(this.createSessionOpts(s.cwd));
           s.session = session;
           s.status = "idle";
@@ -306,6 +306,14 @@ export class Supervisor {
     s.unsub = s.session.subscribe((event: any) => {
       if (event.type === "message_start") {
         s.turnStarted = true;
+        // Mark working here, not only in the user_message case: a run can
+        // start WITHOUT a fresh user_message — e.g. a queued followUp whose
+        // previous run already broadcast agent_end/idle. Without this the
+        // app shows the session idle (green) for the whole follow-up run.
+        if (event.message?.role === "user" || event.message?.role === "assistant") {
+          s.status = "working";
+          this.callbacks.upsertSession(id, { status: "working" });
+        }
       } else if (event.type === "message_end" && event.message?.role === "user") {
         // message_end is when pi persists the message — pop pending + push
         // history together so the delivered message never goes invisible
@@ -346,6 +354,7 @@ export class Supervisor {
       } else if (event.type === "agent_end") {
         s.turnStarted = false;
         s.status = "idle";
+        debug(`[remote-code] session ${id} status: working -> idle (agent_end)`);
         s._streamingText = null;
         if (s.currentTurnId) s.currentTurnId = null;
         this.callbacks.upsertSession(id, { status: "idle", contextUsage: this.usageWithCompactAt(s) });
@@ -452,11 +461,23 @@ export class Supervisor {
     return [...(this.sessions.get(id)?.pending ?? [])];
   }
 
-  shutdownAll(): void {
+  /**
+   * Actually stop a live session: abort any in-flight run, then dispose.
+   * The SDK AgentSession has NO shutdown() — the old `(s.session as
+   * any).shutdown?.()` calls were silent no-ops, so hot reload left zombie
+   * runs editing files invisibly while the new instance resumed the same
+   * pi session file in parallel.
+   */
+  private async stopSession(id: string, s: LiveSession): Promise<void> {
+    try { await s.session.abort(); } catch (e) { debug(`[remote-code] session ${id}: abort failed:`, (e as Error).message); }
+    try { s.session.dispose(); } catch (e) { debug(`[remote-code] session ${id}: dispose failed:`, (e as Error).message); }
+    debug(`[remote-code] session ${id} stopped (aborted + disposed)`);
+  }
+
+  async shutdownAll(): Promise<void> {
     for (const [id, s] of this.sessions) {
       try { s.unsub?.(); } catch { /* */ }
-      try { (s.session as any).shutdown?.(); } catch { /* */ }
-      // Host is exiting: keep rows resumable — status idle, not user-closed.
+      await this.stopSession(id, s);      // Host is exiting: keep rows resumable — status idle, not user-closed.
       if (this.registry) {
         const row = this.registry.get(id);
         if (row && row.status !== "closed") this.registry.upsert({ id, status: "idle" });

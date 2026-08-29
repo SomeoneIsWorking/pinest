@@ -96,6 +96,22 @@ on Firebase bootstrap succeeding.
 Gaps: reload during an ACTIVE remote session (spawned sessions parking +
 app reconnect) exercised end-to-end — blocked on S6.
 
+Reload teardown correctness (found 2026-08-28, fixed): supervisor teardown
+called `(session as any).shutdown?.()` — the SDK AgentSession has NO
+`shutdown()` (it has `abort()` + `dispose()`), so every teardown path
+(hot-reload `shutdownAll`, `despawn`, `session_new`) was a silent no-op.
+Zombie runs kept editing files invisibly after reload while the new instance
+resumed the same pi session file in parallel — users saw "work already
+finished"/reverted history and green-idle sessions that were working.
+`Supervisor.stopSession()` now aborts + disposes; `shutdownAll` is awaited.
+Evidence gate: `test/supervisor.test.ts` asserts abort+dispose are invoked.
+Also found in the same pass: app `/clear` and `/compact` for the HOST session
+called `_pi.ctx.*` — ExtensionAPI has no `ctx`; both were silent no-ops
+(fixed to use the captured ExtensionContext, which carries newSession/compact
+at runtime), and the host bootstrap re-registered thinking level from a
+nonexistent `getThinkingLevel()` raw — flipping the app display from
+"default" to "off" on every reload (fixed via `reportThinkingLevel`).
+
 ## S5b — Hosted discovery backend (zero-config distribution)
 
 Status: `partial`
@@ -198,6 +214,23 @@ attachments (web paste bridge → `UserImage[]` → pi content array, I-015); an
 shows the executed command on bash tool cards (I-015). The extension's reload
 watcher skips the live reload while any watched source fails a syntax check,
 so mid-edit broken states no longer stop the host session (I-015).
+
+The app's `/clear` and `/compact` on the host session now actually dispatch:
+they previously called `(_pi as any)?.ctx?.…`, but `ExtensionAPI` has no `ctx`
+— both were silent no-ops (I-017). They go through the captured
+`ExtensionContext` now, and a cleared host session pushes its reset usage,
+fresh model and new pi session path to the app and registry.
+
+The app's thinking label no longer flips to "off" on every hot reload:
+bootstrap reported a raw (and, via a nonexistent `getThinkingLevel()`, always
+"off") level instead of going through `reportThinkingLevel` like every other
+path (I-018).
+
+Spawned sessions no longer show idle while a run is streaming: the supervisor
+bridge skipped the `message_start` → working update the host bridge has, so a
+queued followUp's run (started after the previous run's agent_end broadcast
+idle) stayed green for its whole duration (I-019). Status transitions now log
+under `RC_DEBUG` at both agent_end sites.
 Mid-turn sending is race-safe: the extension serializes user-message
 submissions and waits for the run to actually start, fixing silent voiding of
 consecutive sends (I-016). The pending-message queue is server-authoritative
