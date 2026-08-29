@@ -41,7 +41,12 @@ export function messagesToHistory(messages: unknown): HistoryItem[] {
   return (messages as any[])
     .filter((m) => m.role === "user" || m.role === "assistant")
     .map((m) => {
-      const text = extractText(m.content);
+      const text = extractText(m.content) ||
+        // Image-only user messages (paste from the client) render as a
+        // placeholder so the app's pending-message matching can clear them.
+        (Array.isArray(m.content) && m.content.some((p: any) => p?.type === "image")
+          ? "[image]"
+          : "");
       const tools: HistoryItem["tools"] = [];
       if (Array.isArray(m.content)) {
         for (const p of m.content) {
