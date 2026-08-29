@@ -250,6 +250,23 @@ they previously called `(_pi as any)?.ctx?.…`, but `ExtensionAPI` has no `ctx`
 `ExtensionContext` now, and a cleared host session pushes its reset usage,
 fresh model and new pi session path to the app and registry.
 
+Both commands are also OBSERVABLE now (I-025): compaction runs outside an
+agent turn, so nothing refreshed the client afterwards and the app kept
+rendering the pre-compaction thread and a stale context badge. The host
+subscribes to pi's `session_compact` / `session_compact_failed`; the
+supervisor funnels compact, clear and auto-compaction through
+`afterContextRewrite()`; both push the rewritten transcript + refreshed usage
++ a `notice`, refuse loudly when the underlying method is missing, and clear
+the stale queue/turn state of a cleared session. The client renders notices
+and errors as snackbars (`AgentService.notices` → `MainShell`) — the `error`
+message used to be parsed into a field no widget read — and both toolbar
+actions now ask for confirmation first.
+
+Evidence: `drills/compact-clear.mjs` (real AgentSession + fake model: 8 → 6
+messages on /compact, → 0 on /clear, each with history+usage+notice) PASSes
+and `--negative` (same operations straight on the session) FAILs;
+`server/test/compact-clear.test.ts`.
+
 The app's thinking label no longer flips to "off" on every hot reload:
 bootstrap reported a raw (and, via a nonexistent `getThinkingLevel()`, always
 "off") level instead of going through `reportThinkingLevel` like every other
@@ -262,13 +279,42 @@ idle) stayed green for its whole duration (I-019). Status transitions now log
 under `RC_DEBUG` at both agent_end sites.
 Mid-turn sending is race-safe: the extension serializes user-message
 submissions and waits for the run to actually start, fixing silent voiding of
-consecutive sends (I-016). The pending-message queue is server-authoritative
-(`pendingMessages` on the session snapshot); the web client renders it and
-keeps no queue state of its own (I-016).
+consecutive sends (I-016). The pending-message queue shown by the client is
+the AGENT'S OWN queue, not server bookkeeping: supervisor sessions mirror
+AgentSession `queue_update` events and `pendingFor()` reads the session's
+steering/followUp getters; the host extension mirrors pi's exact dequeue point
+(`message_start`) since the extension API exposes no queue contents
+(I-016, I-023).
+
+Sent images survive history refresh: user-message image parts are carried in
+history items (item-level `images`, payload-budgeted with an omitted count)
+and render as tappable thumbnails on the user bubble; spawn-dialog paths
+collapse the host home to `~/` (expanded again by `resolvePathInput` on every
+server-side use); tool-card thumbnails collapse with their card's expander;
+the clipboard-attach snackbar is gone (I-023).
+
+Streamed assistant text now SURVIVES tool calls: when the assistant pauses to
+run a tool, the text streamed so far is promoted into a finished speech
+segment (`StreamSegmenter` in `stream.ts`, one shared implementation for
+supervisor sessions and the host bridge) and rendered as an assistant bubble
+next to the tool card; streaming resumes fresh after the tool (I-023).
+
+History loads lazily: every history payload is a page (`pageHistory`, default
+50 items); the client loads the last page on session open and pulls older
+pages by cursor when scrolled to the top, keeping already-pulled pages across
+live refreshes (I-023). A genuinely stuck queued message can be drained via
+`queue_clear` (supervisor) / long-press on the queued bubble in the app
+(I-023).
 
 The web client deploys from the local system via `app/deploy.sh` after every
 update; the earlier GitHub Actions deploy path was removed by user decision
-(I-015).
+(I-015). The Android APK, by contrast, is built and published by CI
+(`.github/workflows/apk.yml`: analyze + test + `flutter build apk --release`
+on every `main` push touching `app/**`) as the rolling `apk-latest` GitHub
+release asset, which the web client's Settings → "Android app (APK)" button
+downloads (I-024). `deploy.sh` no longer bundles an APK.
+Partial: CI signs with the debug key until the `ANDROID_KEYSTORE_*` repo
+secrets are set, so a newer CI build cannot install over an older one.
 
 Consecutive user messages no longer void: the extension serializes message
 submissions and waits for the run to start before releasing the next one
@@ -277,7 +323,8 @@ raced "Agent is already processing" and the runtime swallowed the error).
 
 Gaps: run against the live host from an actual phone; hosted (RestImpl)
 backend not yet exercised by a real browser sign-in; stream deltas
-(I-006 item 5) still cumulative — protocol+app change together.
+(I-006 item 5) still cumulative — protocol+app change together; Android
+release signing key not yet provisioned as repo secrets (I-024).
 
 ## Current focus
 

@@ -150,12 +150,14 @@ test("a parked session nobody adopts is ABORTED at the deadline, not left runnin
   }
 });
 
-// ── A steer must be DISTINGUISHABLE while it waits (I-022d) ────────────────
-// pi delivers a steer at the end of the assistant's current step, so it sits
-// in the pending list for a while. The client showed every pending message as
-// "queued", which reads as ignored. Which ones are steers is the SERVER's
-// answer — client-side bookkeeping loses it on a page reload.
-test("pending steers are reported separately from queued follow-ups", async () => {
+// ── The queue snapshot is the AGENT's own queue, not local bookkeeping ─────
+// pi dequeues a steer at the end of the assistant's current step; which
+// messages are steers is the SERVER's answer — client-side bookkeeping loses
+// it on a page reload. The server keeps NO push/pop list of its own: it
+// mirrors AgentSession `queue_update` events, which carry the FULL steering
+// and followUp queues whenever they change. A message pi never queued must
+// never show as queued, and a message pi delivered must not linger.
+test("pending queue mirrors queue_update from the agent session", async () => {
   const sup = makeSupervisor();
   const snaps: Array<Record<string, unknown>> = [];
   (sup as any).callbacks.upsertSession = (_id: string, snap: Record<string, unknown>) => {
@@ -173,10 +175,46 @@ test("pending steers are reported separately from queued follow-ups", async () =
   await sup.handleSessionCommand({ type: "user_message", sessionId: "s1", text: "steer me", deliverAs: "steer" });
   await sup.handleSessionCommand({ type: "user_message", sessionId: "s1", text: "later please", deliverAs: "followUp" });
 
+  // Submitting alone fabricates NO pending state — only the agent's
+  // queue_update does.
+  for (const snap of snaps) {
+    assert.deepEqual(snap.pendingMessages ?? [], [], "no phantom pending before the agent queues");
+  }
+  assert.deepEqual(sent, ["steer me", "later please"], "both must actually be submitted");
+});
+
+test("queue mirror: wire() follows the agent's queue_update events", async () => {
+  const sup = makeSupervisor();
+  const snaps: Array<Record<string, unknown>> = [];
+  (sup as any).callbacks.upsertSession = (_id: string, snap: Record<string, unknown>) => {
+    snaps.push(snap);
+  };
+  const listeners: Array<(e: any) => void> = [];
+  const sess: any = {
+    abort: async () => {}, dispose: () => {}, prompt: async () => {},
+    subscribe: (l: (e: any) => void) => { listeners.push(l); return () => {}; },
+  };
+  (sup as any).sessions.set("s2", {
+    session: sess,
+    cwd: process.cwd(), status: "idle", name: "s", model: null, modelName: null,
+    _streamingText: null, _compacting: false,
+    pending: [], pendingSteering: [], turnStarted: true, submitter: null,
+  });
+  (sup as any).wire("s2", (sup as any).sessions.get("s2"));
+  assert.ok(listeners.length > 0, "wire must subscribe to session events");
+
+  // The agent queues both; only the steer is reported as steering.
+  for (const l of listeners) l({ type: "queue_update", steering: ["steer me"], followUp: ["later please"] });
   const last = snaps[snaps.length - 1]!;
   assert.deepEqual(last.pendingMessages, ["steer me", "later please"], "both are pending");
   assert.deepEqual(last.pendingSteering, ["steer me"], "only the steer is reported as steering");
-  assert.deepEqual(sent, ["steer me", "later please"], "both must actually be submitted");
+
+  // pi dequeues the steer at message_start and emits the new queue — the
+  // mirror must follow, not keep a stale entry.
+  for (const l of listeners) l({ type: "queue_update", steering: [], followUp: ["later please"] });
+  const after = snaps[snaps.length - 1]!;
+  assert.deepEqual(after.pendingMessages, ["later please"], "delivered steer is gone from the mirror");
+  assert.deepEqual(after.pendingSteering, [], "steer subset follows the agent");
 });
 
 // ── Adoption must report IDENTITY and the REAL status ─────────────────────
@@ -254,6 +292,10 @@ test("adoption survives a parked session missing fields added since it was parke
   let adopted = 0;
   assert.doesNotThrow(() => { adopted = sup2.adoptStashedSessions(); });
   assert.equal(adopted, 1, "the session must still be adopted, not dropped");
-  assert.deepEqual(snaps[0]!.pendingSteering, [], "missing queue defaults to empty");
+  // syncQueue (post-identity) reports the queue read from the agent — for a
+  // parked session without getters the defaulted empty mirror stands.
+  const syncSnap = snaps.find((s) => "pendingSteering" in s);
+  assert.ok(syncSnap, "adoption must push a queue-synced snapshot");
+  assert.deepEqual(syncSnap!.pendingSteering, [], "missing queue defaults to empty");
   assert.equal(snaps[0]!.name, "old1", "a nameless parked session falls back to its id, not blank");
 });

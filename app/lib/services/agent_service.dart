@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' show min, max;
 import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -25,8 +26,16 @@ class AgentService extends ChangeNotifier {
   String? _tunnelProvider;
   final List<Session> _sessions = [];
   final Map<String, String> _streamingText = {};
+  /// Speech segments promoted when the assistant paused to run a tool —
+  /// rendered as finished bubbles while streaming continues after the tool.
+  final Map<String, List<String>> _streamingSegments = {};
   final Map<String, List<PinestModel>> _models = {};
   final Map<String, List<Map<String, dynamic>>> _history = {};
+  /// Index (in the server's full transcript) of the oldest item the client
+  /// holds — sent back to fetch the page before it (scroll-back pagination).
+  final Map<String, int> _historyCursor = {};
+  /// Whether the server says older history exists beyond the loaded cursor.
+  final Map<String, bool> _historyHasMore = {};
   final Map<String, List<Map<String, dynamic>>> _toolCalls = {};
   final Map<String, List<String>> _pathSuggestions = {};
   final Map<String, Completer<bool>> _pathChecks = {};
@@ -47,6 +56,14 @@ class AgentService extends ChangeNotifier {
   String? _error;
   String? get error => _error;
 
+  /// Transient server messages the user must SEE: `notice` (something they
+  /// asked for happened — compact/clear) and `error`. A stream, not state:
+  /// each one is shown once. Before this the server's `error` was parsed into
+  /// a field nothing ever rendered — every server-side failure was invisible.
+  final StreamController<ServerNotice> _notices =
+      StreamController<ServerNotice>.broadcast();
+  Stream<ServerNotice> get notices => _notices.stream;
+
   List<Session> get sessions => List.unmodifiable(_sessions);
   List<Session> get registrySessions => List.unmodifiable(_registry);
 
@@ -62,8 +79,12 @@ class AgentService extends ChangeNotifier {
     return (text != null && text.isNotEmpty) ? text : null;
   }
 
+  List<String> streamingSegmentsFor(String id) => _streamingSegments[id] ?? const [];
+
   List<PinestModel> modelsFor(String id) => _models[id] ?? [];
   List<Map<String, dynamic>> historyFor(String id) => _history[id] ?? [];
+  bool historyHasMore(String id) => _historyHasMore[id] ?? false;
+  int historyCursor(String id) => _historyCursor[id] ?? 0;
   List<Map<String, dynamic>> toolCallsFor(String id) => _toolCalls[id] ?? [];
 
   void updateAuth(AuthService auth) {
@@ -92,8 +113,11 @@ class AgentService extends ChangeNotifier {
     _activeSessionId = null;
     _sessions.clear();
     _streamingText.clear();
+    _streamingSegments.clear();
     _models.clear();
     _history.clear();
+    _historyCursor.clear();
+    _historyHasMore.clear();
     _toolCalls.clear();
     _pathSuggestions.clear();
     for (final completer in _pathChecks.values) {
@@ -286,22 +310,54 @@ class AgentService extends ChangeNotifier {
         _sessions.removeWhere((s) => s.id == sid);
         _registry.removeWhere((s) => s.id == sid);
         _history.remove(sid);
+        _historyCursor.remove(sid);
+        _historyHasMore.remove(sid);
         _streamingText.remove(sid);
+        _streamingSegments.remove(sid);
         _toolCalls.remove(sid);
         break;
       case 'history':
         final sid = msg['sessionId'] as String? ?? '';
-        final history = msg['history'] as List? ?? [];
+        final page = msg['history'] as List? ?? [];
+        final mode = msg['mode'] as String? ?? 'replace';
+        final cursor = (msg['cursor'] as num?)?.toInt() ?? 0;
+        _historyHasMore[sid] = msg['hasMore'] as bool? ?? false;
+        _historyCursor[sid] = cursor;
+        if (mode == 'older') {
+          // Prepend the older page; keep whatever is already rendered.
+          _history[sid] = [
+            ...page.map((x) => Map<String, dynamic>.from(x as Map)),
+            ...(_history[sid] ?? const []),
+          ];
+        } else {
+          // Replace with the newest page, but KEEP older pages the user has
+          // already pulled in: history only appends at the end, so the prefix
+          // before the loaded cursor is still valid. Clamped so a compacted
+          // (shrunken) transcript can never make the prefix overlap the page.
+          final existing = _history[sid] ?? const [];
+          final keep = min(cursor, max(0, existing.length - page.length));
+          _history[sid] = [
+            ...existing.take(keep),
+            ...page.map((x) => Map<String, dynamic>.from(x as Map)),
+          ];
+        }
         // History carries the tool calls inline — keep the live-tool list
         // from duplicating them out of place at the bottom of the thread.
         _toolCalls.remove(sid);
-        _history[sid] = history
-            .map((x) => Map<String, dynamic>.from(x as Map))
-            .toList();
+        // A cleared session (empty replace page at cursor 0) has no thread at
+        // all: a leftover streaming bubble would be the only thing on screen.
+        if (mode != 'older' && page.isEmpty && cursor == 0) {
+          _streamingText.remove(sid);
+          _streamingSegments.remove(sid);
+        }
+        notifyListeners();
         break;
       case 'stream':
         final sid = msg['sessionId'] as String? ?? '';
         _streamingText[sid] = msg['text'] as String? ?? '';
+        _streamingSegments[sid] = (msg['segments'] as List? ?? const [])
+            .map((x) => x as String)
+            .toList();
         // Update session status
         final idx = _sessions.indexWhere((s) => s.id == sid);
         if (idx >= 0) {
@@ -361,6 +417,13 @@ class AgentService extends ChangeNotifier {
         break;
       case 'error':
         _error = msg['message'] as String?;
+        if (_error != null && _error!.isNotEmpty) {
+          _notices.add(ServerNotice(_error!, isError: true));
+        }
+        break;
+      case 'notice':
+        final text = msg['message'] as String? ?? '';
+        if (text.isNotEmpty) _notices.add(ServerNotice(text));
         break;
     }
     notifyListeners();
@@ -439,8 +502,14 @@ class AgentService extends ChangeNotifier {
       _send({'type': 'session_compact', 'sessionId': s.id});
   void listModels(Session s) =>
       _send({'type': 'list_models', 'sessionId': s.id});
-  void getHistory(Session s) =>
-      _send({'type': 'get_history', 'sessionId': s.id});
+  void getHistory(Session s, {int? cursor}) => _send({
+    'type': 'get_history',
+    'sessionId': s.id,
+    'cursor': ?cursor,
+  });
+
+  /// Drop everything pi still has queued for this session (steers + follow-ups).
+  void clearQueue(Session s) => _send({'type': 'queue_clear', 'sessionId': s.id});
 
   /// Set the auto-compact threshold (context tokens) on the host.
   void setCompactThreshold(int tokens) =>
@@ -597,3 +666,9 @@ class PendingImage {
   String get base64 => base64Encode(bytes);
 }
 
+/// A one-shot, user-facing message from the server (see `AgentService.notices`).
+class ServerNotice {
+  final String message;
+  final bool isError;
+  const ServerNotice(this.message, {this.isError = false});
+}

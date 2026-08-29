@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../services/auth_service.dart';
 import '../services/agent_service.dart';
+import '../services/apk_release.dart';
+import '../services/link_bridge.dart';
 import '../services/user_preferences.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -175,6 +177,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 setState(() => _steerByDefault = v);
                 context.read<UserPreferences>().saveSteerByDefault(v);
               },
+            ),
+          ),
+          const SizedBox(height: 24),
+
+          // ── Install: Android APK (published by CI, see apk_release.dart) ──
+          const Text('Install',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 8),
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.android),
+              title: const Text('Android app (APK)'),
+              subtitle: const Text(
+                  'Download the latest CI build and install it. '
+                  'Allow "install from this source" when asked.'),
+              trailing: const Icon(Icons.download),
+              onTap: () => openExternalUrl(apkDownloadUrl),
             ),
           ),
           const SizedBox(height: 24),
