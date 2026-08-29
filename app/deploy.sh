@@ -8,5 +8,5 @@ command -v flutter >/dev/null || { echo "error: flutter not on PATH" >&2; exit 1
 command -v firebase >/dev/null || { echo "error: firebase CLI not on PATH (npm i -g firebase-tools)" >&2; exit 1; }
 flutter analyze
 flutter test
-flutter build web --release
+flutter build web --release --pwa-strategy=none
 firebase deploy --only hosting -P pinest-app

@@ -280,6 +280,9 @@ class AgentService extends ChangeNotifier {
       case 'history':
         final sid = msg['sessionId'] as String? ?? '';
         final history = msg['history'] as List? ?? [];
+        // History carries the tool calls inline — keep the live-tool list
+        // from duplicating them out of place at the bottom of the thread.
+        _toolCalls.remove(sid);
         _history[sid] = history
             .map((x) => Map<String, dynamic>.from(x as Map))
             .toList();

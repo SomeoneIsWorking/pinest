@@ -30,6 +30,19 @@
   <link rel="icon" type="image/png" href="favicon.png"/>
 
   <title>PiNest</title>
+  <script>
+    // This app must ALWAYS run fresh code: unregister any legacy service
+    // worker and drop its caches before Flutter boots. Without this, the SW
+    // served stale bundles and deployed fixes never reached the browser.
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(function (rs) {
+        rs.forEach(function (r) { r.unregister(); });
+      });
+      if (window.caches && caches.keys) {
+        caches.keys().then(function (ks) { ks.forEach(function (k) { caches.delete(k); }); });
+      }
+    }
+  </script>
   <link rel="manifest" href="manifest.json">
   
   <!-- xterm.js -->
