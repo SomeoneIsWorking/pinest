@@ -30,9 +30,11 @@ Two concrete breakages the reload cycle left in the tree:
 - `server/src/reload.ts` → `server/src/watch.ts`; `ReloadWatcher` →
   `SourceWatcher` with `onChange(paths)`. It reports changed paths and never
   reloads.
-- `index.ts` records changes in `_changedSources` and surfaces them:
-  `state.pendingReload {count, files, watching}` for the app,
-  `reload_runtime`'s result for the agent. `RC_NO_WATCH=1` still disables it.
+- `index.ts` records changes in `_changedSources` and reports them to the agent
+  in `reload_runtime`'s result (`details.pending {count, files, watching}`).
+  `RC_NO_WATCH=1` still disables watching. There is deliberately no app-side
+  reload button: self-modification is the agent's, so the reload is the
+  agent's.
 - Reload is explicit only: `reload_runtime` tool, `/pinest-reload`, app
   `reload` command. `queueReload()` returns `{ok, message}`; a refusal (syntax
   gate, no host) is reported to the caller instead of silently skipped.
@@ -82,8 +84,8 @@ submitter + subscription and keeps a mid-run session's gate closed; a fresh
 start adopts 0 (the negative); an unadopted stash is aborted + disposed at the
 deadline and is not adoptable afterwards.
 
-Real host (`scratch/drive-rpc.mjs`, `pi --mode rpc`, log
-`scratch/logs/rpc-drill.log`): baseline 4 factory loads at bootstrap; touching
+Real host (`drills/reload-explicit-rpc.mjs`, `pi --mode rpc`, log
+`scratch/logs/reload-explicit.log`): baseline 4 factory loads at bootstrap; touching
 `server/src/index.ts` produced `harness sources changed … reload NOT triggered`
 with the load count UNCHANGED (no auto-reload) — and the watcher demonstrably
 saw the change, so the negative is not vacuous; `/pinest-reload` then parked 3
@@ -92,5 +94,14 @@ serving commands with zero `extension_error`.
 
 Full suite 164 pass / 0 fail, `npm run typecheck` clean.
 
-Gap: adoption of a session that is actually MID-RUN is unit-tested only — the
-live drill's three sessions were idle (driving a real run costs model calls).
+Mid-RUN handoff (`drills/reload-midrun.mjs`): a REAL `AgentSession` streaming
+from a local fake SSE model server is reloaded 3 tokens into its run — 21 NEW
+tokens then arrive on the ADOPTED instance, the run finishes 24/24, the old
+instance receives nothing after the handoff, and the adopted session still
+accepts a follow-up message (submitter re-wired). The `--negative` control
+parks the session and kills it anyway (the pre-fix shape): the drill then fails
+at "post-reload tokens on instance B", so it discriminates between a
+handed-over run and a killed one.
+
+Gap: a reload with the phone APP attached (client reconnect across the
+teardown) is still unexercised — the drills cover the server side only.

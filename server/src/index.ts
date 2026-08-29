@@ -173,9 +173,6 @@ function stateMessage(): ServerMessage {
     // So the app can show (and the user can verify) the live tunnel endpoint.
     tunnelUrl: _ws?.tunnelUrl ?? null,
     tunnelProvider: _ws?.tunnel?.provider ?? null,
-    // Harness edits seen since this instance started. Reload never happens on
-    // its own — the app shows this so a human can ask for it.
-    pendingReload: pendingReloadState(),
   };
 }
 
@@ -270,8 +267,9 @@ export function noteChangedSources(paths: string[]): void {
   broadcastState();
 }
 
-/** Pending self-modification, for the app and the reload tool. Always answers
- * — `count: 0` means "watched and saw nothing", not "never looked". */
+/** Pending self-modification, reported to the agent by `reload_runtime`.
+ * Always answers — `count: 0` means "watched and saw nothing", not "never
+ * looked"; `watching: false` means it was never watched at all. */
 export function pendingReloadState(): { count: number; files: string[]; watching: boolean } {
   return {
     count: _changedSources.size,

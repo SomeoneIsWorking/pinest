@@ -14,6 +14,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Headless session spawn/resume/kill/route/stream (SDK sessions in-process) | `server` | `server/src/supervisor.ts` |
 | Session registry persistence (sessions.json on disk, atomic, corrupt-refusing) | `server` | `server/src/registry.ts` |
 | Harness source-change watcher (debounced file watch → pending-change notice; never reloads) | `server` | `server/src/watch.ts` |
+| Repeatable evidence drills (explicit-reload contract, mid-run handoff) | `drills` | `drills/*.mjs` |
 | Reload safety gate (syntax-check watched sources; broken edits don't tear down the host) | `server` | `firstSyntaxError` in `server/src/index.ts` |
 | Pure helpers (history shaping, model mapping, path completion) | `server` | `server/src/logic.ts` |
 | Thinking-level resolution ("Default" = omit reasoning override, opencode semantics) | `server` | `server/src/thinking.ts` |
