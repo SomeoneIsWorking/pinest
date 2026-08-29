@@ -424,30 +424,30 @@ class _ChatScreenState extends State<ChatScreen> {
     if (s != null && models.isEmpty && !_modelsRequested) _requestModels();
     // ONE definition of the actions, shared by the wide bar and the narrow
     // sidebar — two copies would drift in what is enabled when.
-    final actions = <_BarAction>[
-      _BarAction(
+    final actions = <BarAction>[
+      BarAction(
         label: '/model ${s?.modelName ?? ""}'.trim(),
         icon: Icons.memory,
         onTap: models.isEmpty ? null : () => _showModels(context, svc, models),
       ),
-      _BarAction(
+      BarAction(
         label: '/thinking ${s?.thinkingLevel ?? "off"}',
         icon: Icons.psychology,
         color: (s?.thinkingLevel ?? 'off') != 'off' ? Colors.purple : null,
         onTap: (s == null) ? null : () => _showThinking(context, svc, s),
       ),
-      _BarAction(
+      BarAction(
         label: '/compact',
         icon: Icons.compress,
         onTap: (working || s == null) ? null : () => svc.compact(s),
       ),
-      _BarAction(
+      BarAction(
         label: '/clear',
         icon: Icons.cleaning_services,
         onTap: (working || s == null) ? null : () => svc.newSession(s),
       ),
       if (!working && s != null && !s.isHost)
-        _BarAction(
+        BarAction(
           label: '/remove',
           icon: Icons.delete_outline,
           color: Colors.red,
@@ -473,36 +473,11 @@ class _ChatScreenState extends State<ChatScreen> {
         // screens have room for every action inline; narrow ones cannot fit
         // them at any font size, so they move into a slide-in sidebar behind
         // one button instead of being scrolled off-screen where nobody looks.
-        child: LayoutBuilder(
-          builder: (context, c) {
-            final wide = c.maxWidth >= _wideBarMinWidth;
-            return Row(
-              children: [
-                if (badge != null) Flexible(child: badge),
-                const Spacer(),
-                if (wide)
-                  for (final a in actions)
-                    _ToolButton(label: a.label, color: a.color, onTap: a.onTap)
-                else ...[
-                  if (_removing)
-                    const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 10),
-                      child: SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      ),
-                    ),
-                  IconButton(
-                    icon: const Icon(Icons.tune, size: 20),
-                    tooltip: 'Session actions',
-                    visualDensity: VisualDensity.compact,
-                    onPressed: () => _showActionSidebar(context, actions),
-                  ),
-                ],
-              ],
-            );
-          },
+        child: SessionToolbarRow(
+          badge: badge,
+          actions: actions,
+          busy: _removing,
+          onOpenSidebar: () => _showActionSidebar(context, actions),
         ),
       ),
     );
@@ -512,7 +487,7 @@ class _ChatScreenState extends State<ChatScreen> {
   /// the right edge, same actions, same enabled/disabled state.
   Future<void> _showActionSidebar(
     BuildContext context,
-    List<_BarAction> actions,
+    List<BarAction> actions,
   ) {
     return showGeneralDialog<void>(
       context: context,
@@ -1048,17 +1023,84 @@ const double _wideBarMinWidth = 620;
 
 /// One toolbar action, rendered inline on wide screens and as a sidebar row on
 /// narrow ones. `onTap == null` means disabled in BOTH places.
-class _BarAction {
+class BarAction {
   final String label;
   final IconData icon;
   final Color? color;
   final VoidCallback? onTap;
-  const _BarAction({
+  const BarAction({
     required this.label,
     required this.icon,
     this.color,
     this.onTap,
   });
+}
+
+/// The session toolbar's layout, split out so its geometry can be tested.
+///
+/// Full width, never sideways-scrolling. Wide: the actions sit at the RIGHT
+/// edge with the context badge at the left. Narrow: the actions cannot fit at
+/// any font size, so one button opens them in a sidebar instead of scrolling
+/// them off-screen where nobody looks.
+class SessionToolbarRow extends StatelessWidget {
+  final Widget? badge;
+  final List<BarAction> actions;
+  final bool busy;
+  final VoidCallback onOpenSidebar;
+  const SessionToolbarRow({
+    super.key,
+    required this.badge,
+    required this.actions,
+    required this.onOpenSidebar,
+    this.busy = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, c) {
+        final wide = c.maxWidth >= _wideBarMinWidth;
+        return SizedBox(
+          width: double.infinity,
+          child: Row(
+            mainAxisSize: MainAxisSize.max,
+            children: [
+              // Expanded (not Flexible + Spacer): a Flexible badge and a
+              // Spacer share the free space 50/50, which parked the actions in
+              // the middle of the bar instead of at its right edge.
+              Expanded(
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: badge ?? const SizedBox.shrink(),
+                ),
+              ),
+              if (wide)
+                for (final a in actions)
+                  _ToolButton(label: a.label, color: a.color, onTap: a.onTap)
+              else ...[
+                if (busy)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 10),
+                    child: SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  ),
+                IconButton(
+                  key: const Key('toolbar-sidebar-button'),
+                  icon: const Icon(Icons.tune, size: 20),
+                  tooltip: 'Session actions',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: onOpenSidebar,
+                ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
 }
 
 class _ToolButton extends StatelessWidget {

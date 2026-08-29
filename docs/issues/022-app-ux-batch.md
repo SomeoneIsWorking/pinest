@@ -21,9 +21,18 @@ full-width bar on desktop) and overflow scrolls off-screen on mobile, where the
 actions were effectively invisible.
 
 **Fix:** `LayoutBuilder`, no horizontal scroll. ≥620px: full-width row, actions
-inline. Below: context badge plus one button that opens a right-side slide-in
-sidebar with the same actions. Both render from ONE `_BarAction` list, so
-enabled/disabled state cannot drift between them.
+inline at the RIGHT edge. Below: context badge plus one button that opens a
+right-side slide-in sidebar with the same actions. Both render from ONE
+`BarAction` list, so enabled/disabled state cannot drift between them.
+
+**Shipped wrong once:** the first version used `Flexible(badge)` + `Spacer()`.
+Both take flex, so the free space split 50/50 and the actions ended up in the
+MIDDLE of the bar — which is what the user then reported. The layout is now
+`Expanded(Align(left, badge))` followed by the actions, and it is pinned by
+widget tests that measure rendered positions (`widget_test.dart`): at 1400px
+the bar spans the full width and the last action sits within 40px of the right
+edge; at 420px no inline action is rendered and the sidebar button opens the
+panel. Reading the code was not enough to catch this — measuring was.
 
 ## 022c — Cmd+V did not paste images (macOS, Zen/Firefox) (fix + diagnostics)
 
