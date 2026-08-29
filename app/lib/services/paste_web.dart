@@ -4,19 +4,24 @@
 import 'dart:html' as html;
 import 'dart:typed_data';
 
-/// Registers a document-level CAPTURE-phase paste listener that reports
-/// pasted images as (bytes, mimeType). Text pastes are ignored — the
-/// TextField handles those.
+typedef ImagePasteListener = void Function(Uint8List bytes, String mimeType);
+
+final List<ImagePasteListener> _listeners = <ImagePasteListener>[];
+bool _registered = false;
+
+/// Registers a WINDOW-level CAPTURE-phase paste listener that reports pasted
+/// images as (bytes, mimeType).
 ///
-/// Capture phase is REQUIRED: Flutter's web engine registers its own paste
-/// handler on the text-editing element and stops propagation, so a normal
-/// bubble-phase listener never sees pastes made while the input has focus
-/// (which is exactly when users paste). Capture runs before the target's
-/// handlers and is immune to that stopPropagation.
-void registerImagePasteListener(
-  void Function(Uint8List bytes, String mimeType) onImage,
-) {
-  html.document.addEventListener('paste', (html.Event raw) {
+/// - Capture phase at the earliest point (window): immune to any
+///   stopPropagation from Flutter's own paste handling further down.
+/// - Window (not document): preempts even document-level interference.
+/// - Registered once per page; every chat screen's callback is kept so
+///   multiple tabs all receive pastes.
+void registerImagePasteListener(ImagePasteListener onImage) {
+  _listeners.add(onImage);
+  if (_registered) return;
+  _registered = true;
+  html.window.addEventListener('paste', (html.Event raw) {
     final event = raw as html.ClipboardEvent;
     final clipboard = event.clipboardData;
     if (clipboard == null) return;
@@ -35,7 +40,10 @@ void registerImagePasteListener(
       reader.onLoadEnd.listen((_) {
         final result = reader.result;
         if (result is ByteBuffer) {
-          onImage(result.asUint8List(), type);
+          final bytes = result.asUint8List();
+          for (final l in List.of(_listeners)) {
+            l(bytes, type);
+          }
         }
       });
       reader.onError.listen((_) {});
