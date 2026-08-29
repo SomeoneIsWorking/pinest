@@ -73,15 +73,37 @@ Gaps: real-host restart drill; app UI for resume (I-007).
 
 Status: `verified`
 
-`server/src/reload.ts` + index wiring: watcher over global/project extension
+`server/src/watch.ts` + index wiring: watcher over global/project extension
 dirs, this extension's own source, and settings files (debounced 1.5s, arm
-delay, `RC_NO_WATCH=1` opt-out); `/rc-reload` command calls `ctx.reload()`
-after `waitForIdle`; `reload_runtime` LLM tool queues `/rc-reload` as
-follow-up; `reload` WS command for the app. On reload the instance tears down
-(WS/tunnel stop, spawned sessions parked idle → resumable) and the
-re-imported instance bootstraps fresh.
+delay, `RC_NO_WATCH=1` opt-out). The watcher NEVER reloads — it records the
+changed paths (`_changedSources`), which the `state` broadcast carries as
+`pendingReload {count, files, watching}` and `reload_runtime` reports back.
+Reload is explicit only: `/pinest-reload` calls `ctx.reload()` after
+`waitForIdle`; the `reload_runtime` LLM tool and the app's `reload` WS
+command queue that command. `queueReload()` returns `{ok, message}` — a
+reload refused by the syntax gate names the broken file to the agent and
+raises an `error` message to the app instead of silently doing nothing. On
+reload the instance tears down (WS/tunnel stop, live sessions parked for
+adoption) and the re-imported instance bootstraps fresh.
 
-Evidence: unit tests (`reload.test.ts` — single fire per burst, zero fires
+Reload hands live sessions over instead of stopping them (2026-08-29):
+`stashForReload()` parks the `AgentSession` objects on `globalThis` without
+aborting, `adoptStashedSessions()` re-wires them into the re-imported instance
+(synchronously, right after the supervisor is constructed), and
+`restorePersistedSessions()` skips rows that were adopted so no session is
+opened twice. A stash nobody adopts is aborted at `ADOPT_DEADLINE_MS` (30s,
+`RC_ADOPT_DEADLINE_MS` for tests) — an unadopted run is the I-020 zombie. A row
+that was `running` when its host went away is resumed with a nudge to continue.
+Evidence: real-host drill parked 3 → adopted 3, duplicate re-opens blocked,
+zero `extension_error`. Mid-RUN adoption is unit-tested only.
+
+Auto-reload-on-change was REMOVED (2026-08-29) after it took the host down:
+every edit the agent made to its own source fired a reload, tearing down the
+instance mid-edit, and a half-written file left no working host to come back
+to. See I-021.
+
+Evidence: unit tests (`watch.test.ts` — single report per burst naming the
+changed path, a recorded change queues NO `/pinest-reload`, zero fires
 without change, stop cancels, arm delay, missing dirs tolerated) PLUS a real
 host drill (`scratch/drive-rpc.mjs`, RPC mode): touching the extension's own
 source fired the watcher, `/rc-reload` executed as a command (custom message
@@ -94,7 +116,8 @@ now passes `expandPromptTemplates: true`. The watcher also no longer depends
 on Firebase bootstrap succeeding.
 
 Gaps: reload during an ACTIVE remote session (spawned sessions parking +
-app reconnect) exercised end-to-end — blocked on S6.
+app reconnect) exercised end-to-end — blocked on S6. The app has no UI for
+`pendingReload` yet; the field is broadcast but unused by the client.
 
 Reload teardown correctness (found 2026-08-28, fixed): supervisor teardown
 called `(session as any).shutdown?.()` — the SDK AgentSession has NO
@@ -212,7 +235,7 @@ drops the "queued" badge as soon as pi accepts a message (history broadcast on
 `message_start`, I-015); accepts pasted clipboard images as message
 attachments (web paste bridge → `UserImage[]` → pi content array, I-015); and
 shows the executed command on bash tool cards (I-015). The extension's reload
-watcher skips the live reload while any watched source fails a syntax check,
+gate refuses a reload while any watched source fails a syntax check,
 so mid-edit broken states no longer stop the host session (I-015).
 
 The app's `/clear` and `/compact` on the host session now actually dispatch:

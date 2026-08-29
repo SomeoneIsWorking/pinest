@@ -31,13 +31,18 @@ listed, resumed, renamed, and deleted.
 ## G3 — The agent can modify its own harness, live
 
 Editing extension code, settings, prompts, or skills applies without restarting
-the host pi process — file watcher auto-applies, and the agent itself can
-trigger an explicit reload via a tool.
+the host pi process. The reload is ALWAYS EXPLICIT — the agent triggers it with
+the `reload_runtime` tool, or a human with `/pinest-reload` or the app button.
+A file watcher only records that edits are pending; it never reloads.
 
-- Success: the agent edits its own extension file or `settings.json`, and the
-  new behavior is active in the running session without a restart.
+- Success: the agent edits its own extension file or `settings.json`, calls
+  `reload_runtime`, and the new behavior is active in the running session
+  without a restart.
+- Non-goal: reloading on file change. A reload tears the extension instance
+  down, so auto-firing it on every write kills the host mid-edit — the agent
+  editing its own source could not finish an edit or come back.
 - Ground truth: pi already re-imports extensions from disk on `/reload`
-  (jiti, `moduleCache: false`); this goal only automates and exposes it.
+  (jiti, `moduleCache: false`); this goal only exposes it.
 
 ## G4 — GLM-5.3-Flash via OpenCode Go, at 1M context
 

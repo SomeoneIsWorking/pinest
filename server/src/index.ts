@@ -11,7 +11,7 @@ import debug from "./log.ts";
  * is real-time WebSocket messages.
  */
 
-import { existsSync, statSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, statSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { resolve as resolvePath, isAbsolute, join, dirname as dirnamePath, basename } from "node:path";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -29,7 +29,7 @@ import { mapModel, deriveSessionName, messagesToHistory, listPaths, resolvePathI
 import { loadConfig, saveConfig } from "./config.ts";
 import { PROVIDERS } from "./tunnel.ts";
 import { createAttachView } from "./attach-view.ts";
-import { ReloadWatcher } from "./reload.ts";
+import { SourceWatcher } from "./watch.ts";
 import { resolveThinkingLevel, reportThinkingLevel } from "./thinking.ts";
 import { Type } from "typebox";
 import type { SessionRow, SessionSnapshot, ClientCommand, ServerMessage } from "./protocol.ts";
@@ -72,7 +72,10 @@ let _status: "idle" | "working" = "idle";
 let _streamingText = "";
 let _ctx: ExtensionContext | null = null;
 let _heartbeat: NodeJS.Timeout | null = null;
-let _watcher: ReloadWatcher | null = null; // ReloadWatcher
+let _watcher: SourceWatcher | null = null;
+// Harness sources changed since this instance started; applied only on an
+// explicit reload. Dies with the instance (a reload starts from a clean slate).
+const _changedSources = new Set<string>();
 
 // True between a run's first message_start and its agent_end. Used by the
 // submission queue to know a submission actually started a run.
@@ -170,6 +173,9 @@ function stateMessage(): ServerMessage {
     // So the app can show (and the user can verify) the live tunnel endpoint.
     tunnelUrl: _ws?.tunnelUrl ?? null,
     tunnelProvider: _ws?.tunnel?.provider ?? null,
+    // Harness edits seen since this instance started. Reload never happens on
+    // its own — the app shows this so a human can ask for it.
+    pendingReload: pendingReloadState(),
   };
 }
 
@@ -204,14 +210,19 @@ function mergedRegistryRows(): SessionRow[] {
   });
 }
 
-// ── Self-modification: live reload of extension code / settings ─────────────
+// ── Self-modification: reload of extension code / settings ─────────────────
 // pi re-imports extensions, skills, prompts and settings from disk on /reload
-// (jiti moduleCache: false). We trigger that automatically on file changes and
-// expose it to the agent (reload_runtime tool) and the app (reload command).
+// (jiti moduleCache: false).
 //
-// Reload tears this extension instance down (session_shutdown reason=reload):
-// we stop the WS server/tunnel and park spawned sessions in the registry as
-// idle (resumable). The freshly-imported instance bootstraps again.
+// A reload is ALWAYS EXPLICIT — the agent's `reload_runtime` tool, the
+// `/pinest-reload` command, or the app's reload command. Nothing reloads on a
+// file change: a reload tears this extension instance down, so auto-firing it
+// on every write meant an agent editing its own source killed itself mid-edit.
+// The watcher only RECORDS what changed (`_changedSources`), which the state
+// broadcast surfaces to the app and `reload_runtime` reports back.
+//
+// Teardown on reload (session_shutdown reason=reload): stop the WS
+// server/tunnel and park live sessions for the re-imported instance to adopt.
 
 function watcherTargets(): { dirs: string[]; files: string[] } {
   const cwd = _ctx?.cwd ?? process.cwd();
@@ -241,19 +252,38 @@ function startWatcher(): void {
   if (process.env.RC_NO_WATCH) return;
   stopWatcher();
   const t = watcherTargets();
-  _watcher = new ReloadWatcher({
+  _watcher = new SourceWatcher({
     dirs: t.dirs,
     files: t.files,
-    onReload: queueReload,
+    onChange: noteChangedSources,
   });
   _watcher.start();
-  debug(`[remote-code] watching ${t.dirs.length} dirs + ${t.files.length} files for live reload`);
+  debug(`[remote-code] watching ${t.dirs.length} dirs + ${t.files.length} files (change notice only — reload stays explicit)`);
+}
+
+/** Record changed harness sources. This NEVER reloads — it only makes the
+ * pending change visible (app state + `reload_runtime`) so the reload happens
+ * when the agent or the user asks for it. */
+export function noteChangedSources(paths: string[]): void {
+  for (const p of paths) _changedSources.add(p);
+  debug(`[remote-code] harness sources changed (${_changedSources.size} pending, reload NOT triggered): ${paths.join(", ")}`);
+  broadcastState();
+}
+
+/** Pending self-modification, for the app and the reload tool. Always answers
+ * — `count: 0` means "watched and saw nothing", not "never looked". */
+export function pendingReloadState(): { count: number; files: string[]; watching: boolean } {
+  return {
+    count: _changedSources.size,
+    files: [..._changedSources].slice(0, 20),
+    watching: !!_watcher,
+  };
 }
 
 /** Syntax-validate every .ts/.js/.mjs file under the watched extension dirs.
- * A broken file (e.g. mid-edit) must NOT trigger the live reload — the running
- * instance keeps serving, and the next file change retries. Returns the first
- * broken path, or null when everything parses. */
+ * A broken file (e.g. a half-written edit) must NOT be reloaded — the running
+ * instance keeps serving and the caller is told which file to fix. Returns the
+ * first broken path, or null when everything parses. */
 export function firstSyntaxError(dirs: string[], files: string[]): string | null {
   const checkable = new Set<string>();
   const exts = [".ts", ".mts", ".cts", ".js", ".mjs", ".cjs"];
@@ -279,78 +309,57 @@ export function firstSyntaxError(dirs: string[], files: string[]): string | null
   return null;
 }
 
-function queueReload(): void {
-  if (!_pi) return;
+/** Queue the explicit reload. Returns a human/agent-readable outcome — every
+ * refusal names its reason, so a reload that did not happen never looks like
+ * one that did. */
+function queueReload(): { ok: boolean; message: string } {
+  if (!_pi) return { ok: false, message: "reload unavailable: extension not wired to a pi host" };
   try {
-    // Gate: if any watched source is currently unparseable (mid-edit), skip
-    // this reload. The watcher refires on the next change, so completing the
-    // edit applies it; the running instance never tears down on broken code.
+    // Gate: refuse to reload while any watched source is unparseable (a
+    // half-written edit) — the running instance would tear down and the
+    // re-import would fail, leaving no host at all. Name the broken file.
     const t = watcherTargets();
     const broken = firstSyntaxError(t.dirs, t.files);
     if (broken) {
-      debug(`[remote-code] reload skipped — syntax error in ${broken}; waiting for next change`);
-      return;
+      const msg = `reload REFUSED — syntax error in ${broken}; fix it and reload again (nothing was torn down)`;
+      debug(`[remote-code] ${msg}`);
+      return { ok: false, message: msg };
     }
     // expandPromptTemplates: true is REQUIRED — sendUserMessage defaults it to
     // false, which skips pi's extension-command dispatch; "/pinest-reload" would
     // then reach the LLM as literal text instead of executing.
     _pi.sendUserMessage("/pinest-reload", { deliverAs: "followUp", expandPromptTemplates: true });
+    const p = pendingReloadState();
+    return {
+      ok: true,
+      message: `queued /pinest-reload as a follow-up command; it applies when the current turn settles (${p.count} changed file(s) pending)`,
+    };
   } catch (e) {
-    debug("[remote-code] queueReload failed:", (e as Error).message);
+    const msg = `reload failed to queue: ${(e as Error).message}`;
+    debug(`[remote-code] ${msg}`);
+    return { ok: false, message: msg };
   }
 }
 
-const RELOAD_RESUME_PATH = join(dirnamePath(REGISTRY_PATH), "reload-resume.json");
-
-/** Persist live spawned sessions (+ their undelivered pending messages) so
- * the freshly-imported instance can resume them after a hot reload. */
-function persistReloadResume(): void {
-  const supervisor = _supervisor;
-  const registry = _registry;
-  if (!supervisor || !registry) return;
-  const live = [...supervisor.sessions.keys()]
-    .map((id) => ({ id, row: registry.get(id) }))
-    .filter((e) => e.row?.piSessionPath)
-    .map((e) => ({
-      id: e.id,
-      piSessionPath: e.row!.piSessionPath!,
-      cwd: e.row!.cwd,
-      name: e.row!.name,
-      pending: supervisor.pendingFor(e.id),
-    }));
-  writeFileSyncSafe(RELOAD_RESUME_PATH, JSON.stringify(live));
-}
-
-function writeFileSyncSafe(path: string, data: string): void {
-  try { mkdirSync(dirnamePath(path), { recursive: true }); writeFileSync(path, data); } catch { /* best effort */ }
-}
-
-/** Resume sessions parked by the previous instance during a hot reload, and
- * re-deliver their undelivered messages. The marker file only exists when the
- * previous instance tore down BECAUSE of a reload — a host restart keeps the
- * manual-resume contract. */
-async function resumeAfterReload(): Promise<void> {
-  if (!existsSync(RELOAD_RESUME_PATH)) return;
-  let entries: Array<{ id: string; piSessionPath: string; cwd?: string; name?: string; pending?: string[] }> = [];
-  try { entries = JSON.parse(readFileSync(RELOAD_RESUME_PATH, "utf8")); } catch { /* corrupt → ignore */ }
-  try { unlinkSync(RELOAD_RESUME_PATH); } catch { /* */ }
-  for (const e of entries) {
-    try {
-      await _supervisor!.resume({ sessionId: e.id, piSessionPath: e.piSessionPath, cwd: e.cwd, name: e.name });
-      debug(`[remote-code] reload: resumed session ${e.id}`);
-      for (const text of e.pending ?? []) {
-        await _supervisor!.handleSessionCommand({ type: "user_message", sessionId: e.id, text, deliverAs: "steer" });
-      }
-    } catch (err) {
-      debug(`[remote-code] reload: resume ${e.id} failed:`, (err as Error).message);
-    }
-  }
+/** Adopt sessions parked by the previous instance during a hot reload. Only
+ * non-empty after an actual reload — a fresh host start adopts nothing.
+ *
+ * Called SYNCHRONOUSLY as soon as the supervisor exists, before any awaited
+ * bootstrap step: parked sessions are still running, and every await between
+ * park and adopt is time they run unwired. The supervisor's own deadline
+ * aborts them if this never happens at all.
+ */
+function adoptReloadedSessions(): number {
+  const adopted = _supervisor?.adoptStashedSessions() ?? 0;
+  debug(`[remote-code] reload: adopted ${adopted} parked session(s)` + (adopted ? " — runs never stopped" : " (fresh start, nothing parked)"));
+  if (adopted) broadcastState();
+  return adopted;
 }
 
 /** Stop everything this instance owns. Used on host shutdown AND on reload
  * (the re-imported instance bootstraps fresh; sessions become resumable). */
 async function teardownRemote(reason: "reload" | "shutdown" = "shutdown"): Promise<void> {
-  if (reason === "reload") persistReloadResume();
+  if (reason === "reload" && _supervisor) _supervisor.stashForReload();
   stopWatcher();
   if (_heartbeat) { clearInterval(_heartbeat); _heartbeat = null; }
   try { await _supervisor?.shutdownAll(); } catch { /* */ }
@@ -398,6 +407,10 @@ async function bootstrap(): Promise<void> {
     compactAtTokens: (): number | undefined => loadConfig().compactAtTokens,
   }, _registry);
 
+  // Re-attach runs parked by the previous instance FIRST — before the WS
+  // server, tunnel, or registry restore. They are executing right now.
+  adoptReloadedSessions();
+
   // Start WebSocket server + tunnel
   _ws = new WSServer({ port: 0, expectedUid: uid });
   _ws.setVerifyFn(async (token) => {
@@ -406,7 +419,6 @@ async function bootstrap(): Promise<void> {
   });
   _ws.on("command", (cmd) => { void handleCommand(cmd); });
   _ws.setStateProvider(stateMessage);
-  void resumeAfterReload();
   _ws.tunnelOnDead = () => {
     debug("[remote-code] tunnel died — restarting");
     void _ws?.restartTunnel(loadConfig().tunnelProvider).then(() => publishPresence(true));
@@ -528,7 +540,10 @@ async function handleCommand(cmd: ClientCommand): Promise<void> {
     if (cmd.type === "folder_create") return createFolder(cmd);
     if (cmd.type === "set_compact_threshold") return setCompactThreshold(cmd);
     if (cmd.type === "reload") {
-      queueReload();
+      // Explicit request from the app. A refused reload must be visible —
+      // otherwise the app shows nothing and looks like it worked.
+      const r = queueReload();
+      if (!r.ok) broadcast({ type: "error", message: `[remote-code] ${r.message}` });
       return;
     }
     const sid = (cmd as { sessionId?: string }).sessionId;
@@ -585,7 +600,18 @@ async function resumeSession(cmd: Extract<ClientCommand, { type: "session_resume
 async function restorePersistedSessions(): Promise<void> {
   const rows = _registry?.all().filter((row) =>
     !row.isHost && row.status !== "closed" && !!row.piSessionPath && !!row.cwd) ?? [];
+  let restored = 0;
+  let nudged = 0;
   for (const row of rows) {
+    // Adopted across a reload: already live in THIS supervisor. Re-opening the
+    // same pi session file would put two agents on one transcript (I-020).
+    if (_supervisor!.sessions.has(row.id)) {
+      debug(`[remote-code] restore: ${row.id} already live (adopted) — not re-opened`);
+      continue;
+    }
+    // "running" means the previous host went away mid-run: the work stopped
+    // where it stopped, so the restored session gets a nudge to continue.
+    const wasRunning = row.status === "running";
     try {
       await _supervisor!.resume({
         sessionId: row.id,
@@ -593,6 +619,16 @@ async function restorePersistedSessions(): Promise<void> {
         cwd: row.cwd!,
         name: row.name,
       });
+      restored += 1;
+      if (wasRunning) {
+        await _supervisor!.handleSessionCommand({
+          type: "user_message",
+          sessionId: row.id,
+          text: RESUME_NUDGE,
+          deliverAs: "followUp",
+        });
+        nudged += 1;
+      }
     } catch (e) {
       debug(`[remote-code] could not restore session ${row.id}:`, (e as Error).message);
       broadcast({
@@ -602,8 +638,16 @@ async function restorePersistedSessions(): Promise<void> {
       });
     }
   }
+  debug(`[remote-code] restore: ${rows.length} candidate row(s) → ${restored} resumed, ${nudged} nudged to continue`);
   if (rows.length) broadcastState();
 }
+
+/** Sent to a session that was mid-run when its host went away (reload that
+ * could not be adopted, or a host restart). It must be explicit that the
+ * interruption was environmental, not a user change of mind. */
+const RESUME_NUDGE =
+  "[pinest] Your host process reloaded/restarted while you were working, so your run was cut off. " +
+  "Re-check the current state of the files you were editing, then continue from where you left off.";
 
 async function renameSession(cmd: Extract<ClientCommand, { type: "session_rename" }>): Promise<void> {
   const name = cmd.name.trim();
@@ -1004,14 +1048,18 @@ const remoteCode = (pi: ExtensionAPI): void => {
     label: "Reload Runtime",
     description:
       "Reload your own runtime: extensions, skills, prompts, themes, and settings. " +
-      "Call this after editing extension code under .pi/extensions, this extension's " +
-      "source, or PI_AGENT_DIR/settings.json so the changes apply without a restart.",
+      "Edits to extension code under .pi/extensions, this extension's source, or " +
+      "PI_AGENT_DIR/settings.json do NOT apply until you call this — nothing reloads " +
+      "on file change. Reloading re-imports (and briefly tears down) this extension, " +
+      "so call it when your edits are COMPLETE, not between them. If a watched file " +
+      "has a syntax error the reload is refused and the file is named.",
     parameters: Type.Object({}),
     async execute() {
-      queueReload();
+      const pending = pendingReloadState();
+      const { message } = queueReload();
       return {
-        content: [{ type: "text", text: "Queued /pinest-reload as a follow-up command; changes apply when the current turn settles." }],
-        details: {},
+        content: [{ type: "text", text: message }],
+        details: { pending },
       };
     },
   });
