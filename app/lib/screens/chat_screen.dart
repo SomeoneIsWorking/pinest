@@ -7,6 +7,8 @@ import 'package:provider/provider.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import '../services/agent_service.dart';
 import '../services/paste_bridge.dart';
+import '../services/picked_file.dart';
+import '../services/file_pick_bridge.dart' show pickUserFiles;
 import '../services/user_preferences.dart';
 import '../models/session.dart';
 import '../models/chat_item.dart';
@@ -112,17 +114,25 @@ class _ChatScreenState extends State<ChatScreen> {
         ));
   }
 
-  /// Attach files via the platform picker. Images become image attachments;
-  /// small text files are inlined into the message as fenced blocks; anything
-  /// else is refused BY NAME (no silent drops).
+  /// Attach files via the paperclip. Images become image attachments; small
+  /// text files are inlined into the message as fenced blocks; anything else
+  /// is refused BY NAME (no silent drops).
   Future<void> _attachFiles() async {
-    const images = XTypeGroup(label: 'Images', mimeTypes: [
-      'image/png', 'image/jpeg', 'image/gif', 'image/webp',
-    ]);
-    const texts = XTypeGroup(label: 'Text', mimeTypes: ['text/*']);
-    final files = await openFiles(acceptedTypeGroups: [images, texts]);
+    final List<PickedFile> files;
+    if (kIsWeb) {
+      files = await pickUserFiles();
+    } else {
+      const images = XTypeGroup(label: 'Images', mimeTypes: [
+        'image/png', 'image/jpeg', 'image/gif', 'image/webp',
+      ]);
+      const texts = XTypeGroup(label: 'Text', mimeTypes: ['text/*']);
+      final xfiles = await openFiles(acceptedTypeGroups: [images, texts]);
+      files = [
+        for (final f in xfiles)
+          PickedFile(name: f.name, bytes: await f.readAsBytes()),
+      ];
+    }
     if (files.isEmpty || !mounted) return;
-    const imageExt = {'png', 'jpg', 'jpeg', 'gif', 'webp'};
     const textExt = {
       'txt', 'md', 'markdown', 'json', 'yaml', 'yml', 'toml', 'csv', 'log',
       'ts', 'tsx', 'js', 'jsx', 'mjs', 'py', 'rb', 'go', 'rs', 'c', 'h', 'cc',
@@ -130,12 +140,13 @@ class _ChatScreenState extends State<ChatScreen> {
       'css', 'scss', 'sql', 'xml', 'dart', 'ini', 'conf', 'env', 'lock',
     };
     final extraText = StringBuffer();
+    const imageExt = {'png', 'jpg', 'jpeg', 'gif', 'webp'};
     for (final file in files) {
       final name = file.name;
       final ext = name.contains('.')
           ? name.split('.').last.toLowerCase()
           : '';
-      final bytes = await file.readAsBytes();
+      final bytes = file.bytes;
       if (bytes.length > 10 * 1024 * 1024) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
