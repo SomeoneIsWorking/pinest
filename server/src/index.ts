@@ -115,6 +115,11 @@ function captureUi(ctx: unknown): void {
   if (!_ui && ui?.setStatus) _ui = ui;
 }
 
+/** Best-effort TUI notice from anywhere in the module (no ctx needed). */
+function uiNotify(message: string, level: "info" | "warning" | "error" = "info"): void {
+  try { _ui?.notify?.(message, level); } catch { /* the footer is best-effort */ }
+}
+
 /** True if `p` exists and is a directory (stat-safe). */
 function statSyncSafe(p: string): boolean {
   try { return statSync(p).isDirectory(); } catch { return false; }
@@ -450,10 +455,20 @@ async function bootstrap(): Promise<void> {
   void ws.startTunnel(preferred)
     .then((used) => {
       debug(`[remote-code] Tunnel up via ${used ?? "(none)"}: ${ws.tunnelUrl ?? "local-only"}`);
+      // The footer was rendered while this was still pending, so it still says
+      // "(starting…)". Refresh it here or the status bar keeps reporting a
+      // state that ended minutes ago — which is how a WORKING host reads as a
+      // hung one (see I-021's recovery note).
+      renderFooter();
+      uiNotify(ws.tunnelUrl
+        ? `[pinest] tunnel up: ${ws.tunnelUrl}`
+        : `[pinest] tunnel started via ${used ?? "(none)"} but reported no URL — remote access is local-only`);
       return publishPresence(true);
     })
     .catch((e) => {
       debug("[remote-code] Tunnel failed:", (e as Error).message, "— running local-only");
+      renderFooter();
+      uiNotify(`[pinest] tunnel failed: ${(e as Error).message} — local-only`, "warning");
       return publishPresence(true);
     });
 
@@ -981,7 +996,7 @@ function bridge(pi: ExtensionAPI): void {
     notify("[pinest] loaded — /pinest-sessions sessions · /pinest-provider tunnel · /pinest-auth sign in");
     bootstrap()
       .then(() => {
-        notify(`[pinest] online as ${_ownerEmail ?? "(unknown)"} — ${_ws?.tunnelUrl ?? "local-only"}`);
+        notify(`[pinest] online as ${_ownerEmail ?? "(unknown)"} — ${_ws?.tunnelUrl ?? "tunnel still starting…"}`);
         renderFooter();
       })
       .catch((e) => {
