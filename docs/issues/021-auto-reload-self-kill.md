@@ -72,6 +72,21 @@ extension in the SAME process:
   ("your host reloaded/restarted mid-run — re-check the files and continue"),
   so the work resumes instead of sitting silently truncated.
 
+## Recovery when the extension is already dead
+
+A load-time failure is NOT self-healing: if the extension throws while pi
+imports it, none of our code is running, so the watcher, `reload_runtime` and
+`/pinest-reload` all do not exist. The host sits with no WS server (check:
+`ls /proc/<pi-pid>/fd | grep -c socket` → 0) and no tunnel, and the pi status
+bar keeps showing STALE status keys from the last instance that did load —
+`ngrok: (starting…)` next to a host that is serving nothing.
+
+Fix the source, then in the host's TUI run pi's BUILT-IN `/reload`. Do not type
+`/pinest-reload`: with the extension unloaded that is not a command, and pi
+sends it to the model as plain text (measured — it started a real turn).
+Observed on 2026-08-29: after the fix landed, `/reload` brought the host back
+(4 sockets, ngrok up, `426 Upgrade Required` on the tunnel, 4 sessions listed).
+
 ## Evidence
 
 `server/test/watch.test.ts`: a change reports exactly once and names the

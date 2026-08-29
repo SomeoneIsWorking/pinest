@@ -34,6 +34,12 @@ smoked against a real `pi -e server/src/index.ts` run when pi is available —
 live in git (`drills/README.md`); only their output belongs in `scratch/`. Run
 a drill in BOTH directions (`--negative`) before trusting its verdict.
 
+If the extension ever fails to LOAD, nothing of ours is running and it cannot
+recover itself — fix the source, then use pi's built-in `/reload` in the host
+TUI (`/pinest-reload` is our command; it does not exist then, and pi would send
+it to the model as text). `ls /proc/<pi-pid>/fd | grep -c socket` = 0 is the
+tell; the pi status bar keeps showing stale values from the last good instance.
+
 Reload is EXPLICIT, never automatic: the watcher records changed files, the
 agent reloads itself with `reload_runtime` when its edits are complete. Do not
 re-wire a file change to a reload — that is I-021, and it kills the host
