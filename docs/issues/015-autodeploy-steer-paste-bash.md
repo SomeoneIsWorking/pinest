@@ -99,3 +99,11 @@ from clipboard** — the latter reading `navigator.clipboard.read()` via
 package:web (dart:html has no Clipboard bindings). A button tap is a user
 gesture, so the permission prompt flow works on desktop Chrome/Edge/Safari.
 Empty clipboard / permission denial → named snackbar. Event listener kept.
+
+## Follow-up 5: Firefox/Zen paste path (this commit)
+
+Zen = Firefox-based: clipboard.read() unreliable, paste-EVENT is the path.
+Listener now window-capture, once-per-page with fanout to all screens; paste
+shows an "Image attached" snackbar so a no-fire is observable; read() failure
+message points Firefox users to Cmd+V. Deployed; awaiting user confirmation
+(after hard refresh to bust any stale service worker).
