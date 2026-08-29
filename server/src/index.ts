@@ -72,6 +72,63 @@ let _ctx: ExtensionContext | null = null;
 let _heartbeat: NodeJS.Timeout | null = null;
 let _watcher: ReloadWatcher | null = null; // ReloadWatcher
 
+// True between a run's first message_start and its agent_end. Used by the
+// submission queue to know a submission actually started a run.
+let _turnStarted = false;
+
+/** Serialized user-message submission queue.
+ *
+ * Why it exists: session.prompt() performs async work (auth check, compaction
+ * check) BEFORE flipping _isAgentRunActive, and session.isStreaming reads that
+ * same flag. Two messages submitted in quick succession can therefore both
+ * observe isStreaming === false; the second then takes the full prompt path,
+ * agent.prompt() throws "Agent is already processing", and the runtime
+ * wrapper swallows the rejection — the message silently voids. Serializing
+ * submissions and waiting for evidence that the previous submission's run
+ * actually started (message_start observed) makes later submissions reliably
+ * take the steer path.
+ */
+export interface MessageSubmitter {
+  submit(text: string, images: UserImage[] | undefined, deliverAs: "steer" | "followUp"): void;
+}
+
+export function createMessageSubmitter(deps: {
+  send: (
+    content: string | Array<{ type: "text"; text: string } | { type: "image"; mimeType: string; data: string }>,
+    deliverAs: "steer" | "followUp",
+  ) => void;
+  isTurnStarted: () => boolean;
+  tickMs?: number;
+  maxWaitTicks?: number;
+}): MessageSubmitter {
+  let chain: Promise<void> = Promise.resolve();
+  const tickMs = deps.tickMs ?? 100;
+  const maxWaitTicks = deps.maxWaitTicks ?? 50; // 5s cap: a failed start must not wedge the queue
+  return {
+    submit(text, images, deliverAs) {
+      chain = chain
+        .then(async () => {
+          const content = images?.length
+            ? [
+                { type: "text" as const, text },
+                ...images.map((img) => ({ type: "image" as const, mimeType: img.mimeType, data: img.data })),
+              ]
+            : text;
+          deps.send(content, deliverAs);
+          // If the session looked idle when this submitted, wait until the run
+          // actually starts (or the cap expires) before allowing the next
+          // submission through.
+          for (let i = 0; i < maxWaitTicks && !deps.isTurnStarted(); i++) {
+            await new Promise((r) => setTimeout(r, tickMs));
+          }
+        })
+        .catch((e) => debug("[remote-code] user_message submission failed:", (e as Error).message));
+    },
+  };
+}
+
+let _submitter: MessageSubmitter | null = null;
+
 // In-memory session snapshots (the live view; registry is the durable view)
 const _sessions = new Map<string, SessionSnapshot>();
 
@@ -585,21 +642,7 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
       // Image-only messages need a text part that also appears in session
       // history (the client clears its "queued" badge by matching text).
       const text = cmd.text.trim().length === 0 ? "[image]" : cmd.text;
-      if (images.length > 0) {
-        _pi?.sendUserMessage?.(
-          [
-            { type: "text", text },
-            ...images.map((img: UserImage) => ({
-              type: "image" as const,
-              mimeType: img.mimeType,
-              data: img.data,
-            })),
-          ],
-          { deliverAs },
-        );
-      } else {
-        _pi?.sendUserMessage?.(cmd.text, { deliverAs });
-      }
+      _submitter?.submit(text, images, deliverAs);
       break;
     }
     case "cancel":
@@ -729,8 +772,15 @@ function embedImages(text: string): string {
 // ── Bridge Pi events → WebSocket ────────────────────────────────────────────
 function bridge(pi: ExtensionAPI): void {
   _pi = pi;
+  _submitter = createMessageSubmitter({
+    send: (content, deliverAs) => {
+      _pi?.sendUserMessage?.(content as never, { deliverAs });
+    },
+    isTurnStarted: () => _turnStarted,
+  });
 
   pi.on("message_start", (event: any) => {
+    _turnStarted = true;
     if (event?.message?.role === "user") {
       _streamingText = "";
       _status = "working";
@@ -779,6 +829,7 @@ function bridge(pi: ExtensionAPI): void {
   });
 
   pi.on("agent_end", () => {
+    _turnStarted = false;
     if (_currentTurnId) _currentTurnId = null;
     _streamingText = "";
     _status = "idle";
