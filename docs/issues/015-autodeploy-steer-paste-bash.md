@@ -13,6 +13,16 @@ release build + `firebase deploy --only hosting -P pinest-app`, run from the
 local system after every update to `app/` (CI was considered and rejected by
 the user: deploy is local-only).
 
+## Follow-up (user-observed, fixed e301db7)
+
+- **Paste didn't work in the browser.** The document-level paste listener was
+  bubble-phase; Flutter's web engine handles paste on its text-editing
+  element and stops propagation, so it never fired while the input was
+  focused. Now registered in the CAPTURE phase, which runs first.
+- **Steer UI replaced.** The switch row under the input became a single icon
+  toggle (bolt = steer / low-priority = follow-up) beside send, shown only
+  while working (when idle both modes are identical).
+
 ## Delivered in the same batch
 
 1. **Steer vs follow-up.** `user_message` now carries `deliverAs`
