@@ -48,8 +48,10 @@ adopted by the re-imported instance), never stopped and re-opened.
 
 The web client deploys from the LOCAL system only — no CI. After any `app/`
 change lands on `main`, run `cd app && ./deploy.sh` (analyze + test + build +
-`firebase deploy -P pinest-app`). An undeployed app change means users see the
-old client — that was the I-015 stale-site incident.
+`firebase deploy -P pinest-app`). Firebase Hosting target `app` is the canonical
+`pinest.web.app` site; target `legacy` keeps the former `pinest-app.web.app`
+endpoint as a 301 redirect. An undeployed app change means users see the old
+client — that was the I-015 stale-site incident.
 
 The Android APK is the one artifact that DOES ship from CI
 (`.github/workflows/apk.yml`): every push to `main` touching `app/**` runs
@@ -57,8 +59,12 @@ analyze + test + `flutter build apk --release` and republishes the rolling
 `apk-latest` GitHub release, which is what the web client's Settings →
 "Android app (APK)" button downloads (`app/lib/services/apk_release.dart`).
 Do not re-add an APK build to `deploy.sh` — two sources means one stale copy.
-Until the `ANDROID_KEYSTORE_*` repo secrets exist, CI signs with the debug key
-and users must uninstall before installing a newer build (I-024).
+Release signing is mandatory: CI fails closed unless all four
+`ANDROID_KEYSTORE_*` secrets exist, and `app/tools/verify_apk.py` refuses an APK
+whose package or signing certificate differs from the recorded release
+identity. The release certificate SHA-256 is
+`83:98:6D:18:59:DE:4C:E0:97:9A:E4:3C:9E:18:40:36:E4:9B:DE:3C:BC:A3:7E:F2:C8:EF:A9:3F:D7:51:A3:F5`
+(I-024). Pull requests build a debug APK only and never publish it.
 
 ## Rules specific to this repo
 

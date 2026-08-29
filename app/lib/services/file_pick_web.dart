@@ -3,8 +3,8 @@
 import 'dart:async';
 import 'dart:html' as html;
 import 'dart:js_interop';
-import 'dart:typed_data';
 import 'package:web/web.dart' as web;
+import 'file_reader_bytes.dart';
 import 'picked_file.dart';
 
 /// Opens the browser's file picker (a plain <input type="file">, which works
@@ -20,19 +20,24 @@ Future<List<PickedFile>> pickUserFiles() async {
   for (final f in input.files ?? const <html.File>[]) {
     final reader = html.FileReader();
     final done = Completer<void>();
-    reader.onLoadEnd.listen((_) => done.complete());
-    reader.onError.listen((_) => done.complete()); // empty entry, still named
+    reader.onLoadEnd.listen((_) {
+      if (!done.isCompleted) done.complete();
+    });
+    reader.onError.listen((_) {
+      if (!done.isCompleted) done.complete();
+    });
     reader.readAsArrayBuffer(f);
     await done.future;
-    final result = reader.result;
-    files.add(PickedFile(
-      name: f.name,
-      bytes: result is ByteBuffer ? result.asUint8List() : Uint8List(0),
-    ));
+    try {
+      files.add(
+        PickedFile(name: f.name, bytes: fileReaderBytes(reader.result)),
+      );
+    } on FormatException catch (error) {
+      throw StateError('Could not read ${f.name}: ${error.message}');
+    }
   }
   return files;
 }
-
 
 /// Read images straight from the system clipboard via the async Clipboard
 /// API. Requires a user gesture and browser permission — used by the explicit
@@ -51,10 +56,12 @@ Future<List<PickedFile>> readClipboardImages() async {
         if (!mime.startsWith('image/')) continue;
         final blob = await item.getType(mime).toDart;
         final buffer = await blob.arrayBuffer().toDart;
-        out.add(PickedFile(
-          name: 'clipboard.${mime.split('/').last}',
-          bytes: buffer.toDart.asUint8List(),
-        ));
+        out.add(
+          PickedFile(
+            name: 'clipboard.${mime.split('/').last}',
+            bytes: buffer.toDart.asUint8List(),
+          ),
+        );
         break;
       }
     }

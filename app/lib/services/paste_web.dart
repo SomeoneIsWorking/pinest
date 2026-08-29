@@ -3,6 +3,7 @@
 // ignore_for_file: avoid_web_libraries_in_flutter, deprecated_member_use
 import 'dart:html' as html;
 import 'dart:typed_data';
+import 'file_reader_bytes.dart';
 
 typedef ImagePasteListener = void Function(Uint8List bytes, String mimeType);
 typedef PasteDiagnostic = void Function(String detail);
@@ -99,7 +100,9 @@ void _onPaste(html.Event raw) {
       (t) => t.startsWith('image/') || t.contains('file'),
     );
     if (imageish) {
-      _report('no image could be read; clipboard offered ${seenTypes.join(", ")}');
+      _report(
+        'no image could be read; clipboard offered ${seenTypes.join(", ")}',
+      );
     }
     return;
   }
@@ -108,17 +111,10 @@ void _onPaste(html.Event raw) {
     final type = file.type.startsWith('image/') ? file.type : 'image/png';
     final reader = html.FileReader();
     reader.onLoadEnd.listen((_) {
-      final result = reader.result;
-      // dart2js hands back a ByteBuffer here, dart2wasm a typed list. Checking
-      // only one of them silently dropped every paste on the other backend.
-      if (result is ByteBuffer) {
-        _emit(result.asUint8List(), type);
-      } else if (result is Uint8List) {
-        _emit(result, type);
-      } else if (result is List<int>) {
-        _emit(Uint8List.fromList(result), type);
-      } else {
-        _report('read $type but got ${result.runtimeType}, which is not bytes');
+      try {
+        _emit(fileReaderBytes(reader.result), type);
+      } on FormatException catch (error) {
+        _report('read $type but ${error.message}');
       }
     });
     reader.onError.listen((_) {

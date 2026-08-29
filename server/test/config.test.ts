@@ -11,6 +11,7 @@ process.env.RC_CONFIG_PATH = join(TMP, "remote-code-config.json");
 
 // Import AFTER setting the env var so the module picks up the test path.
 const { loadConfig, saveConfig, resetConfig } = await import("../src/config.ts");
+const { DEFAULT_COMPACT_AT_TOKENS } = await import("../src/product-defaults.ts");
 
 const CFG = process.env.RC_CONFIG_PATH;
 
@@ -22,6 +23,7 @@ test("loadConfig: returns defaults when no file exists", () => {
   rmSync(CFG, { force: true });
   const cfg = loadConfig();
   assert.equal(cfg.tunnelProvider, "cloudflared");
+  assert.equal(cfg.compactAtTokens, DEFAULT_COMPACT_AT_TOKENS);
 });
 
 test("loadConfig: defaults are a fresh object each call (no mutation leak)", () => {

@@ -7,9 +7,8 @@
  * models.json entry for it — that would freeze a stale static model list.
  * Provisioning = settings defaults + verification.
  */
-
-/** Tokens a 1M-context window keeps before auto-compaction fires. */
-export const COMPACT_AT = 400_000;
+import { DEFAULT_COMPACT_AT_TOKENS, DEFAULT_MODEL } from "./product-defaults.ts";
+export { DEFAULT_MODEL } from "./product-defaults.ts";
 
 /**
  * pi's auto-compaction trigger is `contextTokens > contextWindow -
@@ -20,7 +19,7 @@ export function reserveTokensFor(contextWindow: number): number {
   if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
     throw new Error(`invalid contextWindow: ${contextWindow}`);
   }
-  return Math.max(0, contextWindow - COMPACT_AT);
+  return Math.max(0, contextWindow - DEFAULT_COMPACT_AT_TOKENS);
 }
 
 export interface SettingsPatchResult {
@@ -31,7 +30,6 @@ export interface SettingsPatchResult {
   replaced: Record<string, unknown>;
 }
 
-export const DEFAULT_MODEL = "opencode-go/glm-5.3-flash";
 export const GLM_CONTEXT_WINDOW = 1_000_000;
 
 /**
@@ -54,7 +52,7 @@ export function buildSettingsPatch(existing: Record<string, any> | null | undefi
   const mergedCompaction = { ...(curCompaction ?? {}), ...wantCompaction };
   if (curCompaction === undefined || JSON.stringify(mergedCompaction) !== JSON.stringify({ ...wantCompaction, ...curCompaction })) {
     if (curCompaction !== undefined) replaced.compaction = curCompaction;
-    changes.push(`compaction → ${JSON.stringify(wantCompaction)} (auto-compact at ~${COMPACT_AT.toLocaleString()} tokens on the 1M window)`);
+    changes.push(`compaction → ${JSON.stringify(wantCompaction)} (auto-compact at ~${DEFAULT_COMPACT_AT_TOKENS.toLocaleString()} tokens on the 1M window)`);
   }
   patch.compaction = mergedCompaction;
 

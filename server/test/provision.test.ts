@@ -4,16 +4,15 @@ import assert from "node:assert/strict";
 import {
   reserveTokensFor,
   buildSettingsPatch,
-  COMPACT_AT,
-  DEFAULT_MODEL,
   GLM_CONTEXT_WINDOW,
 } from "../src/provision-core.ts";
+import { DEFAULT_COMPACT_AT_TOKENS, DEFAULT_MODEL } from "../src/product-defaults.ts";
 
 test("reserveTokensFor: 1M window compacts at ~400k", () => {
   assert.equal(reserveTokensFor(1_000_000), 600_000);
   // the trigger math: compact when tokens > window - reserve
   const reserve = reserveTokensFor(GLM_CONTEXT_WINDOW);
-  assert.ok(GLM_CONTEXT_WINDOW - reserve === COMPACT_AT);
+  assert.ok(GLM_CONTEXT_WINDOW - reserve === DEFAULT_COMPACT_AT_TOKENS);
 });
 
 test("reserveTokensFor: smaller windows clamp at 0 instead of compacting always", () => {

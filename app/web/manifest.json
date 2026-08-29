@@ -1,11 +1,11 @@
 {
-    "name": "remote_pi_app",
-    "short_name": "remote_pi_app",
+    "name": "PiNest",
+    "short_name": "PiNest",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
     "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "description": "Control pi coding agents remotely.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

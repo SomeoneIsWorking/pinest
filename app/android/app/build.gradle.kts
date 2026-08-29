@@ -1,14 +1,23 @@
 import java.util.Properties
 
-// Release signing comes from android/key.properties when it exists — CI writes
-// it from repo secrets (see .github/workflows/apk.yml). Without it the build
-// falls back to the debug key, which keeps `flutter run --release` working but
-// means CI-built APKs cannot install over each other.
+// Release signing comes from android/key.properties, which CI writes from
+// repository secrets (see .github/workflows/apk.yml). A release build without
+// that durable identity must fail instead of publishing a debug-signed APK.
 val keystorePropertiesFile = rootProject.file("key.properties")
 val keystoreProperties = Properties().apply {
     if (keystorePropertiesFile.exists()) keystorePropertiesFile.inputStream().use { load(it) }
 }
 val hasReleaseKeystore = keystorePropertiesFile.exists()
+val releaseBuildRequested = gradle.startParameter.taskNames.any {
+    it.contains("release", ignoreCase = true)
+}
+
+if (releaseBuildRequested && !hasReleaseKeystore) {
+    throw GradleException(
+        "Android release signing requires android/key.properties; " +
+            "configure the durable PiNest release keystore first.",
+    )
+}
 
 plugins {
     id("com.android.application")
@@ -53,7 +62,9 @@ android {
 
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName(if (hasReleaseKeystore) "release" else "debug")
+            if (hasReleaseKeystore) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 }
