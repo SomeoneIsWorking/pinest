@@ -523,7 +523,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     Padding(
                       padding: const EdgeInsets.only(bottom: 4),
                       child: Text(
-                        'Reconnecting… \${svc.outboxCount} message(s) will '
+                        'Reconnecting… ${svc.outboxCount} message(s) will '
                         'send automatically',
                         style: TextStyle(
                             fontSize: 11, color: Colors.orange.shade700),
