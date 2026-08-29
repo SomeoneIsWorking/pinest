@@ -18,6 +18,9 @@ class Session {
   final int createdAt;
   /// True for registry-only (not running) rows that can be resumed.
   final bool isResumable;
+  /// Messages submitted but not yet delivered into the session — the
+  /// server-authoritative queue. The client only renders it.
+  final List<String> pendingMessages;
 
   Session({
     required this.id,
@@ -35,6 +38,7 @@ class Session {
     this.isHost = false,
     required this.createdAt,
     this.isResumable = false,
+    this.pendingMessages = const [],
   });
 
   bool get isWorking => status == 'working';

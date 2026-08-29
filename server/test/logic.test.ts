@@ -156,3 +156,27 @@ test("listPaths: injected home via prefix uses ~", () => {
   assert.ok(out.length <= 3);
   assert.ok(out.every((p) => p.startsWith("/") && p.endsWith("/")), JSON.stringify(out));
 });
+
+// ── Server-authoritative pending queue ──
+import { pushPending, popPending } from "../src/logic.ts";
+
+test("pending queue: push appends, delivery pops the first occurrence", () => {
+  let q = pushPending(pushPending([], "a"), "b");
+  assert.deepEqual(q, ["a", "b"]);
+  q = popPending(q, "a");
+  assert.deepEqual(q, ["b"], "delivered text must leave the queue");
+});
+
+test("pending queue: duplicates allowed and popped one at a time", () => {
+  let q = pushPending(pushPending([], "same"), "same");
+  q = popPending(q, "same");
+  assert.deepEqual(q, ["same"], "one delivery must leave the duplicate queued");
+  q = popPending(q, "same");
+  assert.deepEqual(q, []);
+});
+
+test("pending queue: popping unknown text is a no-op, not a silent drop", () => {
+  const q = ["a"];
+  assert.deepEqual(popPending(q, "never-submitted"), ["a"]);
+  assert.deepEqual(popPending([], "x"), []);
+});

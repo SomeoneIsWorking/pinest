@@ -198,6 +198,12 @@ attachments (web paste bridge → `UserImage[]` → pi content array, I-015); an
 shows the executed command on bash tool cards (I-015). The extension's reload
 watcher skips the live reload while any watched source fails a syntax check,
 so mid-edit broken states no longer stop the host session (I-015).
+Mid-turn sending is race-safe: the extension serializes user-message
+submissions and waits for the run to actually start, fixing silent voiding of
+consecutive sends (I-016). The pending-message queue is server-authoritative
+(`pendingMessages` on the session snapshot); the web client renders it and
+keeps no queue state of its own (I-016).
+
 The web client deploys from the local system via `app/deploy.sh` after every
 update; the earlier GitHub Actions deploy path was removed by user decision
 (I-015).

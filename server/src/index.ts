@@ -18,6 +18,7 @@ import { randomUUID } from "node:crypto";
 import { hostname, homedir } from "node:os";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { UserImage } from "./protocol.ts";
+import { popPending, pushPending } from "./logic.ts";
 import { createFirebase } from "./auth.ts";
 import type { FirebaseAuth } from "./auth.ts";
 import { WSServer } from "./wsserver.ts";
@@ -75,6 +76,11 @@ let _watcher: ReloadWatcher | null = null; // ReloadWatcher
 // True between a run's first message_start and its agent_end. Used by the
 // submission queue to know a submission actually started a run.
 let _turnStarted = false;
+
+// Server-authoritative pending-message queue (text of messages submitted but
+// not yet delivered into the session). The app renders this instead of doing
+// its own bookkeeping — it must behave like the pi terminal's queue.
+let _pendingMessages: string[] = [];
 
 /** Serialized user-message submission queue.
  *
@@ -642,6 +648,8 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
       // Image-only messages need a text part that also appears in session
       // history (the client clears its "queued" badge by matching text).
       const text = cmd.text.trim().length === 0 ? "[image]" : cmd.text;
+      _pendingMessages = pushPending(_pendingMessages, text);
+      upsertSession(_sessionId, { pendingMessages: [..._pendingMessages] });
       _submitter?.submit(text, images, deliverAs);
       break;
     }
@@ -663,6 +671,9 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
       await (_pi as any)?.ctx?.compact?.() ?? (_pi as any)?.compact?.();
       break;
     case "session_new":
+      // A fresh session context makes any queued messages stale — drop them.
+      _pendingMessages = [];
+      upsertSession(_sessionId, { pendingMessages: [] });
       await (_pi as any)?.ctx?.newSession?.() ?? (_pi as any)?.newSession?.();
       break;
     case "list_models":
@@ -769,6 +780,19 @@ function embedImages(text: string): string {
   } catch { return text; }
 }
 
+/** Extract the text of a user message for pending-queue matching. */
+function extractUserText(m: any): string {
+  const c = m?.content;
+  if (typeof c === "string") return c;
+  if (Array.isArray(c)) {
+    return c
+      .filter((p: any) => p?.type === "text" && p.text)
+      .map((p: any) => p.text)
+      .join("\n");
+  }
+  return "";
+}
+
 // ── Bridge Pi events → WebSocket ────────────────────────────────────────────
 function bridge(pi: ExtensionAPI): void {
   _pi = pi;
@@ -782,6 +806,13 @@ function bridge(pi: ExtensionAPI): void {
   pi.on("message_start", (event: any) => {
     _turnStarted = true;
     if (event?.message?.role === "user") {
+      // A queued message just became part of the session — pop it from the
+      // pending queue (first matching occurrence, like pi's own accounting).
+      const delivered = extractUserText(event.message);
+      if (delivered && _pendingMessages.includes(delivered)) {
+        _pendingMessages = popPending(_pendingMessages, delivered);
+        upsertSession(_sessionId, { pendingMessages: [..._pendingMessages] });
+      }
       _streamingText = "";
       _status = "working";
       upsertSession(_sessionId, { streamingText: "", status: "working" });
