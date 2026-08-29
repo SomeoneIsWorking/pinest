@@ -1,4 +1,4 @@
-package com.pinest.remote_pi_app
+package com.barishamil.pinest
 
 import io.flutter.embedding.android.FlutterActivity
 

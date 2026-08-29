@@ -29,6 +29,19 @@ class LoginScreen extends StatelessWidget {
                 icon: const Icon(Icons.login),
                 label: const Text('Sign in with Google'),
               ),
+            // A failed sign-in must SAY so — the button silently doing nothing
+            // is what a web-only popup call looked like on Android.
+            if (auth.error != null) ...[
+              const SizedBox(height: 16),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 32),
+                child: Text(
+                  auth.error!,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              ),
+            ],
           ],
         ),
       ),
