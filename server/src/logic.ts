@@ -35,6 +35,23 @@ export function extractText(content: unknown): string {
   return "";
 }
 
+/**
+ * Server-side pending-message queue (the authority for the app's "queued"
+ * bubbles — the client is a dumb terminal). pushPending on submit;
+ * popPending when pi actually delivers the message (message_start).
+ * Duplicates are allowed, matching pi's own steering queue.
+ */
+export function pushPending(list: string[], text: string): string[] {
+  return [...list, text];
+}
+
+/** Remove the FIRST occurrence matching `text`; unknown text is a no-op. */
+export function popPending(list: string[], text: string): string[] {
+  const idx = list.indexOf(text);
+  if (idx === -1) return list;
+  return [...list.slice(0, idx), ...list.slice(idx + 1)];
+}
+
 /** Convert pi messages array → simple {role, text, tools} pairs for the app. */
 export function messagesToHistory(messages: unknown): HistoryItem[] {
   if (!Array.isArray(messages)) return [];

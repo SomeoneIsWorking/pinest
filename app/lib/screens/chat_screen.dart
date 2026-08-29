@@ -243,7 +243,7 @@ class _ChatScreenState extends State<ChatScreen> {
     return Column(
       children: [
         _toolbar(context, svc, s, working, models),
-        Expanded(child: _messageList(history, streaming, toolCalls, svc)),
+        Expanded(child: _messageList(history, streaming, toolCalls, svc, s)),
         if (history.isEmpty && streaming == null)
           const Padding(
             padding: EdgeInsets.all(16),
@@ -264,8 +264,10 @@ class _ChatScreenState extends State<ChatScreen> {
     String? streaming,
     List<Map<String, dynamic>> toolCalls,
     AgentService svc,
+    Session? s,
   ) {
-    final queued = svc.queuedMessagesFor(widget.sessionId);
+    // Server-authoritative queue — the client is a terminal, not the keeper.
+    final queued = s?.pendingMessages ?? const <String>[];
     final items = <Widget>[];
     for (final msg in history) {
       final role = msg['role'] as String? ?? '';
@@ -317,15 +319,15 @@ class _ChatScreenState extends State<ChatScreen> {
     if (streaming != null) {
       items.add(_StreamingBubble(text: streaming));
     }
-    // Queued messages at the very end (sent but not yet processed)
-    for (final p in queued) {
+    // Queued messages at the very end — reported by the server, not tracked
+    // locally. Image-only messages arrive as the server's '[image]' text.
+    for (final text in queued) {
       items.add(
         _bubble(
-          p.text,
+          text,
           Alignment.centerRight,
           Colors.orange.withAlpha(40),
           queued: true,
-          images: p.images,
         ),
       );
     }
@@ -351,8 +353,12 @@ class _ChatScreenState extends State<ChatScreen> {
       ).colorScheme.surfaceContainerHighest.withAlpha(80),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        child: Row(
-          children: [
+        // Horizontal scroll: the button row must never crop on narrow screens.
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          reverse: true,
+          child: Row(
+            children: [
             // Context window usage
             if (s?.contextPercent != null)
               Padding(
@@ -402,7 +408,8 @@ class _ChatScreenState extends State<ChatScreen> {
                       color: Colors.red,
                       onTap: () => _confirmRemove(context, svc, s),
                     ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -483,9 +490,33 @@ class _ChatScreenState extends State<ChatScreen> {
                             : 'Message… ($_sendShortcutLabel to send)',
                         border: const OutlineInputBorder(),
                         contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 12,
+                          horizontal: 8,
                           vertical: 10,
                         ),
+                        prefixIcon: IconButton(
+                          icon: const Icon(Icons.attach_file, size: 20),
+                          tooltip: 'Attach files (images, or text files inlined)',
+                          onPressed: _attachFiles,
+                        ),
+                        // Mid-turn delivery mode: bolt = steer (delivered
+                        // before the next LLM call), low-priority = follow-up
+                        // (after the turn). Irrelevant when idle.
+                        suffixIcon: working
+                            ? IconButton(
+                                icon: Icon(
+                                  _steer ? Icons.bolt : Icons.low_priority,
+                                  size: 20,
+                                  color: _steer
+                                      ? Colors.deepOrange
+                                      : Colors.grey,
+                                ),
+                                tooltip: _steer
+                                    ? 'Steering — tap to queue as follow-up'
+                                    : 'Queued follow-up — tap to steer mid-turn',
+                                onPressed: () =>
+                                    setState(() => _steer = !_steer),
+                              )
+                            : null,
                       ),
                       onSubmitted: (_) => _send(),
                     ),
@@ -493,55 +524,32 @@ class _ChatScreenState extends State<ChatScreen> {
                 ],
               ),
             ),
-            const SizedBox(width: 8),
-            IconButton(
-              icon: const Icon(Icons.attach_file),
-              tooltip: 'Attach files (images, or text files inlined)',
-              onPressed: _attachFiles,
+            const SizedBox(width: 6),
+            // Compact 40px buttons: on phone widths the old 48px set plus the
+            // attach/steer buttons overflowed the row.
+            SizedBox(
+              width: 40,
+              height: 40,
+              child: IconButton(
+                icon: const Icon(Icons.send, size: 20),
+                tooltip: 'Send ($_sendShortcutLabel)',
+                onPressed: _send,
+              ),
             ),
-            // Mid-turn delivery mode: bolt = steer (delivered before the next
-            // LLM call), low_priority = queue as follow-up (after the turn).
-            // Irrelevant when idle, so only shown while working.
             if (working)
-              IconButton(
-                icon: Icon(
-                  _steer ? Icons.bolt : Icons.low_priority,
-                  color: _steer ? Colors.deepOrange : Colors.grey,
-                ),
-                tooltip: _steer
-                    ? 'Steering — tap to queue as follow-up'
-                    : 'Queued follow-up — tap to steer mid-turn',
-                onPressed: () => setState(() => _steer = !_steer),
-              ),
-            IconButton.filled(icon: const Icon(Icons.send), onPressed: _send),
-            if (working) ...[
-              const SizedBox(width: 8),
-              GestureDetector(
-                onTap: s == null ? null : () => svc.cancel(s),
-                child: Container(
-                  width: 48,
-                  height: 48,
-                  decoration: BoxDecoration(
-                    color: Theme.of(context).colorScheme.primary,
-                    borderRadius: BorderRadius.circular(24),
-                  ),
-                  child: Stack(
-                    alignment: Alignment.center,
-                    children: [
-                      SizedBox(
-                        width: 48,
-                        height: 48,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 3,
-                          color: Colors.white.withAlpha(180),
-                        ),
-                      ),
-                      Container(width: 16, height: 16, color: Colors.white),
-                    ],
+              SizedBox(
+                width: 40,
+                height: 40,
+                child: IconButton(
+                  icon: const Icon(Icons.stop, size: 20),
+                  tooltip: 'Stop the agent',
+                  onPressed: s == null ? null : () => svc.cancel(s),
+                  style: IconButton.styleFrom(
+                    backgroundColor: Theme.of(context).colorScheme.primary,
+                    foregroundColor: Colors.white,
                   ),
                 ),
               ),
-            ],
           ],
         ),
       ),
