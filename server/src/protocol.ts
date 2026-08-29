@@ -31,7 +31,7 @@ export interface ToolEvent {
 export interface HistoryItem {
   role: "user" | "assistant";
   text: string;
-  tools: Array<{ name: string; args?: unknown; id?: string }>;
+  tools: Array<{ name: string; args?: unknown; id?: string; result?: string; isError?: boolean }>;
 }
 
 /** Registry row (durable, on disk). */
