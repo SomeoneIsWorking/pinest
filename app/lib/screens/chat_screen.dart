@@ -8,7 +8,7 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import '../services/agent_service.dart';
 import '../services/paste_bridge.dart';
 import '../services/picked_file.dart';
-import '../services/file_pick_bridge.dart' show pickUserFiles;
+import '../services/file_pick_bridge.dart' show pickUserFiles, readClipboardImages;
 import '../services/user_preferences.dart';
 import '../models/session.dart';
 import '../models/chat_item.dart';
@@ -118,20 +118,38 @@ class _ChatScreenState extends State<ChatScreen> {
   /// text files are inlined into the message as fenced blocks; anything else
   /// is refused BY NAME (no silent drops).
   Future<void> _attachFiles() async {
-    final List<PickedFile> files;
-    if (kIsWeb) {
-      files = await pickUserFiles();
-    } else {
-      const images = XTypeGroup(label: 'Images', mimeTypes: [
-        'image/png', 'image/jpeg', 'image/gif', 'image/webp',
-      ]);
-      const texts = XTypeGroup(label: 'Text', mimeTypes: ['text/*']);
-      final xfiles = await openFiles(acceptedTypeGroups: [images, texts]);
-      files = [
-        for (final f in xfiles)
-          PickedFile(name: f.name, bytes: await f.readAsBytes()),
-      ];
+    final files = kIsWeb ? await pickUserFiles() : await _browseNativeFiles();
+    await _handlePicked(files);
+  }
+
+  /// Explicit clipboard read (web): works even when paste events are
+  /// swallowed by the framework, because a button tap is a user gesture.
+  Future<void> _pasteClipboardImage() async {
+    final files = await readClipboardImages();
+    if (files.isEmpty && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('No image on the clipboard (or permission denied)'),
+      ));
+      return;
     }
+    await _handlePicked(files);
+  }
+
+  Future<List<PickedFile>> _browseNativeFiles() async {
+    const images = XTypeGroup(label: 'Images', mimeTypes: [
+      'image/png', 'image/jpeg', 'image/gif', 'image/webp',
+    ]);
+    const texts = XTypeGroup(label: 'Text', mimeTypes: ['text/*']);
+    final xfiles = await openFiles(acceptedTypeGroups: [images, texts]);
+    return [
+      for (final f in xfiles)
+        PickedFile(name: f.name, bytes: await f.readAsBytes()),
+    ];
+  }
+
+  /// Route picked files: images to the attachment strip, small text files
+  /// into the message body, everything else refused with a named snackbar.
+  Future<void> _handlePicked(List<PickedFile> files) async {
     if (files.isEmpty || !mounted) return;
     const textExt = {
       'txt', 'md', 'markdown', 'json', 'yaml', 'yml', 'toml', 'csv', 'log',
@@ -493,10 +511,24 @@ class _ChatScreenState extends State<ChatScreen> {
                           horizontal: 8,
                           vertical: 10,
                         ),
-                        prefixIcon: IconButton(
+                        prefixIcon: PopupMenuButton<String>(
                           icon: const Icon(Icons.attach_file, size: 20),
-                          tooltip: 'Attach files (images, or text files inlined)',
-                          onPressed: _attachFiles,
+                          tooltip: 'Attach files or paste an image',
+                          onSelected: (v) {
+                            if (v == 'browse') _attachFiles();
+                            if (v == 'paste') _pasteClipboardImage();
+                          },
+                          itemBuilder: (_) => [
+                            const PopupMenuItem(
+                              value: 'browse',
+                              child: Text('Browse files…'),
+                            ),
+                            if (kIsWeb)
+                              const PopupMenuItem(
+                                value: 'paste',
+                                child: Text('Paste image from clipboard'),
+                              ),
+                          ],
                         ),
                         // Mid-turn delivery mode: bolt = steer (delivered
                         // before the next LLM call), low-priority = follow-up
