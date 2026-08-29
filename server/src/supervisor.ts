@@ -12,10 +12,11 @@ import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
-import { mapModel, deriveSessionName, messagesToHistory } from "./logic.ts";
+import { mapModel, deriveSessionName, messagesToHistory, pushPending, popPending, extractUserText } from "./logic.ts";
+import { createMessageSubmitter, type MessageSubmitter } from "./submit.ts";
 import { resolveThinkingLevel, reportThinkingLevel } from "./thinking.ts";
 import type { SessionRegistry } from "./registry.ts";
-import type { SessionSnapshot, SessionRow } from "./protocol.ts";
+import type { SessionSnapshot, SessionRow, UserImage } from "./protocol.ts";
 
 export interface SpawnCommand {
   sessionId?: string;
@@ -52,6 +53,11 @@ interface LiveSession {
   modelName: string | null;
   _streamingText: string | null;
   _compacting: boolean;
+  /** Server-authoritative queue: submitted, not yet delivered (see logic.ts). */
+  pending: string[];
+  /** True between a run's message_start and agent_end (submission gate). */
+  turnStarted: boolean;
+  submitter: MessageSubmitter | null;
 }
 
 export interface SupervisorOptions {
@@ -139,6 +145,7 @@ export class Supervisor {
     const s: LiveSession = {
       session, currentTurnId: null, unsub: null, cwd, status: "idle", name,
       model: null, modelName: null, _streamingText: null, _compacting: false,
+      pending: [], turnStarted: false, submitter: null,
     };
     this.sessions.set(id, s);
 
@@ -174,6 +181,7 @@ export class Supervisor {
     const s: LiveSession = {
       session, currentTurnId: null, unsub: null, cwd, status: "idle", name,
       model: null, modelName: null, _streamingText: null, _compacting: false,
+      pending: [], turnStarted: false, submitter: null,
     };
     this.sessions.set(id, s);
 
@@ -218,9 +226,18 @@ export class Supervisor {
         case "user_message": {
           s.currentTurnId = cmd.id || randomUUID();
           s.status = "working";
-          this.callbacks.upsertSession(cmd.sessionId, { status: "working" });
+          const images = (cmd.images ?? []) as UserImage[];
+          const text = cmd.text.trim().length === 0 ? "[image]" : cmd.text;
+          s.pending = pushPending(s.pending, text);
+          this.callbacks.upsertSession(cmd.sessionId, {
+            status: "working", pendingMessages: [...s.pending],
+          });
           this.callbacks.broadcast({ type: "stream", sessionId: cmd.sessionId, text: "", status: "working" });
-          await s.session.prompt(cmd.text);
+          // prompt(streamingBehavior) covers BOTH cases: idle → new turn,
+          // streaming → queued as steer/followUp. The bare prompt() this used
+          // to call THREW "Agent is already processing" whenever the session
+          // was working — steers never reached the model at all.
+          s.submitter?.submit(text, images, cmd.deliverAs === "followUp" ? "followUp" : "steer");
           break;
         }
         case "cancel":
@@ -268,8 +285,42 @@ export class Supervisor {
   }
 
   private wire(id: string, s: LiveSession): void {
+    s.turnStarted = false;
+    s.submitter = createMessageSubmitter({
+      send: (text, images, deliverAs) => {
+        void s.session
+          .prompt(text, {
+            streamingBehavior: deliverAs,
+            images: images?.length
+              ? images.map((i) => ({ type: "image" as const, mimeType: i.mimeType, data: i.data }))
+              : undefined,
+          })
+          .catch((e: unknown) => {
+            this.callbacks.broadcast({
+              type: "error", sessionId: id, message: (e as Error).message,
+            });
+          });
+      },
+      isTurnStarted: () => s.turnStarted,
+    });
     s.unsub = s.session.subscribe((event: any) => {
-      if (event.type === "message_update") {
+      if (event.type === "message_start") {
+        s.turnStarted = true;
+      } else if (event.type === "message_end" && event.message?.role === "user") {
+        // message_end is when pi persists the message — pop pending + push
+        // history together so the delivered message never goes invisible
+        // (see logic.ts note). Small delay lets persistence settle.
+        const delivered = extractUserText(event.message);
+        setTimeout(() => {
+          if (s.pending.includes(delivered)) {
+            s.pending = popPending(s.pending, delivered);
+            this.callbacks.upsertSession(id, { pendingMessages: [...s.pending] });
+          }
+          this.getHistory(s).then((h) =>
+            this.callbacks.broadcast({ type: "history", sessionId: id, history: h }),
+          );
+        }, 100);
+      } else if (event.type === "message_update") {
         const ae = event.assistantMessageEvent;
         if (ae?.type === "text_delta" && s.currentTurnId) {
           s._streamingText = (s._streamingText || "") + ae.delta;
@@ -293,6 +344,7 @@ export class Supervisor {
           isError: event.isError, running: false,
         }});
       } else if (event.type === "agent_end") {
+        s.turnStarted = false;
         s.status = "idle";
         s._streamingText = null;
         if (s.currentTurnId) s.currentTurnId = null;
@@ -393,6 +445,11 @@ export class Supervisor {
       debug("[remote-code] getHistory failed:", (e as Error).message);
       return [];
     }
+  }
+
+  /** Undelivered pending messages for a session (reload persistence). */
+  pendingFor(id: string): string[] {
+    return [...(this.sessions.get(id)?.pending ?? [])];
   }
 
   shutdownAll(): void {

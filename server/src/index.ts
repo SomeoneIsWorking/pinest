@@ -11,14 +11,15 @@ import debug from "./log.ts";
  * is real-time WebSocket messages.
  */
 
-import { existsSync, statSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, statSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { resolve as resolvePath, isAbsolute, join, dirname as dirnamePath, basename } from "node:path";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { hostname, homedir } from "node:os";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { UserImage } from "./protocol.ts";
-import { popPending, pushPending } from "./logic.ts";
+import { popPending, pushPending, extractUserText } from "./logic.ts";
+import { createMessageSubmitter, type MessageSubmitter } from "./submit.ts";
 import { createFirebase } from "./auth.ts";
 import type { FirebaseAuth } from "./auth.ts";
 import { WSServer } from "./wsserver.ts";
@@ -94,45 +95,6 @@ let _pendingMessages: string[] = [];
  * actually started (message_start observed) makes later submissions reliably
  * take the steer path.
  */
-export interface MessageSubmitter {
-  submit(text: string, images: UserImage[] | undefined, deliverAs: "steer" | "followUp"): void;
-}
-
-export function createMessageSubmitter(deps: {
-  send: (
-    content: string | Array<{ type: "text"; text: string } | { type: "image"; mimeType: string; data: string }>,
-    deliverAs: "steer" | "followUp",
-  ) => void;
-  isTurnStarted: () => boolean;
-  tickMs?: number;
-  maxWaitTicks?: number;
-}): MessageSubmitter {
-  let chain: Promise<void> = Promise.resolve();
-  const tickMs = deps.tickMs ?? 100;
-  const maxWaitTicks = deps.maxWaitTicks ?? 50; // 5s cap: a failed start must not wedge the queue
-  return {
-    submit(text, images, deliverAs) {
-      chain = chain
-        .then(async () => {
-          const content = images?.length
-            ? [
-                { type: "text" as const, text },
-                ...images.map((img) => ({ type: "image" as const, mimeType: img.mimeType, data: img.data })),
-              ]
-            : text;
-          deps.send(content, deliverAs);
-          // If the session looked idle when this submitted, wait until the run
-          // actually starts (or the cap expires) before allowing the next
-          // submission through.
-          for (let i = 0; i < maxWaitTicks && !deps.isTurnStarted(); i++) {
-            await new Promise((r) => setTimeout(r, tickMs));
-          }
-        })
-        .catch((e) => debug("[remote-code] user_message submission failed:", (e as Error).message));
-    },
-  };
-}
-
 let _submitter: MessageSubmitter | null = null;
 
 // In-memory session snapshots (the live view; registry is the durable view)
@@ -338,9 +300,57 @@ function queueReload(): void {
   }
 }
 
+const RELOAD_RESUME_PATH = join(dirnamePath(REGISTRY_PATH), "reload-resume.json");
+
+/** Persist live spawned sessions (+ their undelivered pending messages) so
+ * the freshly-imported instance can resume them after a hot reload. */
+function persistReloadResume(): void {
+  const supervisor = _supervisor;
+  const registry = _registry;
+  if (!supervisor || !registry) return;
+  const live = [...supervisor.sessions.keys()]
+    .map((id) => ({ id, row: registry.get(id) }))
+    .filter((e) => e.row?.piSessionPath)
+    .map((e) => ({
+      id: e.id,
+      piSessionPath: e.row!.piSessionPath!,
+      cwd: e.row!.cwd,
+      name: e.row!.name,
+      pending: supervisor.pendingFor(e.id),
+    }));
+  writeFileSyncSafe(RELOAD_RESUME_PATH, JSON.stringify(live));
+}
+
+function writeFileSyncSafe(path: string, data: string): void {
+  try { mkdirSync(dirnamePath(path), { recursive: true }); writeFileSync(path, data); } catch { /* best effort */ }
+}
+
+/** Resume sessions parked by the previous instance during a hot reload, and
+ * re-deliver their undelivered messages. The marker file only exists when the
+ * previous instance tore down BECAUSE of a reload — a host restart keeps the
+ * manual-resume contract. */
+async function resumeAfterReload(): Promise<void> {
+  if (!existsSync(RELOAD_RESUME_PATH)) return;
+  let entries: Array<{ id: string; piSessionPath: string; cwd?: string; name?: string; pending?: string[] }> = [];
+  try { entries = JSON.parse(readFileSync(RELOAD_RESUME_PATH, "utf8")); } catch { /* corrupt → ignore */ }
+  try { unlinkSync(RELOAD_RESUME_PATH); } catch { /* */ }
+  for (const e of entries) {
+    try {
+      await _supervisor!.resume({ sessionId: e.id, piSessionPath: e.piSessionPath, cwd: e.cwd, name: e.name });
+      debug(`[remote-code] reload: resumed session ${e.id}`);
+      for (const text of e.pending ?? []) {
+        await _supervisor!.handleSessionCommand({ type: "user_message", sessionId: e.id, text, deliverAs: "steer" });
+      }
+    } catch (err) {
+      debug(`[remote-code] reload: resume ${e.id} failed:`, (err as Error).message);
+    }
+  }
+}
+
 /** Stop everything this instance owns. Used on host shutdown AND on reload
  * (the re-imported instance bootstraps fresh; sessions become resumable). */
-function teardownRemote(): void {
+function teardownRemote(reason: "reload" | "shutdown" = "shutdown"): void {
+  if (reason === "reload") persistReloadResume();
   stopWatcher();
   if (_heartbeat) { clearInterval(_heartbeat); _heartbeat = null; }
   try { _supervisor?.shutdownAll(); } catch { /* */ }
@@ -396,6 +406,7 @@ async function bootstrap(): Promise<void> {
   });
   _ws.on("command", (cmd) => { void handleCommand(cmd); });
   _ws.setStateProvider(stateMessage);
+  void resumeAfterReload();
   _ws.tunnelOnDead = () => {
     debug("[remote-code] tunnel died — restarting");
     void _ws?.restartTunnel(loadConfig().tunnelProvider).then(() => publishPresence(true));
@@ -780,24 +791,17 @@ function embedImages(text: string): string {
   } catch { return text; }
 }
 
-/** Extract the text of a user message for pending-queue matching. */
-function extractUserText(m: any): string {
-  const c = m?.content;
-  if (typeof c === "string") return c;
-  if (Array.isArray(c)) {
-    return c
-      .filter((p: any) => p?.type === "text" && p.text)
-      .map((p: any) => p.text)
-      .join("\n");
-  }
-  return "";
-}
-
 // ── Bridge Pi events → WebSocket ────────────────────────────────────────────
 function bridge(pi: ExtensionAPI): void {
   _pi = pi;
   _submitter = createMessageSubmitter({
-    send: (content, deliverAs) => {
+    send: (text, images, deliverAs) => {
+      const content = images?.length
+        ? [
+            { type: "text", text },
+            ...images.map((img) => ({ type: "image" as const, mimeType: img.mimeType, data: img.data })),
+          ]
+        : text;
       _pi?.sendUserMessage?.(content as never, { deliverAs });
     },
     isTurnStarted: () => _turnStarted,
@@ -937,7 +941,7 @@ function bridge(pi: ExtensionAPI): void {
   // fresh (ws server, tunnel, registry reload). Spawned sessions were parked
   // idle in the registry by teardownRemote → resumable from the app.
   pi.on("session_shutdown", (event: any) => {
-    if (event?.reason === "reload") teardownRemote();
+    if (event?.reason === "reload") teardownRemote("reload");
   });
 }
 
