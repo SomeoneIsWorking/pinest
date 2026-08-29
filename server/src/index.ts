@@ -1021,7 +1021,7 @@ function bridge(pi: ExtensionAPI): void {
         const reason = (e as Error)?.message?.split("\n")[0] ?? String(e);
         debug("[pinest] bootstrap failed:", reason);
         const hint = /serviceAccountKey/i.test(reason)
-          ? "run ./run.sh install && place the Firebase serviceAccountKey (or /pinest-auth once configured)"
+          ? "run /pinest-auth to sign in, or configure the Firebase service account"
           : "run /pinest-auth to sign in";
         notify(`[pinest] OFFLINE: ${reason} — ${hint}`, "warning");
         try { _ui?.setStatus?.("pinest:url", `offline — ${reason}`); } catch { /* */ }

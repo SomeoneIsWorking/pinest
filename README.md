@@ -33,22 +33,25 @@ planned; the package name will remain `com.barishamil.pinest`.
 
 ![PiNest session view](docs/screenshots/session.png)
 
-## Run the host
+## Install the pi extension
 
-Requirements are Node.js 22 or newer and pi. If pi is not already on `PATH`,
-the repository's server dependency provides it after installation.
+Requirements are Node.js 22 or newer and
+[pi](https://github.com/earendil-works/pi). Install PiNest through pi's package
+manager:
 
 ```sh
-git clone https://github.com/SomeoneIsWorking/pinest.git
-cd pinest
-./run.sh
+pi install git:github.com/SomeoneIsWorking/pinest
+pi
 ```
 
-`run.sh` installs the server packages when needed and starts pi with the PiNest
-extension. The default hosted authentication flow requires no Firebase project
-or service-account setup; an interactive host opens Google sign-in when it
-needs an owner identity. To make the extension available to every normal pi
-launch, run `./run.sh install` once.
+The install command clones the extension, installs its runtime dependencies,
+and adds it to pi's normal extension settings. Every subsequent `pi` launch
+loads PiNest. Use `pi update git:github.com/SomeoneIsWorking/pinest` to update
+it or `pi remove git:github.com/SomeoneIsWorking/pinest` to uninstall it.
+
+The default hosted authentication flow requires no Firebase project or
+service-account setup; an interactive host opens Google sign-in when it needs
+an owner identity.
 
 ## Security model
 
@@ -64,7 +67,6 @@ available for self-hosting.
 Server changes must pass:
 
 ```sh
-cd server
 npm install
 npm test
 npm run typecheck
