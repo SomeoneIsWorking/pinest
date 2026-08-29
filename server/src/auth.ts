@@ -27,11 +27,12 @@ const AGENT_DIR = join(homedir(), ".pi", "agent");
 const RC_DIR = join(AGENT_DIR, "remote-code");
 const AUTH_PATH = process.env.RC_AUTH_PATH
   || join(RC_DIR, "auth.json");
-// Explicit service-account override, then the project-local default.
-const SERVICE_ACCOUNT_PATHS = [
-  process.env.RC_SERVICE_ACCOUNT_PATH,
-  join(RC_DIR, "serviceAccountKey.json"),
-].filter((p): p is string => !!p);
+// An explicit path is authoritative, including when it is deliberately absent
+// to select hosted auth. Falling through to a machine-local default would make
+// tests and headless callers depend on unrelated host state.
+const SERVICE_ACCOUNT_PATHS = process.env.RC_SERVICE_ACCOUNT_PATH
+  ? [process.env.RC_SERVICE_ACCOUNT_PATH]
+  : [join(RC_DIR, "serviceAccountKey.json")];
 
 const LOGIN_HTML = readFileSync(join(import.meta.dirname, "login.html"), "utf-8");
 
@@ -426,12 +427,18 @@ class AdminFirebase implements FirebaseAuth {
   }
 
   static async create(): Promise<AdminFirebase> {
-    const admin = await import("firebase-admin");
+    const [{ cert, getApps, initializeApp }, { getAuth }, { getFirestore }] = await Promise.all([
+      import("firebase-admin/app"),
+      import("firebase-admin/auth"),
+      import("firebase-admin/firestore"),
+    ]);
     const sa = readServiceAccount() as any;
-    const app = admin.apps.length ? admin.apps[0]! : admin.initializeApp({ credential: admin.credential.cert(sa) });
-    const db = app.firestore();
-    try { db.settings({ ignoreUndefinedProperties: true }); } catch { /* set once */ }
-    return new AdminFirebase(app.auth() as unknown as AdminAuth, db, sa.project_id as string);
+    const existingApp = getApps().find((candidate) => candidate.name === "pinest-admin");
+    const app = existingApp
+      ?? initializeApp({ credential: cert(sa) }, "pinest-admin");
+    const db = getFirestore(app);
+    if (!existingApp) db.settings({ ignoreUndefinedProperties: true });
+    return new AdminFirebase(getAuth(app) as unknown as AdminAuth, db, sa.project_id as string);
   }
 
   private async resolveCached(): Promise<Identity | null> {
@@ -512,11 +519,7 @@ class AdminFirebase implements FirebaseAuth {
 /** Choose the backend: service account → admin; otherwise hosted (zero-config). */
 export async function createFirebase(deps: RestDeps = {}): Promise<FirebaseAuth> {
   if (hasServiceAccount()) {
-    try {
-      return await AdminFirebase.create();
-    } catch (e) {
-      debug("[pinest] admin init failed, falling back to hosted auth:", (e as Error).message);
-    }
+    return AdminFirebase.create();
   }
   return new RestFirebase(deps);
 }

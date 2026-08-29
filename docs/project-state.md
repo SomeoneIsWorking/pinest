@@ -10,14 +10,18 @@ Status: `verified`
 
 Ported to `server/` in erasable TypeScript; loads and routes against a
 stubbed pi API (`npm test`, extension-load + manifest suites). Fixed during
-the port: start-script path, missing `listPaths` implementation, package.json
-bin/build, WS auth double-`.uid` bug, nonexistent `_broadcastState` on client
-connect (now `setStateProvider`), host `cancel` silent no-op (abort lives on
+the port: missing `listPaths` implementation, package manifest/bin/build, WS
+auth double-`.uid` bug, nonexistent `_broadcastState` on client connect (now
+`setStateProvider`), host `cancel` silent no-op (abort lives on
 `ExtensionContext`), Firebase init moved off the import path (missing service
-account no longer crashes the pi host).
+account no longer crashes the pi host). The obsolete project launcher is gone:
+one root package manifest/lock owns extension discovery, runtime dependencies,
+tests and `pi install git:github.com/SomeoneIsWorking/pinest` installation.
 
-Evidence: `cd server && npm test` — 153 tests, 0 fail; `npm run typecheck`
-clean. Real-host smoke (pi 0.84.3): `pi -e server/src/index.ts` loads the
+Evidence: root `npm test` — 160 pass, 4 intentional skips, 0 fail;
+`npm run typecheck` and runtime `npm audit` clean. An isolated pi agent dir
+accepts the root as an installed package and the manifest suite loads its real
+entry point. Real-host smoke (pi 0.84.3): `pi -e server/src/index.ts` loads the
 extension via jiti; `/rc-sessions` executes and answers the extension-UI
 select dialog (exit-0 vs exit-1 discriminator against a bogus command and
 the old /pinest-* names).
