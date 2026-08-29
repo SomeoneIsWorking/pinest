@@ -107,3 +107,13 @@ Listener now window-capture, once-per-page with fanout to all screens; paste
 shows an "Image attached" snackbar so a no-fire is observable; read() failure
 message points Firefox users to Cmd+V. Deployed; awaiting user confirmation
 (after hard refresh to bust any stale service worker).
+
+## Follow-up 6: sent messages invisible until refresh (this commit)
+
+History was broadcast at message_start, but pi persists the user message at
+message_end — the broadcast raced persistence and shipped history without the
+message, while the pending-pop removed the queued bubble. Net: delivered
+messages vanished from the UI until turn end or refresh (and steered messages
+for the whole turn). History broadcast + pending-pop moved to message_end
+(+100ms settle). This also retroactively explains the "consecutive steers
+voided" report.
