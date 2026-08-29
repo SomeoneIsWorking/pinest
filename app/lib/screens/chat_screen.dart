@@ -42,6 +42,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (kIsWeb) {
       registerImagePasteListener(_onPastedImage);
     }
+    _steer = context.read<UserPreferences>().steerByDefault;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _jumpToBottom(); // load scrolled to bottom
       _requestModels();

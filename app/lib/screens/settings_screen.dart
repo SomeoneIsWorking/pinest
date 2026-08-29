@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../services/auth_service.dart';
 import '../services/agent_service.dart';
+import '../services/user_preferences.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -13,6 +14,13 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   final _threshold = TextEditingController();
+  bool _steerByDefault = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _steerByDefault = context.read<UserPreferences>().steerByDefault;
+  }
 
   @override
   void dispose() {
@@ -137,6 +145,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 ],
               ),
+            ),
+          ),
+          const SizedBox(height: 24),
+
+          // ── Messages: default mid-turn delivery ─────────────────────────
+          const Text('Messages',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 8),
+          Card(
+            child: SwitchListTile(
+              secondary: Icon(
+                _steerByDefault ? Icons.bolt : Icons.low_priority,
+                color: _steerByDefault ? Colors.deepOrange : Colors.grey,
+              ),
+              title: const Text('Steer by default'),
+              subtitle: Text(
+                _steerByDefault
+                    ? 'Messages sent while the agent works are delivered '
+                        'before its next step. The ⚡ icon in the chat '
+                        'overrides per message.'
+                    : 'Messages sent while the agent works queue as '
+                        'follow-ups. The ⚡ icon in the chat overrides '
+                        'per message.',
+                style: const TextStyle(fontSize: 12),
+              ),
+              value: _steerByDefault,
+              onChanged: (v) {
+                setState(() => _steerByDefault = v);
+                context.read<UserPreferences>().saveSteerByDefault(v);
+              },
             ),
           ),
           const SizedBox(height: 24),
