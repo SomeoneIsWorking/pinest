@@ -63,16 +63,23 @@ def apk_package(apk: Path) -> str:
     return match.group(1)
 
 
+def extract_signer_fingerprint(certificates: str) -> str:
+    for line in certificates.splitlines():
+        match = re.search(r"certificate SHA-256 digest:\s*(.+)", line, re.IGNORECASE)
+        if not match:
+            continue
+        fingerprint = normalize_fingerprint(match.group(1))
+        if len(fingerprint) == 64:
+            return fingerprint
+    raise VerificationError(
+        "apksigner did not report a recognizable signer SHA-256 fingerprint; "
+        f"output was {certificates!r}",
+    )
+
+
 def signer_fingerprint(apk: Path) -> str:
     certificates = run_tool(sdk_tool("apksigner"), "verify", "--print-certs", apk)
-    match = re.search(
-        r"^Signer #1 certificate SHA-256 digest: ([0-9a-f:]+)$",
-        certificates,
-        re.IGNORECASE | re.MULTILINE,
-    )
-    if not match:
-        raise VerificationError("apksigner did not report a signer SHA-256 fingerprint")
-    return match.group(1)
+    return extract_signer_fingerprint(certificates)
 
 
 def parse_args() -> argparse.Namespace:
