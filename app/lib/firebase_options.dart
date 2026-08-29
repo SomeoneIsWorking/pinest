@@ -41,12 +41,16 @@ class DefaultFirebaseOptions {
     storageBucket: 'pinest-app.appspot.com',
   );
 
+  // The real ANDROID app in pinest-app (package com.barishamil.pinest) — these
+  // used to be the WEB app's key and appId, which is not a valid Android
+  // client. Kept in sync with android/app/google-services.json.
   static const FirebaseOptions android = FirebaseOptions(
-    apiKey: 'FIREBASE_WEB_API_KEY_REMOVED_FROM_HISTORY',
-    appId: '1:271491621267:web:3822b177db9e36a57b8866',
+    apiKey: 'FIREBASE_ANDROID_API_KEY_REMOVED_FROM_HISTORY',
+    appId: '1:271491621267:android:e30a5fa653b8872b7b8866',
     messagingSenderId: '271491621267',
     projectId: 'pinest-app',
-    storageBucket: 'pinest-app.appspot.com',
+    authDomain: 'pinest-app.firebaseapp.com',
+    storageBucket: 'pinest-app.firebasestorage.app',
   );
 
   static const FirebaseOptions ios = FirebaseOptions(

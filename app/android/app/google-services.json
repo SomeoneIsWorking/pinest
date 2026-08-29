@@ -1,0 +1,82 @@
+{
+  "project_info": {
+    "project_number": "271491621267",
+    "project_id": "pinest-app",
+    "storage_bucket": "pinest-app.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:271491621267:android:e30a5fa653b8872b7b8866",
+        "android_client_info": {
+          "package_name": "com.barishamil.pinest"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "271491621267-5c8ir6v911unqa5tf80fme671q9jh4ru.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "FIREBASE_ANDROID_API_KEY_REMOVED_FROM_HISTORY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "271491621267-5c8ir6v911unqa5tf80fme671q9jh4ru.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "271491621267-elh8d3rastcf18d3sknl118e9pnmcg1d.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.bhamil.remotePiApp"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:271491621267:android:705281b5347e5b967b8866",
+        "android_client_info": {
+          "package_name": "com.bhamil.remote_pi_app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "271491621267-5c8ir6v911unqa5tf80fme671q9jh4ru.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "FIREBASE_ANDROID_API_KEY_REMOVED_FROM_HISTORY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "271491621267-5c8ir6v911unqa5tf80fme671q9jh4ru.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "271491621267-elh8d3rastcf18d3sknl118e9pnmcg1d.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.bhamil.remotePiApp"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

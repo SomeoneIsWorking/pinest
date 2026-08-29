@@ -28,6 +28,34 @@ as `/pinest.apk`. Consequences:
 Only the APK ships from CI. The web client is still deployed locally
 (AGENTS.md, I-015) — nothing here changes that.
 
+## Android app identity (found while making CI green)
+
+The Android target had never been built from a clean checkout: the Google
+Services gradle plugin needs `google-services.json`, which was in no clone at
+all, and the Firebase project's registered Android app was package
+`com.bhamil.remote_pi_app` while the app builds as a different id. Fixed by
+settling on **`com.barishamil.pinest`** (user's call):
+
+- `applicationId`/`namespace` + `MainActivity` package renamed; the stale
+  `com/pinest/…` and `com/bhamil/…` source dirs are gone; the launcher label
+  is now `PiNest`.
+- A matching Android app registered in the `pinest-app` Firebase project
+  (`1:271491621267:android:e30a5fa653b8872b7b8866`) and its
+  `app/android/app/google-services.json` committed — public client config, the
+  same class of value as the already-committed `firebase_options.dart`.
+- `DefaultFirebaseOptions.android` used the WEB app's `apiKey`/`appId`; it now
+  carries the real Android ones.
+
+## Android sign-in
+
+`AuthService.signIn()` called `signInWithPopup`, which is web-only: on the APK
+it threw `UnimplementedError` and the button did nothing. Non-web now uses
+`signInWithProvider(GoogleAuthProvider())` (browser-tab OAuth handshake, no
+`google_sign_in` dependency and no per-keystore SHA-1 registration), and a
+failed sign-in prints its reason on the login screen instead of only reaching
+`debugPrint`. NOT yet exercised on a real device — no Android device is
+attached to this machine.
+
 ## Signing (open item)
 
 Without keystore secrets the release APK is signed with the Flutter template's
