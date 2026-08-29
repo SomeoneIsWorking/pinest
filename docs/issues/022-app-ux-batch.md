@@ -101,3 +101,25 @@ view on tap.
 **Evidence:** `logic.test.ts` — an image result reaches the app; a text-only
 result stays imageless; over budget, carried + omitted equals the total and the
 NEWEST image is the one kept.
+
+## 022f — Status bar froze at "ngrok: (starting…)" while the tunnel was up (fixed)
+
+**Symptom:** after a reload the pi status bar showed `ngrok: (starting…)`
+indefinitely, while the tunnel was actually serving (`426 Upgrade Required` on
+the public URL, ngrok's local API reporting the forward to the live WS port).
+
+**Cause (evidence, not inference):** the TUI printed
+`[pinest] online as … — local-only`. Bootstrap completes while the tunnel is
+still starting — it is deliberately backgrounded so a slow network cannot block
+startup — and the footer is rendered once, at that moment, with
+`tunnelUrl == null`. When the tunnel later resolved, presence was republished
+but NOTHING re-rendered the footer, so the status bar kept reporting a state
+that had ended minutes earlier.
+
+**Fix:** `renderFooter()` (plus a TUI notice naming the URL) when the tunnel
+resolves or fails. The startup line no longer says "local-only" while the
+tunnel is still coming up — it says "tunnel still starting…", because
+"local-only" was a claim, not an observation.
+
+**Why it matters beyond cosmetics:** a stale status bar is what made the I-021
+outage look like a hang instead of a dead extension.
