@@ -118,3 +118,48 @@ test("firstSyntaxError: returns the broken file, null when all parse", () => {
 test("firstSyntaxError: empty dirs and no checkable files → null", () => {
   assert.equal(firstSyntaxError([], [join(DIR, "notes.md")]), null);
 });
+
+// ── createMessageSubmitter: consecutive submissions must not void ────────────
+import { createMessageSubmitter } from "../src/index.ts";
+
+test("submitter: rapid consecutive submits serialize; the second waits for the run to start", async () => {
+  const calls: Array<{ text: string; deliverAs: string }> = [];
+  let turnStarted = false;
+  const submitter = createMessageSubmitter({
+    send: (content, deliverAs) => {
+      calls.push({ text: typeof content === "string" ? content : "IMAGE", deliverAs });
+      // Simulate session.prompt()'s async init: the run only becomes visible
+      // (message_start observed) 30ms AFTER the first send.
+      if (!turnStarted) setTimeout(() => { turnStarted = true; }, 30);
+    },
+    isTurnStarted: () => turnStarted,
+    tickMs: 2,
+    maxWaitTicks: 500,
+  });
+  submitter.submit("one", undefined, "steer");
+  submitter.submit("two", undefined, "steer");
+  submitter.submit("three", undefined, "steer");
+  // All three must be submitted; if unserialized, two/three would race the
+  // idle→working transition and throw "Agent is already processing".
+  for (let i = 0; i < 200 && calls.length < 3; i++) await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(calls.map((c) => c.text), ["one", "two", "three"]);
+  assert.ok(calls.every((c) => c.deliverAs === "steer"));
+});
+
+test("submitter: images become a text+image content array; cap does not wedge the queue", async () => {
+  const calls: Array<string | Array<Record<string, string>>> = [];
+  const submitter = createMessageSubmitter({
+    send: (content) => { calls.push(content); },
+    isTurnStarted: () => false, // run never becomes visible
+    tickMs: 1,
+    maxWaitTicks: 3,
+  });
+  submitter.submit("look", [{ mimeType: "image/png", data: "AAAA" }], "steer");
+  submitter.submit("next", undefined, "followUp");
+  for (let i = 0; i < 300 && calls.length < 2; i++) await new Promise((r) => setTimeout(r, 5));
+  assert.equal(calls.length, 2, "cap must release the queue; both submits must land");
+  const first = calls[0] as Array<Record<string, string>>;
+  assert.ok(Array.isArray(first), "image submit must send a content array");
+  assert.deepEqual(first.map((p) => p.type), ["text", "image"]);
+  assert.equal(calls[1], "next");
+});

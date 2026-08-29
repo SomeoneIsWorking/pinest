@@ -202,6 +202,11 @@ The web client deploys from the local system via `app/deploy.sh` after every
 update; the earlier GitHub Actions deploy path was removed by user decision
 (I-015).
 
+Consecutive user messages no longer void: the extension serializes message
+submissions and waits for the run to start before releasing the next one
+(I-016; pi's session looks idle during prompt initialization, so rapid sends
+raced "Agent is already processing" and the runtime swallowed the error).
+
 Gaps: run against the live host from an actual phone; hosted (RestImpl)
 backend not yet exercised by a real browser sign-in; stream deltas
 (I-006 item 5) still cumulative — protocol+app change together.
