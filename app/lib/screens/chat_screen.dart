@@ -490,6 +490,7 @@ class _ChatScreenState extends State<ChatScreen> {
       child: Padding(
         padding: const EdgeInsets.all(8),
         child: Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
           children: [
             Expanded(
               child: Column(
@@ -965,43 +966,48 @@ class _ToolCallCardState extends State<_ToolCallCard> {
           children: [
             InkWell(
               onTap: () => setState(() => _expanded = !_expanded),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  icon,
-                  const SizedBox(width: 6),
-                  Text(
-                    widget.name == 'bash'
-                        ? _bashLabel(widget.args)
-                        : widget.name,
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontFamily: 'monospace',
-                      color: Colors.grey,
-                    ),
-                  ),
-                  if (argStr.isNotEmpty)
-                    Flexible(
-                      child: Padding(
-                        padding: const EdgeInsets.only(left: 6),
-                        child: Text(
-                          _argSummary(widget.name, widget.args),
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: Colors.grey.shade600,
-                          ),
-                          maxLines: 1,
-                          softWrap: false,
-                          overflow: TextOverflow.ellipsis,
+                  Row(
+                    children: [
+                      icon,
+                      const SizedBox(width: 6),
+                      Text(
+                        widget.name,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontFamily: 'monospace',
+                          color: Colors.grey,
                         ),
                       ),
-                    ),
-                  const SizedBox(width: 4),
-                  Icon(
-                    _expanded ? Icons.expand_less : Icons.expand_more,
-                    size: 16,
-                    color: Colors.grey,
+                      const SizedBox(width: 4),
+                      Icon(
+                        _expanded ? Icons.expand_less : Icons.expand_more,
+                        size: 16,
+                        color: Colors.grey,
+                      ),
+                    ],
                   ),
+                  // The summary gets its OWN line with the full card width:
+                  // one line, ellipsized, character-capped. Squeezing it into
+                  // a Flexible next to the name starved it to nothing (cards
+                  // that "just say bash") or wrapped into tall blocks.
+                  if (argStr.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 20),
+                      child: Text(
+                        _argSummary(widget.name, widget.args),
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontFamily: 'monospace',
+                          color: Colors.grey.shade600,
+                        ),
+                        maxLines: 1,
+                        softWrap: false,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -1060,15 +1066,6 @@ class _ToolCallCardState extends State<_ToolCallCard> {
         ),
       ),
     );
-  }
-
-  String _bashLabel(dynamic args) {
-    // Show WHAT the bash tool ran, not just its name.
-    if (args is Map && args['command'] is String) {
-      final cmd = (args['command'] as String).replaceAll('\n', ' ; ').trim();
-      return cmd.length > 120 ? '${cmd.substring(0, 120)}…' : cmd;
-    }
-    return 'bash';
   }
 
   static const _summaryMaxChars = 160;
