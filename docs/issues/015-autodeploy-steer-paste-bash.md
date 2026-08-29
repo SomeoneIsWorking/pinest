@@ -1,4 +1,4 @@
-# I-015 — auto-deploy, steer control, queued-badge fix, image paste, bash labels
+# I-015 — web-client deploy path, steer control, queued-badge fix, image paste, bash labels
 
 ## Finding first: the deployed web app was stale, not the code
 
@@ -8,10 +8,10 @@ the tree (commits 3bfd25e, 280ffb4) but the live bundle predated them
 (`last-modified: 12:47 UTC`; `main.dart.js` contained `Ctrl+Enter` and zero
 `⌘+Enter`). Root cause: `app/README.md` claimed "push to main auto-deploys",
 but no deploy machinery existed — the 12:47 release was manual and later
-pushes never deployed anything. Fix: `.github/workflows/deploy-web.yml`
-(build + analyze + test + Firebase Hosting deploy on push to `main`,
-`workflow_dispatch` too). Requires the `FIREBASE_SERVICE_ACCOUNT` repo secret
-(service-account JSON with Firebase Hosting Admin role).
+pushes never deployed anything. Fix: `app/deploy.sh` — analyze + test +
+release build + `firebase deploy --only hosting -P pinest-app`, run from the
+local system after every update to `app/` (CI was considered and rejected by
+the user: deploy is local-only).
 
 ## Delivered in the same batch
 
@@ -52,6 +52,5 @@ pushes never deployed anything. Fix: `.github/workflows/deploy-web.yml`
 
 ## Remaining
 
-- Add the `FIREBASE_SERVICE_ACCOUNT` GitHub secret, then confirm the first
-  workflow run deploys a bundle containing `⌘+Enter`.
-- Re-verify the whole batch by hand on the deployed app.
+- Run `app/deploy.sh` from the local system so the live site picks up this
+  batch, then re-verify the whole batch by hand on the deployed app.
