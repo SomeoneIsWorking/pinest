@@ -9,4 +9,7 @@ command -v firebase >/dev/null || { echo "error: firebase CLI not on PATH (npm i
 flutter analyze
 flutter test
 flutter build web --release --pwa-strategy=none
+# The APK is NOT bundled here: CI (.github/workflows/apk.yml) builds it on every
+# push to main and publishes it as the `apk-latest` release asset the settings
+# screen links to. Two sources would mean one of them silently going stale.
 firebase deploy --only hosting -P pinest-app

@@ -25,7 +25,8 @@ import type { FirebaseAuth } from "./auth.ts";
 import { WSServer } from "./wsserver.ts";
 import { Supervisor } from "./supervisor.ts";
 import { SessionRegistry } from "./registry.ts";
-import { mapModel, deriveSessionName, messagesToHistory, listPaths, resolvePathInput } from "./logic.ts";
+import { mapModel, deriveSessionName, historyWithEmbeds, listPaths, resolvePathInput, pageHistory } from "./logic.ts";
+import { StreamSegmenter } from "./stream.ts";
 import { loadConfig, saveConfig } from "./config.ts";
 import { PROVIDERS } from "./tunnel.ts";
 import { createAttachView } from "./attach-view.ts";
@@ -69,7 +70,9 @@ let _ownerUid: string | null = null;
 let _ownerEmail: string | null = null;
 let _currentTurnId: string | null = null;
 let _status: "idle" | "working" = "idle";
-let _streamingText = "";
+/** Streaming-text state machine, shared with the supervisor sessions
+ * (stream.ts) so both session kinds stream identically into the app. */
+const segmenter = new StreamSegmenter();
 let _ctx: ExtensionContext | null = null;
 let _heartbeat: NodeJS.Timeout | null = null;
 let _watcher: SourceWatcher | null = null;
@@ -720,7 +723,7 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
   switch (cmd.type) {
     case "user_message": {
       _currentTurnId = cmd.id || randomUUID();
-      _streamingText = "";
+      segmenter.reset();
       _status = "working";
       upsertSession(_sessionId, { status: "working", streamingText: "" });
       // deliverAs: "steer" queues behind the current assistant segment's tool
@@ -754,12 +757,22 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
       upsertSession(_sessionId, { thinkingLevel: r.report });
       break;
     }
-    case "session_compact":
+    case "session_compact": {
       // compact/newSession live on ExtensionContext, NOT on ExtensionAPI
       // (_pi has no .ctx property — the old (_pi as any)?.ctx?.… form was a
       // silent no-op: clear/compact from the app did literally nothing).
-      (_ctx as any)?.compact?.();
+      // `?.compact?.()` had the same failure mode: an absent method meant
+      // silence. Refuse loudly instead — the client shows the error.
+      const compact = (_ctx as any)?.compact;
+      if (typeof compact !== "function") {
+        throw new Error("host session cannot compact (no compact() on the pi ExtensionContext)");
+      }
+      // ExtensionContext.compact() is fire-and-forget by contract: the result
+      // arrives as pi's session_compact / session_compact_failed events, which
+      // is where the usage + history refresh and the notice happen.
+      compact.call(_ctx);
       break;
+    }
     case "session_new": {
       // A fresh session context makes any queued messages stale — drop them.
       _pendingMessages = [];
@@ -779,13 +792,29 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
       });
       _registry?.upsert({ id: _sessionId, piSessionPath: path });
       broadcastState();
+      // The transcript is gone on the host — say so to the client, which
+      // otherwise keeps rendering the old thread and reads as "clear did
+      // nothing" (the usage badge dropping was the only tell).
+      await pushInteractiveHistory();
+      broadcast({ type: "notice", sessionId: _sessionId, message: "Session cleared" });
       break;
     }
     case "list_models":
       broadcast({ type: "models", sessionId: _sessionId, models: listModels() });
       break;
-    case "get_history":
-      broadcast({ type: "history", sessionId: _sessionId, history: await getInteractiveHistory() });
+    case "get_history": {
+      const paged = pageHistory(await getInteractiveHistory(), { limit: cmd.limit, cursor: cmd.cursor });
+      broadcast({ type: "history", sessionId: _sessionId, ...paged });
+      break;
+    }
+    case "queue_clear":
+      // The host's extension API exposes no queue drain (AgentSession
+      // clearQueue is not reachable from ExtensionAPI/Context) — clearing the
+      // mirror is all we can do; the host queue cannot accumulate ghosts
+      // because the message_start mirror pops exactly when pi does.
+      _pendingMessages = [];
+      _pendingSteering = [];
+      upsertSession(_sessionId, { pendingMessages: [], pendingSteering: [] });
       break;
     case "list_paths": {
       // Resolve ~ and relative prefixes against the spawn dialog's starting dir.
@@ -826,14 +855,18 @@ async function getInteractiveHistory() {
     if (!sm) return [];
     const result = sm.buildSessionContext?.();
     const msgs = result?.messages ?? [];
-    return messagesToHistory(msgs).map((m) => ({
-      ...m,
-      text: m.role === "assistant" ? embedImages(m.text) : m.text,
-    }));
+    return historyWithEmbeds(msgs, embedImages);
   } catch (e) {
     debug("[remote-code] getHistory failed:", (e as Error).message);
     return [];
   }
+}
+
+/** Push the host transcript as a replace-page. Anything that rewrites history
+ * behind the client's back (compact, clear) MUST call this — the client only
+ * ever redraws a thread it was sent. */
+async function pushInteractiveHistory(): Promise<void> {
+  broadcast({ type: "history", sessionId: _sessionId, ...pageHistory(await getInteractiveHistory()) });
 }
 
 async function setModel(cmd: Extract<ClientCommand, { type: "model_set" }>): Promise<void> {
@@ -904,29 +937,15 @@ function bridge(pi: ExtensionAPI): void {
   pi.on("message_start", (event: any) => {
     _turnStarted = true;
     if (event?.message?.role === "user") {
-      _streamingText = "";
+      segmenter.reset();
       _status = "working";
       upsertSession(_sessionId, { streamingText: "", status: "working" });
-      // The message just became part of the session — push history so the
-      // client can drop its "queued" badge for it NOW instead of at agent_end.
-      getInteractiveHistory().then((h) => broadcast({ type: "history", sessionId: _sessionId, history: h }));
-    } else if (event?.message?.role === "assistant") {
-      _streamingText = "";
-      _status = "working";
-      upsertSession(_sessionId, { status: "working" });
-    }
-  });
-
-  // message_end is when pi persists the user message into the transcript —
-  // message_start is too early (buildSessionContext won't contain it yet, so
-  // a history broadcast there makes the delivered message INVISIBLE: popped
-  // from the pending queue before it exists in history). Pop the pending
-  // entry and push history together, once the message actually exists.
-  // The small delay lets the session's own persistence subscriber settle.
-  pi.on("message_end", (event: any) => {
-    if (event?.message?.role !== "user") return;
-    const delivered = extractUserText(event.message);
-    setTimeout(() => {
+      // pi dequeues the user message from its OWN steering/followUp queue at
+      // message_start (matching by message text) — mirror exactly that here.
+      // The old pop-at-message_end drifted: an image-only message delivers
+      // with an empty text part, never matched, and stayed queued forever.
+      // Mirroring pi's own dequeue point cannot drift from it.
+      const delivered = extractUserText(event.message);
       if (delivered && _pendingMessages.includes(delivered)) {
         _pendingMessages = popPending(_pendingMessages, delivered);
         _pendingSteering = popPending(_pendingSteering, delivered);
@@ -935,8 +954,27 @@ function bridge(pi: ExtensionAPI): void {
           pendingSteering: [..._pendingSteering],
         });
       }
+      // The message just became part of the session — push history so the
+      // client can drop its "queued" badge for it NOW instead of at agent_end.
+      getInteractiveHistory().then((h) => broadcast({ type: "history", sessionId: _sessionId, ...pageHistory(h) }));
+    } else if (event?.message?.role === "assistant") {
+      // A fresh assistant message: current text is gone, promoted segments
+      // stay on screen for the rest of the turn.
+      segmenter.startMessage();
+      _status = "working";
+      upsertSession(_sessionId, { status: "working" });
+    }
+  });
+
+  // message_end is when pi persists the user message into the transcript —
+  // message_start is too early (buildSessionContext won't contain it yet, so
+  // a history broadcast there can be stale). The queue pop happens at
+  // message_start above, mirroring pi's own dequeue.
+  pi.on("message_end", (event: any) => {
+    if (event?.message?.role !== "user") return;
+    setTimeout(() => {
       getInteractiveHistory().then((h) =>
-        broadcast({ type: "history", sessionId: _sessionId, history: h }),
+        broadcast({ type: "history", sessionId: _sessionId, ...pageHistory(h) }),
       );
     }, 100);
   });
@@ -944,12 +982,15 @@ function bridge(pi: ExtensionAPI): void {
   pi.on("message_update", (event: any) => {
     const ae = event.assistantMessageEvent;
     if (ae?.type === "text_delta") {
-      _streamingText += ae.delta;
-      broadcast({ type: "stream", sessionId: _sessionId, text: _streamingText, status: "working" });
+      broadcast({ type: "stream", sessionId: _sessionId, ...segmenter.onTextDelta(ae.delta), status: "working" });
     }
   });
 
   pi.on("tool_execution_start", (event: any) => {
+    // Assistant stopped talking to run a tool: promote the streamed text into
+    // a finished segment so it stays visible while the tool runs.
+    const promoted = segmenter.onToolStart();
+    if (promoted) broadcast({ type: "stream", sessionId: _sessionId, ...promoted, status: "working" });
     broadcast({ type: "tool", sessionId: _sessionId, tool: {
       callId: event.toolCallId, name: event.toolName || "?",
       args: event.args, running: true,
@@ -977,13 +1018,29 @@ function bridge(pi: ExtensionAPI): void {
   pi.on("agent_end", () => {
     _turnStarted = false;
     if (_currentTurnId) _currentTurnId = null;
-    _streamingText = "";
+    segmenter.reset();
     _status = "idle";
     debug(`[remote-code] host status: working -> idle (agent_end)`);
     upsertSession(_sessionId, { streamingText: null, status: "idle", contextUsage: enrichedContextUsage() });
     maybeAutoCompactHost();
     // Send updated history so the completed message sticks
-    getInteractiveHistory().then((h) => broadcast({ type: "history", sessionId: _sessionId, history: h }));
+    getInteractiveHistory().then((h) => broadcast({ type: "history", sessionId: _sessionId, ...pageHistory(h) }));
+  });
+
+  // Compaction outcome (manual /compact from the app AND the threshold path).
+  // pi runs compaction outside an agent turn, so no agent_end follows it: with
+  // nothing subscribed here the app kept the pre-compaction transcript and
+  // context badge, which is exactly what "compact does nothing" looked like.
+  pi.on("session_compact", (event: any) => {
+    upsertSession(_sessionId, { contextUsage: enrichedContextUsage() });
+    void pushInteractiveHistory();
+    const trigger = event?.trigger ? ` (${event.trigger})` : "";
+    broadcast({ type: "notice", sessionId: _sessionId, message: `Context compacted${trigger}` });
+  });
+
+  pi.on("session_compact_failed", (event: any) => {
+    const why = event?.aborted ? "cancelled" : (event?.error || "unknown error");
+    broadcast({ type: "error", sessionId: _sessionId, message: `Compaction failed: ${why}` });
   });
 
   pi.on("model_select", (event: any) => {

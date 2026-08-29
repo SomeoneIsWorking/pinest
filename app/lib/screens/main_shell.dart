@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/auth_service.dart';
@@ -19,6 +21,29 @@ class MainShell extends StatefulWidget {
 class _MainShellState extends State<MainShell> {
   String? _selectedId;
   bool _spawning = false;
+  StreamSubscription<ServerNotice>? _noticeSub;
+
+  @override
+  void initState() {
+    super.initState();
+    // Server notices/errors are shown HERE, once, for every screen. The
+    // service used to park the last error in a field nothing rendered, so a
+    // refused /compact (or any server-side failure) was completely silent.
+    _noticeSub = context.read<AgentService>().notices.listen((n) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(n.message),
+        backgroundColor: n.isError ? Colors.red.shade700 : null,
+        duration: Duration(seconds: n.isError ? 6 : 3),
+      ));
+    });
+  }
+
+  @override
+  void dispose() {
+    _noticeSub?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {

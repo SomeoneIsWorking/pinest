@@ -31,6 +31,10 @@ export interface ToolEvent {
 export interface HistoryItem {
   role: "user" | "assistant";
   text: string;
+  /** Images the MESSAGE itself carried (user image attachments), base64. */
+  images?: Array<{ data: string; mimeType: string }>;
+  /** Item images dropped by the payload budget — reported, never silent. */
+  imagesOmitted?: number;
   tools: Array<{
     name: string;
     args?: unknown;
@@ -93,10 +97,15 @@ export type ServerMessage =
   | { type: "authed" }
   | { type: "pong" }
   | { type: "error"; message: string; sessionId?: string }
+  /** Something the user asked for HAPPENED (compact/clear). Silence is what
+   * made these look like no-ops; the client shows this as a snackbar. */
+  | { type: "notice"; sessionId?: string; message: string }
   | { type: "state"; online: boolean; hostname: string; homePath?: string; activeSessionId?: string | null; sessions: SessionSnapshot[]; registry: SessionRow[]; tunnelUrl?: string | null; tunnelProvider?: string | null }
   | { type: "session_list"; sessions: SessionRow[] }
   | { type: "session_deleted"; sessionId: string; deleted: boolean }
-  | { type: "history"; sessionId: string; history: HistoryItem[] }
+  | { type: "history"; sessionId: string; history: HistoryItem[];
+      /** Page the client asked for / the server decided to push. */
+      cursor: number; hasMore: boolean; mode: "replace" | "older" }
   | { type: "stream"; sessionId: string; text: string; status: string }
   | { type: "tool"; sessionId: string; tool: ToolEvent }
   | { type: "models"; sessionId?: string; models: ModelInfo[] }
@@ -127,7 +136,11 @@ export type ClientCommand =
   | { type: "session_select"; sessionId: string }
   | { type: "session_delete"; sessionId: string; deleteHistory?: boolean }
   | { type: "list_models"; sessionId?: string }
-  | { type: "get_history"; sessionId?: string }
+  | { type: "get_history"; sessionId?: string; limit?: number;
+      /** Index of the oldest item the client already holds — request the
+       * page BEFORE it (scroll-back pagination). */
+      cursor?: number }
+  | { type: "queue_clear"; sessionId?: string }
   | { type: "list_paths"; prefix?: string; id?: string }
   | { type: "path_check"; path: string; id?: string }
   | { type: "folder_create"; path: string; id?: string }

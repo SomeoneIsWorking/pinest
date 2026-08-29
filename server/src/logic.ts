@@ -105,12 +105,17 @@ export function messagesToHistory(messages: unknown): HistoryItem[] {
   const items: HistoryItem[] = (messages as any[])
     .filter((m) => m.role === "user" || m.role === "assistant")
     .map((m) => {
+      const isImageMessage =
+        Array.isArray(m.content) && m.content.some((p: any) => p?.type === "image");
       const text = extractText(m.content) ||
         // Image-only user messages (paste from the client) render as a
         // placeholder so the app's pending-message matching can clear them.
-        (Array.isArray(m.content) && m.content.some((p: any) => p?.type === "image")
-          ? "[image]"
-          : "");
+        (isImageMessage ? "[image]" : "");
+      // USER images must survive refresh too — dropping them made a sent
+      // screenshot vanish from the thread the moment history reloaded.
+      const images = isImageMessage
+        ? m.role === "user" ? extractImages(m.content) : []
+        : [];
       const tools: HistoryItem["tools"] = [];
       if (Array.isArray(m.content)) {
         for (const p of m.content) {
@@ -124,10 +129,23 @@ export function messagesToHistory(messages: unknown): HistoryItem[] {
           }
         }
       }
-      return { role: m.role as "user" | "assistant", text, tools };
+      return { role: m.role as "user" | "assistant", text, tools, images };
     })
-    .filter((m) => m.text.length > 0 || m.tools.length > 0);
+    .filter((m) => m.text.length > 0 || m.tools.length > 0 || (m.images?.length ?? 0) > 0);
   return budgetHistoryImages(items);
+}
+
+/** Build the history payload for a session: the simple items PLUS assistant
+ * text with embedded image references. Shared by the supervisor sessions and
+ * the host bridge — the two must render identically. */
+export function historyWithEmbeds(
+  messages: unknown,
+  embed?: (text: string) => string,
+): HistoryItem[] {
+  return messagesToHistory(messages).map((m) => ({
+    ...m,
+    text: m.role === "assistant" ? embed?.(m.text) ?? m.text : m.text,
+  }));
 }
 
 /** Keep the newest images within the payload budget; older tool cards keep a
@@ -136,22 +154,52 @@ export function messagesToHistory(messages: unknown): HistoryItem[] {
 function budgetHistoryImages(items: HistoryItem[]): HistoryItem[] {
   let budget = MAX_IMAGES_PER_HISTORY;
   for (let i = items.length - 1; i >= 0; i--) {
-    const tools = items[i]?.tools ?? [];
-    for (let j = tools.length - 1; j >= 0; j--) {
-      const t = tools[j];
-      if (!t) continue;
-      const have = t.images?.length ?? 0;
+    // The item's OWN images (a user message's attachments) budget like tool
+    // images — newest wins, older ones report a count instead of vanishing.
+    for (const holder of [items[i], ...(items[i]?.tools ?? [])]) {
+      if (!holder) continue;
+      const have = holder.images?.length ?? 0;
       if (!have) continue;
       if (budget >= have) {
         budget -= have;
       } else {
-        t.imagesOmitted = have - budget;
-        t.images = budget > 0 ? t.images!.slice(0, budget) : [];
+        holder.imagesOmitted = have - budget;
+        holder.images = budget > 0 ? holder.images!.slice(0, budget) : [];
         budget = 0;
       }
     }
   }
   return items;
+}
+
+/** Default page size for history: the client loads the LAST page first and
+ * pulls older pages only when the user scrolls back. Full transcripts of
+ * long sessions with embedded images were far too heavy for session open. */
+export const HISTORY_PAGE_SIZE = 50;
+
+/** Slice a full transcript into a page for the client.
+ *
+ * - No cursor (initial load / live refresh): the LAST `limit` items.
+ * - With `cursor` (index of the oldest item the client already holds): the
+ *   `limit` items BEFORE it, so the client can prepend without gaps or
+ *   duplicates even while new messages append at the end.
+ *
+ * `mode` tells the client whether to replace its thread (latest page, merged
+ * with any older pages it holds) or prepend (older page). */
+export function pageHistory(
+  full: HistoryItem[],
+  opts: { limit?: number; cursor?: number } = {},
+): { history: HistoryItem[]; cursor: number; hasMore: boolean; mode: "replace" | "older" } {
+  const limit = Math.max(1, opts.limit ?? HISTORY_PAGE_SIZE);
+  const older = typeof opts.cursor === "number";
+  const end = Math.min(older ? opts.cursor! : full.length, full.length);
+  const start = Math.max(0, end - limit);
+  return {
+    history: full.slice(start, end),
+    cursor: start,
+    hasMore: start > 0,
+    mode: older ? "older" : "replace",
+  };
 }
 
 /** Derive a session display name: explicit name, else cwd basename, else 'session'. */
@@ -224,12 +272,19 @@ export function listPaths(prefix: string | undefined, deps: ListPathsDeps = {}):
   } catch {
     return [];
   }
+  // Display paths collapse the host home dir to `~/` — the client cannot know
+  // the host's home, and full absolute paths are noise in a narrow list.
+  // resolvePathInput expands a leading `~` back on every server-side use.
+  const home = homedir().replace(/\/+$/, "");
+  const collapse = (p: string): string =>
+    p === home ? "~/" : p.startsWith(home + "/") ? "~" + p.slice(home.length) : p;
+
   const out: string[] = [];
   for (const name of names.sort()) {
     if (stem && !name.startsWith(stem)) continue;
     const full = join(base, name);
     if (!isDir(full)) continue;
-    out.push(full.endsWith("/") ? full : full + "/");
+    out.push(collapse(full.endsWith("/") ? full : full + "/"));
     if (out.length >= limit) break;
   }
   return out;

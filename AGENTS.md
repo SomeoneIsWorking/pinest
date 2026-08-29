@@ -51,6 +51,15 @@ change lands on `main`, run `cd app && ./deploy.sh` (analyze + test + build +
 `firebase deploy -P pinest-app`). An undeployed app change means users see the
 old client — that was the I-015 stale-site incident.
 
+The Android APK is the one artifact that DOES ship from CI
+(`.github/workflows/apk.yml`): every push to `main` touching `app/**` runs
+analyze + test + `flutter build apk --release` and republishes the rolling
+`apk-latest` GitHub release, which is what the web client's Settings →
+"Android app (APK)" button downloads (`app/lib/services/apk_release.dart`).
+Do not re-add an APK build to `deploy.sh` — two sources means one stale copy.
+Until the `ANDROID_KEYSTORE_*` repo secrets exist, CI signs with the debug key
+and users must uninstall before installing a newer build (I-024).
+
 ## Rules specific to this repo
 
 - The agent core is **pi**. Do not reintroduce opencode/pi forks or child-process

@@ -12,7 +12,8 @@ import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
-import { mapModel, deriveSessionName, messagesToHistory, pushPending, popPending, extractUserText } from "./logic.ts";
+import { mapModel, deriveSessionName, messagesToHistory, pageHistory, historyWithEmbeds } from "./logic.ts";
+import { StreamSegmenter } from "./stream.ts";
 import { createMessageSubmitter, type MessageSubmitter } from "./submit.ts";
 import { resolveThinkingLevel, reportThinkingLevel } from "./thinking.ts";
 import type { SessionRegistry } from "./registry.ts";
@@ -67,11 +68,19 @@ interface LiveSession {
   name: string;
   model: string | null;
   modelName: string | null;
-  _streamingText: string | null;
+  /** Streaming-text state machine, shared with the host bridge (stream.ts):
+   * promoted segments keep the assistant's spoken text visible while tools
+   * run. */
+  segmenter: StreamSegmenter;
   _compacting: boolean;
-  /** Server-authoritative queue: submitted, not yet delivered (see logic.ts). */
+  /** MIRROR of the agent's own queue, kept in lockstep by `queue_update`
+   * events (AgentSession emits the FULL steering + followUp queues whenever
+   * they change — including when pi dequeues at message_start). This is NOT
+   * a parallel bookkeeping list: the old push-at-submit/pop-at-message_end
+   * text matching drifted (an image-only message delivers with different
+   * text than it was pushed with, so it was never popped and stuck forever). */
   pending: string[];
-  /** Subset of `pending` that was submitted as a steer. */
+  /** Subset of `pending` that the agent reports as STEERS. */
   pendingSteering: string[];
   /** True between a run's message_start and agent_end (submission gate). */
   turnStarted: boolean;
@@ -180,7 +189,7 @@ export class Supervisor {
     const name = deriveSessionName(cwd, cmd.name);
     const s: LiveSession = {
       session, currentTurnId: null, unsub: null, cwd, status: "idle", name,
-      model: null, modelName: null, _streamingText: null, _compacting: false,
+      model: null, modelName: null, segmenter: new StreamSegmenter(), _compacting: false,
       pending: [], pendingSteering: [], turnStarted: false, submitter: null,
     };
     this.sessions.set(id, s);
@@ -216,7 +225,7 @@ export class Supervisor {
     const name = cmd.name || deriveSessionName(cwd);
     const s: LiveSession = {
       session, currentTurnId: null, unsub: null, cwd, status: "idle", name,
-      model: null, modelName: null, _streamingText: null, _compacting: false,
+      model: null, modelName: null, segmenter: new StreamSegmenter(), _compacting: false,
       pending: [], pendingSteering: [], turnStarted: false, submitter: null,
     };
     this.sessions.set(id, s);
@@ -264,20 +273,17 @@ export class Supervisor {
           s.status = "working";
           const images = (cmd.images ?? []) as UserImage[];
           const text = cmd.text.trim().length === 0 ? "[image]" : cmd.text;
-          const asSteer = cmd.deliverAs !== "followUp";
-          s.pending = pushPending(s.pending, text);
-          if (asSteer) s.pendingSteering = pushPending(s.pendingSteering, text);
           this.callbacks.upsertSession(cmd.sessionId, {
             status: "working",
-            pendingMessages: [...s.pending],
-            pendingSteering: [...s.pendingSteering],
           });
-          this.callbacks.broadcast({ type: "stream", sessionId: cmd.sessionId, text: "", status: "working" });
+          this.callbacks.broadcast({ type: "stream", sessionId: cmd.sessionId, text: "", segments: [], status: "working" });
           // prompt(streamingBehavior) covers BOTH cases: idle → new turn,
           // streaming → queued as steer/followUp. The bare prompt() this used
           // to call THREW "Agent is already processing" whenever the session
           // was working — steers never reached the model at all.
           s.submitter?.submit(text, images, cmd.deliverAs === "followUp" ? "followUp" : "steer");
+          // NO local queue push: the agent reports its own queue via
+          // queue_update once prompt() actually queues (or runs) the message.
           break;
         }
         case "cancel":
@@ -293,9 +299,15 @@ export class Supervisor {
           this.callbacks.upsertSession(cmd.sessionId, { thinkingLevel: r.report });
           break;
         }
-        case "session_compact":
-          await (s.session as any).compact();
+        case "session_compact": {
+          const compact = (s.session as any).compact;
+          if (typeof compact !== "function") {
+            throw new Error("this session cannot compact (no compact() on the agent session)");
+          }
+          await compact.call(s.session);
+          this.afterContextRewrite(cmd.sessionId as string, s, "Context compacted");
           break;
+        }
         case "session_new": {
           const id = cmd.sessionId as string;
           try { s.unsub?.(); } catch { /* */ }
@@ -303,17 +315,40 @@ export class Supervisor {
           const { session } = await createAgentSession(this.createSessionOpts(s.cwd));
           s.session = session;
           s.status = "idle";
+          // The old session's queue and mid-turn state belong to a transcript
+          // that no longer exists — carrying them over left ghost "queued"
+          // bubbles on a session that had just been cleared.
+          s.pending = [];
+          s.pendingSteering = [];
+          s.currentTurnId = null;
+          s.turnStarted = false;
+          s.segmenter.reset();
           this.wire(id, s);
+          // persistRow re-reads the (new) session's sessionManager, so the
+          // registry's resume anchor follows the fresh pi session file.
           this.persistRow(id, { status: "idle" });
-          this.callbacks.upsertSession(id, { status: "idle" });
+          this.callbacks.upsertSession(id, {
+            status: "idle", streamingText: null, pendingMessages: [], pendingSteering: [],
+          });
+          this.afterContextRewrite(id, s, "Session cleared");
           break;
         }
         case "list_models":
           this.models(s).then((models) => this.callbacks.broadcast({ type: "models", sessionId: cmd.sessionId, models }));
           break;
         case "get_history": {
-          const transcript = await this.getHistory(s);
-          this.callbacks.broadcast({ type: "history", sessionId: cmd.sessionId, history: transcript });
+          const full = await this.getHistory(s);
+          const paged = pageHistory(full, { limit: cmd.limit, cursor: cmd.cursor });
+          this.callbacks.broadcast({ type: "history", sessionId: cmd.sessionId, ...paged });
+          break;
+        }
+        case "queue_clear": {
+          // pi's own queue drain — the only honest way to remove a message
+          // that is genuinely stuck in the steering/followUp queues (pi
+          // dequeues by text-match at message_start; a delivered text that
+          // never matched stays queued forever).
+          try { (s.session as any).clearQueue?.(); } catch { /* getter-absent session */ }
+          this.syncQueue(cmd.sessionId, s);
           break;
         }
       }
@@ -329,6 +364,28 @@ export class Supervisor {
    * across a reload): its `message_start` fired under the previous instance,
    * so treating it as idle would make the next submit call prompt() into a
    * busy session ("Agent is already processing"). */
+  /** Re-derive the pending mirror from the AGENT's own queue getters and
+   * push the corrected snapshot. Called at wire() and at adoption: a parked
+   * session's mirrored arrays may predate the agent-queue fix (or any older
+   * drift), so adoption must NEVER re-broadcast them as-is. */
+  private syncQueue(id: string, s: LiveSession): void {
+    try {
+      const anySession = s.session as any;
+      if (typeof anySession.getSteeringMessages === "function") {
+        s.pending = [...anySession.getSteeringMessages(), ...anySession.getFollowUpMessages()];
+        s.pendingSteering = [...anySession.getSteeringMessages()];
+      }
+      // Getters unavailable (foreign/fake session): leave the current mirror
+      // untouched rather than fabricating empty state.
+    } catch {
+      return;
+    }
+    this.callbacks.upsertSession(id, {
+      pendingMessages: [...s.pending],
+      pendingSteering: [...s.pendingSteering],
+    });
+  }
+
   private wire(id: string, s: LiveSession, opts: { resumeTurn?: boolean } = {}): void {
     s.turnStarted = !!opts.resumeTurn;
     s.submitter = createMessageSubmitter({
@@ -349,6 +406,17 @@ export class Supervisor {
       isTurnStarted: () => s.turnStarted,
     });
     s.unsub = s.session.subscribe((event: any) => {
+      if (event.type === "queue_update") {
+        // The AGENT's queue, verbatim from the event payload. Delivery pops
+        // are pi's own (at message_start) — we only mirror what it tells us.
+        s.pending = [...(event.steering ?? []), ...(event.followUp ?? [])];
+        s.pendingSteering = [...(event.steering ?? [])];
+        this.callbacks.upsertSession(id, {
+          pendingMessages: [...s.pending],
+          pendingSteering: [...s.pendingSteering],
+        });
+        return;
+      }
       if (event.type === "message_start") {
         s.turnStarted = true;
         // Mark working here, not only in the user_message case: a run can
@@ -360,30 +428,27 @@ export class Supervisor {
           this.callbacks.upsertSession(id, { status: "working" });
         }
       } else if (event.type === "message_end" && event.message?.role === "user") {
-        // message_end is when pi persists the message — pop pending + push
-        // history together so the delivered message never goes invisible
-        // (see logic.ts note). Small delay lets persistence settle.
-        const delivered = extractUserText(event.message);
+        // message_end is when pi persists the message — push history then, so
+        // the delivered message never goes invisible. Queue pops are NOT our
+        // job: pi dequeues at message_start and says so via queue_update.
         setTimeout(() => {
-          if (s.pending.includes(delivered)) {
-            s.pending = popPending(s.pending, delivered);
-            s.pendingSteering = popPending(s.pendingSteering, delivered);
-            this.callbacks.upsertSession(id, {
-              pendingMessages: [...s.pending],
-              pendingSteering: [...s.pendingSteering],
-            });
-          }
           this.getHistory(s).then((h) =>
-            this.callbacks.broadcast({ type: "history", sessionId: id, history: h }),
+            this.callbacks.broadcast({ type: "history", sessionId: id, ...pageHistory(h) }),
           );
         }, 100);
       } else if (event.type === "message_update") {
         const ae = event.assistantMessageEvent;
         if (ae?.type === "text_delta" && s.currentTurnId) {
-          s._streamingText = (s._streamingText || "") + ae.delta;
-          this.callbacks.broadcast({ type: "stream", sessionId: id, text: s._streamingText, status: "working" });
+          this.callbacks.broadcast({ type: "stream", sessionId: id, ...s.segmenter.onTextDelta(ae.delta), status: "working" });
         }
       } else if (event.type === "tool_execution_start") {
+        // The assistant stopped talking to run a tool: PROMOTE the streamed
+        // text into a finished segment so it stays on screen while the tool
+        // runs (it used to vanish, and reappeared only when text resumed).
+        const promoted = s.segmenter.onToolStart();
+        if (promoted) {
+          this.callbacks.broadcast({ type: "stream", sessionId: id, ...promoted, status: "working" });
+        }
         this.callbacks.broadcast({ type: "tool", sessionId: id, tool: {
           callId: event.toolCallId, name: event.toolName || "?", args: event.args, running: true,
         }});
@@ -404,13 +469,13 @@ export class Supervisor {
         s.turnStarted = false;
         s.status = "idle";
         debug(`[remote-code] session ${id} status: working -> idle (agent_end)`);
-        s._streamingText = null;
+        s.segmenter.reset();
         if (s.currentTurnId) s.currentTurnId = null;
         this.callbacks.upsertSession(id, { status: "idle", contextUsage: this.usageWithCompactAt(s) });
         this.persistRow(id, { status: "idle" });
         this.maybeAutoCompact(id, s);
         // Send updated history
-        this.getHistory(s).then((h) => this.callbacks.broadcast({ type: "history", sessionId: id, history: h }));
+        this.getHistory(s).then((h) => this.callbacks.broadcast({ type: "history", sessionId: id, ...pageHistory(h) }));
       } else if (event.type === "model_select") {
         const m = event.model;
         if (m) {
@@ -472,6 +537,19 @@ export class Supervisor {
     }
   }
 
+  /** Everything that rewrites a session's transcript behind the client's back
+   * (compact, clear) ends here: refresh the context badge, push the new
+   * transcript, and SAY it happened. Without this the app kept rendering the
+   * pre-compaction thread and the command looked like a no-op. */
+  private afterContextRewrite(id: string, s: LiveSession, notice: string): void {
+    const u = this.usageWithCompactAt(s);
+    this.callbacks.upsertSession(id, { ...(u ? { contextUsage: u } : {}) });
+    void this.getHistory(s).then((h) =>
+      this.callbacks.broadcast({ type: "history", sessionId: id, ...pageHistory(h) }),
+    );
+    this.callbacks.broadcast({ type: "notice", sessionId: id, message: notice });
+  }
+
   /** Auto-compact when the context crosses the configured threshold. */
   private maybeAutoCompact(id: string, s: LiveSession): void {
     if (s._compacting) return;
@@ -482,7 +560,13 @@ export class Supervisor {
     s._compacting = true;
     debug(`[remote-code] auto-compacting session ${id} (${usage.tokens} >= ${at} tokens)`);
     Promise.resolve((s.session as any).compact())
-      .catch((e: unknown) => debug("[remote-code] auto-compact failed:", (e as Error).message))
+      .then(() => this.afterContextRewrite(id, s, "Context auto-compacted"))
+      .catch((e: unknown) => {
+        debug("[remote-code] auto-compact failed:", (e as Error).message);
+        this.callbacks.broadcast({
+          type: "error", sessionId: id, message: `Auto-compaction failed: ${(e as Error).message}`,
+        });
+      })
       .finally(() => { s._compacting = false; });
   }
 
@@ -495,19 +579,26 @@ export class Supervisor {
   private async getHistory(s: LiveSession) {
     try {
       const msgs = (s.session as any).messages ?? [];
-      return messagesToHistory(msgs).map((m) => ({
-        ...m,
-        text: m.role === "assistant" ? this.callbacks.embedImages?.(m.text) ?? m.text : m.text,
-      }));
+      return historyWithEmbeds(msgs, this.callbacks.embedImages);
     } catch (e) {
       debug("[remote-code] getHistory failed:", (e as Error).message);
       return [];
     }
   }
 
-  /** Undelivered pending messages for a session (reload persistence). */
+  /** Undelivered pending messages for a session — read from the AGENT's own
+   * queue, with the last mirrored snapshot as fallback for a parked session
+   * whose getters are unavailable. */
   pendingFor(id: string): string[] {
-    return [...(this.sessions.get(id)?.pending ?? [])];
+    const s = this.sessions.get(id);
+    if (!s) return [];
+    try {
+      const anySession = s.session as any;
+      if (typeof anySession.getSteeringMessages === "function") {
+        return [...anySession.getSteeringMessages(), ...anySession.getFollowUpMessages()];
+      }
+    } catch { /* parked/foreign session object — fall through */ }
+    return [...(s.pending ?? [])];
   }
 
   /**
@@ -635,16 +726,17 @@ export class Supervisor {
         isInteractive: false,
         isHost: false,
         resumed: true,
-        pendingMessages: [...s.pending],
-        pendingSteering: [...s.pendingSteering],
+        // pending fields are NOT taken from the parked mirror (stale-drift
+        // risk across builds): syncQueue below reads the agent's own queue.
         contextUsage: this.usageWithCompactAt(s),
       });
+      this.syncQueue(id, s);
       this.persistRow(id, { status: s.status === "working" ? "running" : "idle" });
       adopted += 1;
       debug(`[remote-code] reload: adopted session ${id} (${s.name} @ ${s.cwd}, ${s.status})`);
       // Push history so the app thread refills immediately.
       this.getHistory(s).then((h) =>
-        this.callbacks.broadcast({ type: "history", sessionId: id, history: h }),
+        this.callbacks.broadcast({ type: "history", sessionId: id, ...pageHistory(h) }),
       ).catch(() => { /* */ });
       } catch (e) {
         // One unusable parked session must not take remote control down with

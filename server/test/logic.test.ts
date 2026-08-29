@@ -2,6 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { makeTempDir, removeTempDir } from "../support/tmp.ts";
 import {
@@ -105,8 +106,10 @@ test("listPaths: completes subdirectories of an existing directory prefix", () =
     mkdirSync(join(tmp, "beta"));
     writeFileSync(join(tmp, "file.txt"), "x");
     const real = listPaths(tmp);
-    assert.ok(real.includes(join(tmp, "alpha") + "/"), JSON.stringify(real));
-    assert.ok(real.includes(join(tmp, "beta") + "/"));
+    // Paths under the host home are collapsed to ~/ for display.
+    const collapse = (p: string) => p.startsWith(homedir()) ? "~" + p.slice(homedir().length) : p;
+    assert.ok(real.includes(collapse(join(tmp, "alpha")) + "/"), JSON.stringify(real));
+    assert.ok(real.includes(collapse(join(tmp, "beta")) + "/"));
     assert.ok(!real.some((p) => p.includes("file.txt")), "files must not appear");
   } finally {
     removeTempDir(tmp);
@@ -146,15 +149,16 @@ test("listPaths: filters by stem and caps at limit", () => {
 test("listPaths: empty prefix → home directory children (real fs, shape only)", () => {
   const out = listPaths("", { limit: 5 });
   assert.ok(Array.isArray(out) && out.length <= 5);
-  assert.ok(out.every((p) => p.startsWith("/") && p.endsWith("/")), JSON.stringify(out));
+  // Home children collapse to ~/ — the client cannot know the host home.
+  assert.ok(out.every((p) => p.startsWith("~/") && p.endsWith("/")), JSON.stringify(out));
 });
 
 test("listPaths: injected home via prefix uses ~", () => {
   // The home-prefix form expands and completes from the real home dir;
-  // assert hermetic shape only.
+  // results collapse back to ~/ for display; assert hermetic shape only.
   const out = listPaths("~" + "/", { limit: 3 });
   assert.ok(out.length <= 3);
-  assert.ok(out.every((p) => p.startsWith("/") && p.endsWith("/")), JSON.stringify(out));
+  assert.ok(out.every((p) => p.startsWith("~/") && p.endsWith("/")), JSON.stringify(out));
 });
 
 // ── Server-authoritative pending queue ──

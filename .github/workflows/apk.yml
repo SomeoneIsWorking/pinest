@@ -1,0 +1,120 @@
+# Builds the Flutter Android client and publishes it as the `apk-latest`
+# release asset the web app links to (app/lib/services/apk_release.dart).
+#
+# Only the APK ships from CI. The web client is still deployed from the local
+# machine (app/deploy.sh) — see AGENTS.md / I-015.
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - '.github/workflows/apk.yml'
+  pull_request:
+    paths:
+      - 'app/**'
+      - '.github/workflows/apk.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: '3.44.5'
+  RELEASE_TAG: apk-latest
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      # Same gates deploy.sh runs locally — a red APK build is a real failure,
+      # not something to retry past.
+      - run: flutter analyze
+      - run: flutter test
+
+      # Release signing. With the keystore secrets set, every CI build is signed
+      # by the same key and installs as an in-place update. Without them the
+      # Flutter template's debug key is used: the APK still installs, but each
+      # runner has a different debug keystore, so users must uninstall first.
+      # Set ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD /
+      # ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD to fix that permanently.
+      - name: Configure release signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -eu
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret — signing with the debug key. Installing over a previous CI build will require an uninstall."
+            exit 0
+          fi
+          for v in KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            eval "val=\${$v:-}"
+            [ -n "$val" ] || { echo "::error::ANDROID_KEYSTORE_BASE64 is set but $v is missing"; exit 1; }
+          done
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > android/upload-keystore.jks
+          # Absolute path: a relative storeFile in key.properties resolves
+          # against android/app/, not android/.
+          cat > android/key.properties <<EOF
+          storeFile=$PWD/android/upload-keystore.jks
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+          echo "release signing configured"
+
+      - run: flutter build apk --release
+
+      - name: Name the artifact
+        run: cp build/app/outputs/flutter-apk/app-release.apk pinest.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pinest-apk
+          path: app/pinest.apk
+          if-no-files-found: error
+
+      # CD: refresh the rolling release the web app's download button points at.
+      - name: Publish ${{ env.RELEASE_TAG }} release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          notes="Automatic build of \`${GITHUB_SHA}\` (${GITHUB_REF_NAME}) by [run ${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}).
+
+          Download \`pinest.apk\` below, or use the **Android app (APK)** button in the web client's Settings."
+          git tag -f "$RELEASE_TAG" "$GITHUB_SHA"
+          git push -f origin "refs/tags/$RELEASE_TAG"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --title "Latest Android APK" --notes "$notes" --latest
+            gh release upload "$RELEASE_TAG" pinest.apk --clobber
+          else
+            gh release create "$RELEASE_TAG" pinest.apk \
+              --target "$GITHUB_SHA" --title "Latest Android APK" --notes "$notes" --latest
+          fi
