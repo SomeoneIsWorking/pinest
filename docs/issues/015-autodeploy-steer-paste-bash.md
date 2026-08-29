@@ -171,3 +171,11 @@ contract.
 **WS liveness**: server answers `ping`→`pong`; client awaits `channel.ready`
 before declaring open, heartbeats every 20s, force-recycles a socket silent
 >60s, reconnects with backoff (2→30s) reset on authed. `wsConnected` exposed.
+
+## Follow-up 7: transcript sync (this commit)
+
+"Bogus bash cards after turn end" = the live tool-call list accumulated for
+the whole connection and was never cleared when history landed, so turn end
+re-rendered every stale call inline + at the bottom. Clear-on-history shipped
+earlier; history cards now ALSO carry tool results (paired by toolCallId in
+messagesToHistory) so they match live cards exactly.
