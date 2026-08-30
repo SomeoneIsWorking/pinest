@@ -41,6 +41,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Web client local deploy + Hosting-site routing | `app` | `app/deploy.sh`, `app/firebase.json`, `app/.firebaserc` (`pinest` canonical; `pinest-app` legacy redirect) |
 | Canonical Hosting bundle + legacy-redirect verifier | repo root | `tools/verify_hosting.py` |
 | Cross-platform application identity (`com.barishamil.pinest`) + native Firebase clients | `app` | `app/android/app/`, `app/ios/Runner.xcodeproj/`, `app/linux/CMakeLists.txt`, `app/macos/Runner/`, `app/lib/firebase_options.dart` |
+| Live Firestore owner-boundary verification | `tools` | `tools/verify_firestore_rules.py`, `tools/test_verify_firestore_rules.py` |
 | Generated Flutter platform runner projects and packaging shells | `app` | `app/android/`, `app/ios/`, `app/linux/`, `app/macos/`, `app/windows/` |
 | Android release package/certificate identity (single authority) | `app` | `app/release-identity.json`, consumed by `app/tools/verify_apk.py` and the attested release workflow |
 | Android APK build/sign/attest/publish trust boundaries and workflow-policy tests | repo root | `.github/workflows/apk.yml`, `app/tools/install_flutter.py`, `app/tools/verify_apk.py`, `app/tools/test_apk_workflow_policy.py` → immutable per-commit GitHub releases |
