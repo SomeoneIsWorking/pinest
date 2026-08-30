@@ -31,6 +31,7 @@
 
     const firebaseConfig = __FIREBASE_CONFIG__;
     const projectId = "__PROJECT_ID__";
+    const loginNonce = __LOGIN_NONCE__;
     const app = initializeApp(firebaseConfig);
     const auth = getAuth(app);
 
@@ -52,7 +53,7 @@
         const r = await fetch("/callback", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ idToken, refreshToken }),
+          body: JSON.stringify({ nonce: loginNonce, idToken, refreshToken }),
         });
         if (r.ok) {
           status.className = "ok";

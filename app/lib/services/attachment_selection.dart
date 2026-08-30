@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -7,7 +8,8 @@ import 'agent_service.dart' show PendingImage;
 import 'file_pick_bridge.dart' show pickUserFiles, readClipboardImages;
 import 'picked_file.dart';
 
-const _maxFileBytes = 10 * 1024 * 1024;
+const maxOutgoingImageBytes = 10 * 1024 * 1024;
+const maxOutgoingImageCount = 8;
 const _maxInlineTextBytes = 512 * 1024;
 const _imageExtensions = {'png', 'jpg', 'jpeg', 'gif', 'webp'};
 const _textExtensions = {
@@ -82,6 +84,16 @@ Future<List<PickedFile>> pickAttachmentFiles() async {
   ];
 }
 
+/// Opens the picker and applies the same pure policy as paste and clipboard.
+Future<AttachmentSelection> selectAttachments({
+  required String currentMessage,
+  required Iterable<PendingImage> attachedImages,
+}) async => prepareAttachments(
+  await pickAttachmentFiles(),
+  currentMessage: currentMessage,
+  attachedImages: attachedImages,
+);
+
 /// Reads image attachments from the browser clipboard after a user gesture.
 Future<List<PickedFile>> readClipboardAttachmentImages() =>
     readClipboardImages();
@@ -93,19 +105,34 @@ Future<List<PickedFile>> readClipboardAttachmentImages() =>
 AttachmentSelection prepareAttachments(
   Iterable<PickedFile> files, {
   required String currentMessage,
+  Iterable<PendingImage> attachedImages = const [],
 }) {
   final images = <PendingImage>[];
   final notices = <String>[];
   final extraText = StringBuffer();
+  var imageBytes = _totalImageBytes(attachedImages);
+  var imageCount = attachedImages.length;
 
   for (final file in files) {
     final extension = _extensionOf(file.name);
-    if (file.bytes.length > _maxFileBytes) {
-      notices.add('${file.name} is too large (max 10 MB) — skipped');
-    } else if (_imageExtensions.contains(extension)) {
+    if (_imageExtensions.contains(extension)) {
+      final refusal = imageAttachmentRefusal(
+        name: file.name,
+        byteLength: file.bytes.length,
+        attachedBytes: imageBytes,
+        attachedCount: imageCount,
+      );
+      if (refusal != null) {
+        notices.add(refusal);
+        continue;
+      }
       images.add(
         PendingImage(mimeType: _imageMimeType(extension), bytes: file.bytes),
       );
+      imageBytes += file.bytes.length;
+      imageCount += 1;
+    } else if (file.bytes.length > maxOutgoingImageBytes) {
+      notices.add('${file.name} is too large (max 10 MB) — skipped');
     } else if (_textExtensions.contains(extension) &&
         file.bytes.length <= _maxInlineTextBytes) {
       extraText
@@ -134,6 +161,47 @@ AttachmentSelection prepareAttachments(
   );
 }
 
+/// Applies attachment policy to an image delivered by the paste listener.
+AttachmentSelection preparePastedImage(
+  Uint8List bytes,
+  String mimeType,
+  Iterable<PendingImage> attachedImages,
+  String currentMessage,
+) {
+  final refusal = imageAttachmentRefusal(
+    name: 'Pasted image',
+    byteLength: bytes.length,
+    attachedBytes: _totalImageBytes(attachedImages),
+    attachedCount: attachedImages.length,
+  );
+  return AttachmentSelection(
+    images: refusal == null
+        ? [PendingImage(mimeType: mimeType, bytes: bytes)]
+        : const [],
+    messageText: currentMessage,
+    notices: refusal == null ? const [] : [refusal],
+  );
+}
+
+/// Named refusal for an image that would exceed the outgoing frame budget.
+String? imageAttachmentRefusal({
+  required String name,
+  required int byteLength,
+  int attachedBytes = 0,
+  int attachedCount = 0,
+}) {
+  if (attachedCount >= maxOutgoingImageCount) {
+    return '$name exceeds the $maxOutgoingImageCount image limit — skipped';
+  }
+  if (byteLength > maxOutgoingImageBytes) {
+    return '$name is too large (max 10 MB) — skipped';
+  }
+  if (attachedBytes + byteLength > maxOutgoingImageBytes) {
+    return '$name exceeds the 10 MB total image limit — skipped';
+  }
+  return null;
+}
+
 String _extensionOf(String name) =>
     name.contains('.') ? name.split('.').last.toLowerCase() : '';
 
@@ -143,3 +211,6 @@ String _imageMimeType(String extension) => switch (extension) {
   'webp' => 'image/webp',
   _ => 'image/jpeg',
 };
+
+int _totalImageBytes(Iterable<PendingImage> images) =>
+    images.fold(0, (total, image) => total + image.bytes.length);

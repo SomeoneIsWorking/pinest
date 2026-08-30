@@ -180,14 +180,10 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  void _onPastedImage(Uint8List bytes, String mimeType) {
-    if (!mounted) return;
-    setState(
-      () => _attachedImages.add(PendingImage(mimeType: mimeType, bytes: bytes)),
-    );
-    // No snackbar: the attachment strip appearing above the input IS the
-    // confirmation, and a snackbar here overlaps the text area.
-  }
+  void _onPastedImage(Uint8List bytes, String mimeType) =>
+      _applyAttachmentSelection(
+        preparePastedImage(bytes, mimeType, _attachedImages, _input.text),
+      );
 
   /// Attach files via the paperclip. Images become image attachments; small
   /// text files are inlined into the message as fenced blocks; anything else
@@ -195,9 +191,9 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _attachFiles() async {
     try {
       _applyAttachmentSelection(
-        prepareAttachments(
-          await pickAttachmentFiles(),
+        await selectAttachments(
           currentMessage: _input.text,
+          attachedImages: _attachedImages,
         ),
       );
     } on StateError catch (error) {
@@ -224,7 +220,11 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
     _applyAttachmentSelection(
-      prepareAttachments(files, currentMessage: _input.text),
+      prepareAttachments(
+        files,
+        currentMessage: _input.text,
+        attachedImages: _attachedImages,
+      ),
     );
   }
 

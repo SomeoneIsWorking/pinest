@@ -14,6 +14,7 @@ let AGENT_DIR;
 let REG_PATH;
 let registry;
 let events;
+const TEST_OWNER = "uid";
 
 function makeCallbacks() {
   return {
@@ -28,7 +29,7 @@ before(() => {
   TMP = makeTempDir("rc-resume-");
   AGENT_DIR = join(TMP, "agent");
   REG_PATH = join(TMP, "sessions.json");
-  registry = new SessionRegistry(REG_PATH).load();
+  registry = new SessionRegistry(REG_PATH).load().claimOwner(TEST_OWNER);
 });
 
 after(() => removeTempDir(TMP));
@@ -59,7 +60,7 @@ test("resume: spawn → despawn → 'restart' → resume restores history", asyn
   assert.ok(events.some((e) => e.kind === "remove" && e.id === "r1"), "live snapshot removed");
 
   // ── host restart: fresh registry + supervisor from the same disk state ──
-  const registry2 = new SessionRegistry(REG_PATH).load();
+  const registry2 = new SessionRegistry(REG_PATH).load().claimOwner(TEST_OWNER);
   assert.equal(registry2.get("r1").status, "closed", "closed row survives restart");
 
   const sup2 = new Supervisor("uid", makeCallbacks(), registry2, { agentDir: AGENT_DIR });
