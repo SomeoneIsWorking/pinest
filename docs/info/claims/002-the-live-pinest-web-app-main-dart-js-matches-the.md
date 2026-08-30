@@ -1,10 +1,11 @@
 ---
 id: C002
 kind: claim
-status: holds
+status: falsified
 created: 2026-08-30
-tags: 
+tags:
 depends: tools/verify_hosting.py
+falsified_on: 2026-08-30
 ---
 
 ## Claim
@@ -18,3 +19,9 @@ tools/verify_hosting.py passed against the public sites after deployment, includ
 ## What would falsify it
 
 The live bundle hash changes or either legacy redirect no longer returns the exact canonical 301.
+
+## FALSIFIED 2026-08-30
+
+The intentionally deployed hardened web bundle changed the public main.dart.js hash from abb6f8f5… to d44a974e…; both redirects still pass.
+
+> Anything that cited this claim as proof must be re-checked. Grep the repo for it.
