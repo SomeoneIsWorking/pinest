@@ -352,16 +352,20 @@ Gradle dependency and plugin artifacts are covered by a strict SHA-256
 verification manifest whose corrupted-checksum control fails before project
 configuration; artifacts move by immutable ID with digest checks; releases use
 unique `apk-<commit>` tags and the client downloads through GitHub's
-latest-release redirect (I-024, I-036). Release signing fails closed rather than falling back
-to the debug key. All four `ANDROID_KEYSTORE_*` secrets are scoped to the
-main-only `apk-release` environment. The stable package and certificate
-SHA-256 are recorded in the single authority `app/release-identity.json`, and
-CI runs `app/tools/verify_apk.py` against that identity before publication.
-GitHub Actions run
-[`33280431296`](https://github.com/SomeoneIsWorking/pinest/actions/runs/33280431296)
-published the stable-signed rolling release. The independently downloaded
-public `pinest.apk` verifies against `app/release-identity.json`, with artifact
-SHA-256 `04c1a7ec562ad36a82e0a9850620e93d02114c5a4b16562207098e3b625f89d6`.
+latest-release redirect (I-024, I-036). Release signing fails closed rather
+than falling back to the debug key. All four `ANDROID_KEYSTORE_*` secrets are
+scoped to the main-only `apk-release` environment. The stable package and
+certificate SHA-256 are recorded in the single authority
+`app/release-identity.json`, and CI runs `app/tools/verify_apk.py` against that
+identity before publication. GitHub Actions run
+[`33289350801`](https://github.com/SomeoneIsWorking/pinest/actions/runs/33289350801)
+published the immutable release
+`apk-7e498d4354b99fb5b067b091187b90896ffb75bb`. The independently downloaded
+public `pinest.apk` is byte-identical through the latest-release URL, verifies
+against `app/release-identity.json` and the GitHub attestation, and has artifact
+SHA-256 `8d142b1a48b05033bb9de86d4b028a11cd63be3923e271b48d18684c883f3e45`.
+Repository immutable releases are enabled, and this is the sole remaining APK
+release/tag after removal of both superseded mutable authorities.
 
 The application identity is now `com.barishamil.pinest` across Android,
 Linux, iOS and macOS (Apple test bundles use the derived `.RunnerTests`
