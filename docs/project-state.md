@@ -222,7 +222,7 @@ clones). Verified with `flutter analyze` (0 issues) and `flutter build web`,
 then deployed to the canonical `pinest.web.app` Hosting site. Public
 verification matched the served `main.dart.js` to the local release bundle at
 SHA-256
-`abb6f8f5157aff4983b977c43952ad1c3e10cf5160062a9e61fc8c37eb754a3f`.
+`d44a974e1d3fd87faf3d7e76e843293c7b7042764491963a3d203f83c1edb0b4`.
 The former `pinest-app.web.app` site returns an exact 301 to the canonical host
 for both `/` and a nested-path control. `pinest.web.app` is an authorized auth
 domain. The internal Firebase Auth helper remains
@@ -417,8 +417,15 @@ provider-specific credential-free HTTPS origin forwarding to loopback.
 Evidence: integrated server gate — 247 pass, 4 intentional skips; TypeScript
 typecheck and runtime npm audit clean. Focused Flutter tests cover the actual
 CSP inline-script hash, discovery downgrade/credential rejection, Firestore
-rule source, and the cumulative 10 MiB outgoing-image bound. Live Firestore and
-Hosting post-landing controls remain to be recorded.
+rule source, and the cumulative 10 MiB outgoing-image bound. After deployment,
+`tools/verify_hosting.py` matched the public bundle at SHA-256
+`d44a974e1d3fd87faf3d7e76e843293c7b7042764491963a3d203f83c1edb0b4`
+and verified exact root and nested-path legacy 301s. Live header probes returned
+the configured CSP, HSTS, `nosniff`, `DENY` framing, and no-cache JavaScript.
+`tools/verify_firestore_rules.py` used a refreshed owner token to accept the
+owner document (`200`) while refusing a foreign UID, collection enumeration,
+and a malformed owner write (`403` each); its credential negative controls
+also refuse group-readable and symlinked auth caches.
 
 Gap: secure URL syntax and owner-only Firestore writes reduce discovery
 poisoning, but do not cryptographically bind a rotating endpoint to a host
