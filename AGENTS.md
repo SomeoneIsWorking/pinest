@@ -57,16 +57,19 @@ client — that was the I-015 stale-site incident.
 
 The Android APK is the one artifact that DOES ship from CI
 (`.github/workflows/apk.yml`): every push to `main` touching `app/**` runs
-analyze + test + `flutter build apk --release` and republishes the rolling
-`apk-latest` GitHub release, which is what the web client's Settings →
-"Android app (APK)" button downloads (`app/lib/services/apk_release.dart`).
+analyze + test, produces an unsigned release without credentials, signs it in
+the protected `apk-release` environment, attests it, and publishes a unique
+per-commit release. The web client's Settings → "Android app (APK)" button uses
+GitHub's latest-release redirect (`app/lib/services/apk_release.dart`).
 Do not re-add an APK build to `deploy.sh` — two sources means one stale copy.
-Release signing is mandatory: CI fails closed unless all four
+Release signing is mandatory: CI fails closed unless all four environment-only
 `ANDROID_KEYSTORE_*` secrets exist, and `app/tools/verify_apk.py` refuses an APK
-whose package or signing certificate differs from the recorded release
-identity. The release certificate SHA-256 is
-`83:98:6D:18:59:DE:4C:E0:97:9A:E4:3C:9E:18:40:36:E4:9B:DE:3C:BC:A3:7E:F2:C8:EF:A9:3F:D7:51:A3:F5`
-(I-024). Pull requests build a debug APK only and never publish it.
+whose package or sole signing certificate differs from the recorded release
+identity. Actions are commit-pinned, Flutter and Gradle downloads are
+checksum-pinned, build jobs have no signing secrets, and only the final job has
+`contents:write`. `app/release-identity.json` is the single authority for the
+package and release certificate (I-024, I-036). Pull requests build a debug APK
+only and never publish it.
 
 ## Rules specific to this repo
 
@@ -83,6 +86,12 @@ identity. The release certificate SHA-256 is
   pi's own `SessionManager` API.
 - Firebase holds auth + discovery ONLY (uid → tunnel URL doc). Chat content never
   touches Firebase.
+- The security authority is `docs/security.md`. Never claim absolute security:
+  the owner account/devices, host OS, Firebase, and selected tunnel provider are
+  trust boundaries; application-level tunnel E2E remains I-038.
+- A registry is durably bound to its first authenticated owner UID. Owner
+  mismatch is bootstrap-fatal. `/pinest-auth` reauthenticates that same UID and
+  revokes live sockets; it is not an ownership-transfer command.
 - Two auth backends (`server/src/auth.ts`): HOSTED (default — our shared
   `pinest-app` project, user signs in via browser, zero setup) and ADMIN
   (optional service account key for self-hosters). Headless runs

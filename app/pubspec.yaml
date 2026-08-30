@@ -20,6 +20,7 @@ dependencies:
   file_selector: ^1.1.0
   web: ^1.1.1
 dev_dependencies:
+  crypto: ^3.0.7
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0

@@ -2,20 +2,17 @@
  * Tunnel providers — expose a local port to the public internet.
  *
  * Design goals:
- *  1. Work out of the box after `npm install` — cloudflared (vendored npm
- *     binary, no account needed for quick tunnels) is the default.
+ *  1. Use only tunnel executables the operator installed explicitly. Dependency
+ *     installation must never download and execute a floating native binary.
  *  2. Support binary-based providers (ngrok, tailscale) for users who want
  *     them. These are only selectable when `available()` returns true;
  *     otherwise the picker shows them grayed-out with an install hint.
  *  3. Never crash the process — every provider's start() rejects on failure.
  */
-import { existsSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { accessSync, constants as fsConstants, realpathSync } from "node:fs";
+import { delimiter, join, sep } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
-import { createRequire } from "node:module";
 import debug from "./log.ts";
-
-const require = createRequire(import.meta.url);
 
 export interface TunnelHandle {
   url: string | null;
@@ -32,30 +29,156 @@ export interface TunnelProvider {
   start: (opts: { port: number }) => Promise<TunnelHandle>;
 }
 
-/** True if `bin` runs on PATH (cheap: --version with ignored stdio). */
-function onPath(bin: string): boolean {
-  try { execFileSync(bin, ["--version"], { stdio: "ignore" }); return true; }
-  catch { return false; }
+function isNodeModulesPath(path: string): boolean {
+  return path.split(sep).some((part) => part.toLowerCase() === "node_modules");
 }
 
-// ── Provider: cloudflared (needs binary; vendored npm pkg or system) ───────
-function resolveCloudflaredBin(): string | null {
+/** Resolve an executable from PATH, refusing npm-installed wrappers even when
+ * npm prepends node_modules/.bin to PATH for scripts. Native tunnel binaries
+ * are an operator-installed system dependency, never a package side effect. */
+export function resolveSystemExecutable(
+  command: string,
+  options: {
+    path?: string;
+    platform?: NodeJS.Platform;
+    pathExt?: string;
+  } = {},
+): string | null {
+  const platform = options.platform ?? process.platform;
+  const pathValue = options.path ?? process.env.PATH ?? "";
+  const extensions = platform === "win32"
+    ? (options.pathExt ?? process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+      .split(";").filter(Boolean)
+    : [""];
+
+  for (const directory of pathValue.split(delimiter)) {
+    if (!directory) continue;
+    for (const extension of extensions) {
+      const candidate = join(directory, platform === "win32" ? command + extension : command);
+      try {
+        accessSync(candidate, fsConstants.X_OK);
+        const resolved = realpathSync(candidate);
+        if (!isNodeModulesPath(resolved)) return resolved;
+      } catch { /* absent, inaccessible, or dangling — try the next candidate */ }
+    }
+  }
+  return null;
+}
+
+/** Resolve and probe an explicitly installed executable. Callers must execute
+ * the returned real path, never resolve the bare command a second time. */
+export function resolveRunnableSystemExecutable(bin: string): string | null {
+  const resolved = resolveSystemExecutable(bin);
+  if (!resolved) return null;
   try {
-    const cloudflaredPkg = require.resolve("cloudflared/package.json");
-    const vendored = join(dirname(cloudflaredPkg), "bin", "cloudflared");
-    if (existsSync(vendored)) return vendored;
-  } catch { /* package not installed */ }
-  return onPath("cloudflared") ? "cloudflared" : null;
+    execFileSync(resolved, ["--version"], { stdio: "ignore" });
+    return resolved;
+  } catch {
+    return null;
+  }
+}
+
+export type TunnelEndpointProvider = "cloudflared" | "ngrok" | "tailscale";
+
+const PROVIDER_HOST_SUFFIXES: Record<TunnelEndpointProvider, readonly string[]> = {
+  cloudflared: [".trycloudflare.com"],
+  ngrok: [".ngrok-free.app", ".ngrok.app", ".ngrok.io"],
+  tailscale: [".ts.net"],
+};
+
+/** Validate the public endpoint before it crosses into Firebase discovery.
+ * Tunnel CLIs and their local APIs are untrusted process output. */
+export function validateTunnelEndpoint(
+  provider: TunnelEndpointProvider,
+  candidate: unknown,
+): string | null {
+  if (
+    typeof candidate !== "string"
+    || candidate.trim() !== candidate
+    || !candidate
+    || /\s/.test(candidate)
+  ) return null;
+
+  let url: URL;
+  try {
+    url = new URL(candidate);
+  } catch {
+    return null;
+  }
+
+  if (
+    url.protocol !== "https:"
+    || url.username !== ""
+    || url.password !== ""
+    || url.port !== ""
+    || url.pathname !== "/"
+    || url.search !== ""
+    || url.hash !== ""
+  ) return null;
+
+  const hostname = url.hostname.toLowerCase();
+  if (!isValidDnsHostname(hostname)) return null;
+  const allowed = PROVIDER_HOST_SUFFIXES[provider].some(
+    (suffix) => hostname.endsWith(suffix) && hostname.length > suffix.length,
+  );
+  return allowed ? url.origin : null;
+}
+
+function isValidDnsHostname(hostname: string): boolean {
+  if (hostname.length > 253) return false;
+  return hostname.split(".").every(
+    (label) => label.length > 0
+      && label.length <= 63
+      && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label),
+  );
+}
+
+export function firstValidTunnelEndpoint(
+  provider: TunnelEndpointProvider,
+  output: string,
+): string | null {
+  for (const match of output.matchAll(/https?:\/\/[^\s"'<>()[\]{}]+/gi)) {
+    const endpoint = validateTunnelEndpoint(provider, match[0]);
+    if (endpoint) return endpoint;
+  }
+  return null;
+}
+
+export function cloudflaredInstallHint(platform: NodeJS.Platform = process.platform): string {
+  if (platform === "darwin") return "brew install cloudflared";
+  if (platform === "win32") return "winget install --id Cloudflare.cloudflared";
+  return "Install Cloudflare's official package repository, then run sudo apt install cloudflared (Debian/Ubuntu) or sudo dnf install cloudflared (Fedora/RHEL): https://pkg.cloudflare.com/";
+}
+
+export function tailscaleInstallHint(platform: NodeJS.Platform = process.platform): string {
+  if (platform === "darwin") return "brew install tailscale";
+  if (platform === "win32") return "winget install --id Tailscale.Tailscale";
+  return "Configure Tailscale's official package repository, then run sudo apt install tailscale (Debian/Ubuntu) or sudo dnf install tailscale (Fedora/RHEL): https://tailscale.com/download";
+}
+
+export function cloudflaredArgs(port: number): string[] {
+  return ["tunnel", "--url", `http://127.0.0.1:${port}`];
+}
+
+export function ngrokArgs(port: number): string[] {
+  return ["http", `http://127.0.0.1:${port}`, "--log=stdout", "--log-format=logfmt"];
+}
+
+// ── Provider: cloudflared (explicitly installed system binary only) ────────
+function resolveCloudflaredBin(): string | null {
+  return resolveRunnableSystemExecutable("cloudflared");
 }
 
 const cloudflaredProvider: TunnelProvider = {
   name: "cloudflared",
   label: "cloudflared",
   available: () => resolveCloudflaredBin() !== null,
-  installHint: "npm install cloudflared   (or: sudo dnf install cloudflared)",
+  installHint: cloudflaredInstallHint(),
   start({ port }) {
     const bin = resolveCloudflaredBin();
-    if (!bin) throw new Error("cloudflared binary not found");
+    if (!bin) {
+      throw new Error(`cloudflared binary not found. Install it first: ${cloudflaredInstallHint()}`);
+    }
     return new Promise<TunnelHandle>((resolve, reject) => {
       let settled = false;
       let stopped = false;
@@ -63,7 +186,7 @@ const cloudflaredProvider: TunnelProvider = {
       const done = <T,>(fn: (v: T) => void) => (v: T): void => {
         if (!settled) { settled = true; clearTimeout(timer); fn(v); }
       };
-      const proc = spawn(bin, ["tunnel", "--url", `http://localhost:${port}`], {
+      const proc = spawn(bin, cloudflaredArgs(port), {
         stdio: ["ignore", "pipe", "pipe"],
       });
       timer = setTimeout(
@@ -72,11 +195,11 @@ const cloudflaredProvider: TunnelProvider = {
       // event on the child, crashing the process (the original bug).
       proc.on("error", done((err) => reject(new Error(`cloudflared spawn failed: ${err.message}`))));
       const onLine = (line: string): void => {
-        const m = line.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
-        if (m) {
-          debug(`[remote-code] cloudflared tunnel: ${m[0]}`);
+        const endpoint = firstValidTunnelEndpoint("cloudflared", line);
+        if (endpoint) {
+          debug(`[remote-code] cloudflared tunnel: ${endpoint}`);
           const handle: TunnelHandle = {
-            url: m[0],
+            url: endpoint,
             stop: () => { stopped = true; try { proc.kill(); } catch { /* */ } },
           };
           // Quick tunnels die eventually — surface it so the server can
@@ -107,12 +230,31 @@ export async function readNgrokApiUrl(
     const data = await res.json() as {
       tunnels?: Array<{ public_url?: unknown; config?: { addr?: unknown } }>;
     };
-    const expected = "http://localhost:" + port;
-    const tunnel = data.tunnels?.find((candidate) =>
-      candidate.config?.addr === expected && typeof candidate.public_url === "string");
-    return typeof tunnel?.public_url === "string" ? tunnel.public_url : null;
+    for (const tunnel of data.tunnels ?? []) {
+      if (!isLoopbackTarget(tunnel.config?.addr, port)) continue;
+      const endpoint = validateTunnelEndpoint("ngrok", tunnel.public_url);
+      if (endpoint) return endpoint;
+    }
+    return null;
   } catch {
     return null;
+  }
+}
+
+function isLoopbackTarget(candidate: unknown, port: number): boolean {
+  if (typeof candidate !== "string") return false;
+  try {
+    const target = new URL(candidate);
+    return target.protocol === "http:"
+      && ["localhost", "127.0.0.1", "[::1]"].includes(target.hostname.toLowerCase())
+      && target.port === String(port)
+      && target.username === ""
+      && target.password === ""
+      && target.pathname === "/"
+      && target.search === ""
+      && target.hash === "";
+  } catch {
+    return false;
   }
 }
 
@@ -120,9 +262,11 @@ export async function readNgrokApiUrl(
 const ngrokProvider: TunnelProvider = {
   name: "ngrok",
   label: "ngrok",
-  available: () => onPath("ngrok"),
+  available: () => resolveRunnableSystemExecutable("ngrok") !== null,
   installHint: "sudo snap install ngrok   (or download from ngrok.com; needs authtoken)",
   start({ port }) {
+    const bin = resolveRunnableSystemExecutable("ngrok");
+    if (!bin) throw new Error("ngrok binary not found or not runnable");
     return new Promise<TunnelHandle>((resolve, reject) => {
       let settled = false;
       let timer: NodeJS.Timeout | undefined;
@@ -136,9 +280,7 @@ const ngrokProvider: TunnelProvider = {
         }
       };
       let stopped = false;
-      const proc = spawn("ngrok", [
-        "http", String(port), "--log=stdout", "--log-format=logfmt",
-      ], { stdio: ["ignore", "pipe", "pipe"] });
+      const proc = spawn(bin, ngrokArgs(port), { stdio: ["ignore", "pipe", "pipe"] });
       const fail = (error: Error): void => {
         try { proc.kill(); } catch { /* already exited */ }
         done(reject)(error as unknown as void);
@@ -158,10 +300,8 @@ const ngrokProvider: TunnelProvider = {
         done(resolve)(handle);
       };
       const onLine = (line: string): void => {
-        // ngrok logfmt: ... url="https://xxxx.ngrok-free.app"
-        const m = line.match(/url="(https:\/\/[^"]+ngrok[^"]*)"/i)
-          || line.match(/(https:\/\/[a-z0-9-]+\.ngrok(?:-free)?\.app)/i);
-        if (!settled && m?.[1]) acceptUrl(m[1]);
+        const endpoint = firstValidTunnelEndpoint("ngrok", line);
+        if (!settled && endpoint) acceptUrl(endpoint);
       };
       proc.stdout!.on("data", (d: Buffer) => d.toString().split("\n").forEach(onLine));
       proc.stderr!.on("data", (d: Buffer) => d.toString().split("\n").forEach(onLine));
@@ -180,28 +320,34 @@ const ngrokProvider: TunnelProvider = {
 const tailscaleProvider: TunnelProvider = {
   name: "tailscale",
   label: "tailscale",
-  available: () => onPath("tailscale"),
-  installHint: "sudo dnf install tailscale   (or: curl -fsSL https://tailscale.com/install.sh | sh)",
+  available: () => resolveRunnableSystemExecutable("tailscale") !== null,
+  installHint: tailscaleInstallHint(),
   async start({ port }) {
+    const bin = resolveRunnableSystemExecutable("tailscale");
+    if (!bin) throw new Error("tailscale binary not found or not runnable");
     // `tailscale funnel <port>` exposes the port publicly via a *.ts.net URL.
     // Requires the node to be on a tailnet with funnel enabled.
     try {
-      execFileSync("tailscale", ["funnel", "--bg", String(port)], { stdio: "pipe" });
+      execFileSync(bin, ["funnel", "--bg", String(port)], { stdio: "pipe" });
     } catch (e) {
       throw new Error(`tailscale funnel failed: ${(e as Error).message} (enable funnel: https://tailscale.com/kb/1223/funnel)`);
     }
     let url: string | null = null;
     try {
-      const out = execFileSync("tailscale", ["status", "--json"], { encoding: "utf-8" });
-      const s = JSON.parse(out);
-      const hn: unknown = s?.Self?.HostName;
-      url = typeof hn === "string" && hn ? `https://${hn.replace(/[^a-z0-9.-]/gi, "")}` : null;
+      const out = execFileSync(bin, ["status", "--json"], { encoding: "utf-8" });
+      const status = JSON.parse(out);
+      const dnsName: unknown = status?.Self?.DNSName;
+      const hostname = typeof dnsName === "string" ? dnsName.replace(/\.$/, "") : "";
+      url = validateTunnelEndpoint("tailscale", `https://${hostname}`);
     } catch { /* status failed — url stays null */ }
-    if (!url) throw new Error("could not determine tailscale funnel URL");
+    if (!url) {
+      try { execFileSync(bin, ["funnel", "reset"], { stdio: "ignore" }); } catch { /* */ }
+      throw new Error("could not determine tailscale funnel URL");
+    }
     debug(`[remote-code] tailscale funnel: ${url}`);
     return {
       url,
-      stop: () => { try { execFileSync("tailscale", ["funnel", "reset"], { stdio: "ignore" }); } catch { /* */ } },
+      stop: () => { try { execFileSync(bin, ["funnel", "reset"], { stdio: "ignore" }); } catch { /* */ } },
     };
   },
 };

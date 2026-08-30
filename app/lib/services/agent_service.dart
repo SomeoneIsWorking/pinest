@@ -32,6 +32,43 @@ List<Map<String, dynamic>> mergeHistoryPage({
   return [...existing.take(keep), ...decoded];
 }
 
+/// Convert a discovery document URL into the only socket endpoint we trust.
+///
+/// Discovery is data controlled outside the app process. Only a credential-
+/// free HTTPS URL without query or fragment data may receive a Firebase bearer
+/// token; the socket always uses WSS and never performs an HTTP downgrade.
+Uri? secureDiscoveryWebSocketUri(Object? rawUrl) {
+  if (rawUrl is! String ||
+      rawUrl.trim() != rawUrl ||
+      rawUrl.contains('?') ||
+      rawUrl.contains('#') ||
+      rawUrl.contains(r'\')) {
+    return null;
+  }
+  final authorityStart = rawUrl.indexOf('://');
+  if (authorityStart < 0) return null;
+  final pathStart = rawUrl.indexOf('/', authorityStart + 3);
+  final rawAuthority = rawUrl.substring(
+    authorityStart + 3,
+    pathStart < 0 ? rawUrl.length : pathStart,
+  );
+  if (rawAuthority.isEmpty ||
+      rawAuthority.contains('@') ||
+      rawAuthority.contains('%')) {
+    return null;
+  }
+  final uri = Uri.tryParse(rawUrl);
+  if (uri == null ||
+      uri.scheme.toLowerCase() != 'https' ||
+      !uri.hasAuthority ||
+      uri.host.isEmpty ||
+      uri.userInfo.isNotEmpty ||
+      uri.authority.contains('@')) {
+    return null;
+  }
+  return uri.replace(scheme: 'wss');
+}
+
 /// AgentService — connects to the PiNest server via WebSocket.
 ///
 /// Firebase = auth + URL discovery ONLY.
@@ -149,7 +186,7 @@ class AgentService extends ChangeNotifier {
     _online = false;
     _requests.disconnect();
 
-    if (forgetEndpoint) _lastUrl = null;
+    if (forgetEndpoint) _lastEndpoint = null;
     if (clearClientState) {
       _hostname = '';
       _activeSessionId = null;
@@ -167,7 +204,7 @@ class AgentService extends ChangeNotifier {
     if (reconnect) _scheduleReconnect();
   }
 
-  String? _lastUrl;
+  Uri? _lastEndpoint;
   int _reconnectDelay = 2;
   Timer? _reconnectTimer;
   bool _connected = false;
@@ -196,16 +233,23 @@ class AgentService extends ChangeNotifier {
             final data = doc.data()!;
             final ts = (data['ts'] as num?)?.toInt() ?? 0;
             final now = DateTime.now().millisecondsSinceEpoch;
-            final fresh = (now - ts) < 60000;
-            final url = data['url'] as String?;
+            final age = now - ts;
+            final fresh = age >= -30000 && age < 60000;
+            final endpoint = secureDiscoveryWebSocketUri(data['url']);
 
-            if (!fresh || url == null) {
+            if (!fresh || data['url'] == null) {
               _transitionToDisconnected(forgetEndpoint: true);
               return;
             }
+            if (endpoint == null) {
+              _transitionToDisconnected(forgetEndpoint: true, notify: false);
+              _error = 'Rejected insecure discovery URL';
+              notifyListeners();
+              return;
+            }
 
-            _lastUrl = url;
-            await _dial(url);
+            _lastEndpoint = endpoint;
+            await _dial(endpoint);
           },
           onError: (e) {
             _error = e.toString();
@@ -216,10 +260,10 @@ class AgentService extends ChangeNotifier {
 
   /// Dial the tunnel URL. Safe to call repeatedly — skips if already
   /// connected or connecting to the same URL.
-  Future<void> _dial(String url) async {
-    if (_ws?.url == url) return;
+  Future<void> _dial(Uri endpoint) async {
+    if (_ws?.endpoint == endpoint) return;
     _transitionToDisconnected();
-    final socket = WebSocketConnection(url);
+    final socket = WebSocketConnection(endpoint);
     _ws = socket;
     await socket.connect(
       token: _token,
@@ -247,9 +291,9 @@ class AgentService extends ChangeNotifier {
     _reconnectTimer = Timer(Duration(seconds: _reconnectDelay), () {
       _reconnectTimer = null;
       _reconnectDelay = (_reconnectDelay * 2).clamp(2, 30);
-      final url = _lastUrl;
-      if (_ws == null && url != null && uid != null && _boundUid == uid) {
-        _dial(url);
+      final endpoint = _lastEndpoint;
+      if (_ws == null && endpoint != null && uid != null && _boundUid == uid) {
+        _dial(endpoint);
       }
     });
   }
@@ -543,7 +587,7 @@ class AgentService extends ChangeNotifier {
 
 /// Manages a single WebSocket connection to the PiNest server.
 class WebSocketConnection {
-  final String url;
+  final Uri endpoint;
   WebSocketChannel? _channel;
   StreamSubscription? _sub;
   Timer? _heartbeat;
@@ -551,7 +595,16 @@ class WebSocketConnection {
   bool _closedByUs = false;
   DateTime _lastInbound = DateTime.now();
 
-  WebSocketConnection(this.url);
+  WebSocketConnection(this.endpoint) {
+    if (endpoint.scheme != 'wss' ||
+        !endpoint.hasAuthority ||
+        endpoint.host.isEmpty ||
+        endpoint.userInfo.isNotEmpty ||
+        endpoint.hasQuery ||
+        endpoint.hasFragment) {
+      throw ArgumentError.value(endpoint, 'endpoint', 'must be a safe WSS URI');
+    }
+  }
 
   Future<void> connect({
     required Future<String> Function() token,
@@ -560,10 +613,7 @@ class WebSocketConnection {
     required void Function() onClose,
   }) async {
     try {
-      final wsUrl = url
-          .replaceFirst('https://', 'wss://')
-          .replaceFirst('http://', 'ws://');
-      _channel = WebSocketChannel.connect(Uri.parse(wsUrl));
+      _channel = WebSocketChannel.connect(endpoint);
       // The handshake completes asynchronously — _open must only become true
       // once the socket is REAL. Setting it earlier silently dropped sends
       // into a not-yet-open (or already-failed) socket.

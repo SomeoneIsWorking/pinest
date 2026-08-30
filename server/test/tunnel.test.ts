@@ -3,9 +3,31 @@
 // available() flags on real providers (no connections opened).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { delimiter, join } from "node:path";
 import {
-  PROVIDERS, PROVIDER_NAMES, DEFAULT_PROVIDER, getProvider, readNgrokApiUrl, startTunnel,
+  PROVIDERS, PROVIDER_NAMES, DEFAULT_PROVIDER, cloudflaredArgs, cloudflaredInstallHint,
+  firstValidTunnelEndpoint, getProvider, ngrokArgs, readNgrokApiUrl,
+  resolveRunnableSystemExecutable, resolveSystemExecutable, startTunnel,
+  tailscaleInstallHint, validateTunnelEndpoint,
 } from "../src/tunnel.ts";
+import { makeTempDir, removeTempDir } from "../support/tmp.ts";
+
+function writeExecutable(path: string, source: string): void {
+  writeFileSync(path, source);
+  chmodSync(path, 0o755);
+}
+
+async function withPrependedPath<T>(directories: string[], run: () => Promise<T>): Promise<T> {
+  const originalPath = process.env.PATH;
+  process.env.PATH = [...directories, originalPath ?? ""].filter(Boolean).join(delimiter);
+  try {
+    return await run();
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+  }
+}
 
 // ── Registry shape ─────────────────────────────────────────────────────────
 test("PROVIDERS: is a non-empty array of provider objects", () => {
@@ -26,8 +48,214 @@ test("PROVIDER_NAMES: matches the names in PROVIDERS", () => {
   }
 });
 
-test("DEFAULT_PROVIDER: is cloudflared (vendored binary, no account)", () => {
+test("DEFAULT_PROVIDER: is cloudflared (operator-installed binary, no account)", () => {
   assert.equal(DEFAULT_PROVIDER, "cloudflared");
+});
+
+test("root manifest has no cloudflared downloader dependency", () => {
+  const manifest = JSON.parse(readFileSync(join(import.meta.dirname, "..", "..", "package.json"), "utf-8"));
+  const lock = JSON.parse(readFileSync(join(import.meta.dirname, "..", "..", "package-lock.json"), "utf-8"));
+  assert.equal(manifest.dependencies?.cloudflared, undefined);
+  assert.equal(manifest.optionalDependencies?.cloudflared, undefined);
+  assert.equal(manifest.devDependencies?.cloudflared, undefined);
+  assert.equal(lock.packages?.["node_modules/cloudflared"], undefined);
+});
+
+test("cloudflared install guidance is actionable on supported platforms", () => {
+  assert.equal(cloudflaredInstallHint("darwin"), "brew install cloudflared");
+  assert.match(cloudflaredInstallHint("linux"), /sudo apt install cloudflared/);
+  assert.match(cloudflaredInstallHint("linux"), /sudo dnf install cloudflared/);
+  assert.match(cloudflaredInstallHint("win32"), /winget install --id Cloudflare\.cloudflared/);
+  assert.doesNotMatch(cloudflaredInstallHint("linux"), /npm/);
+});
+
+test("tailscale install guidance uses explicit package-manager paths", () => {
+  assert.equal(tailscaleInstallHint("darwin"), "brew install tailscale");
+  assert.match(tailscaleInstallHint("linux"), /sudo apt install tailscale/);
+  assert.match(tailscaleInstallHint("linux"), /sudo dnf install tailscale/);
+  assert.match(tailscaleInstallHint("win32"), /winget install --id Tailscale[.]Tailscale/);
+  assert.doesNotMatch(tailscaleInstallHint("linux"), /curl|[|]/);
+});
+
+test("cloudflared forwards to the loopback WebSocket origin", () => {
+  assert.deepEqual(
+    cloudflaredArgs(4321),
+    ["tunnel", "--url", "http://127.0.0.1:4321"],
+  );
+});
+
+test("ngrok forwards to the loopback WebSocket origin", () => {
+  assert.deepEqual(
+    ngrokArgs(4321),
+    ["http", "http://127.0.0.1:4321", "--log=stdout", "--log-format=logfmt"],
+  );
+});
+
+test("resolveSystemExecutable skips node_modules wrappers", () => {
+  const root = makeTempDir("tunnel-path-");
+  try {
+    const packaged = join(root, "node_modules", ".bin");
+    const system = join(root, "system-bin");
+    const packagedCommand = join(packaged, "cloudflared");
+    const systemCommand = join(system, "cloudflared");
+    mkdirSync(packaged, { recursive: true });
+    mkdirSync(system, { recursive: true });
+    writeFileSync(packagedCommand, "#!/bin/sh\nexit 0\n");
+    writeFileSync(systemCommand, "#!/bin/sh\nexit 0\n");
+    chmodSync(packagedCommand, 0o755);
+    chmodSync(systemCommand, 0o755);
+
+    assert.equal(
+      resolveSystemExecutable("cloudflared", {
+        path: [packaged, system].join(delimiter),
+        platform: "linux",
+      }),
+      systemCommand,
+    );
+    assert.equal(
+      resolveSystemExecutable("cloudflared", {
+        path: packaged,
+        platform: "linux",
+      }),
+      null,
+    );
+  } finally {
+    removeTempDir(root);
+  }
+});
+
+test("tunnel endpoint validator accepts only each provider's credential-free HTTPS origin", () => {
+  assert.equal(
+    validateTunnelEndpoint("cloudflared", "https://random-words.trycloudflare.com"),
+    "https://random-words.trycloudflare.com",
+  );
+  assert.equal(
+    validateTunnelEndpoint("ngrok", "https://assigned-name.ngrok-free.app"),
+    "https://assigned-name.ngrok-free.app",
+  );
+  assert.equal(
+    validateTunnelEndpoint("ngrok", "https://reserved.ngrok.app"),
+    "https://reserved.ngrok.app",
+  );
+  assert.equal(
+    validateTunnelEndpoint("tailscale", "https://device.tailnet-name.ts.net"),
+    "https://device.tailnet-name.ts.net",
+  );
+
+  const rejected: Array<[Parameters<typeof validateTunnelEndpoint>[0], unknown]> = [
+    ["cloudflared", "http://random-words.trycloudflare.com"],
+    ["cloudflared", "https://user:secret@random-words.trycloudflare.com"],
+    ["cloudflared", "https://random-words.trycloudflare.com:8443"],
+    ["cloudflared", "https://random-words.trycloudflare.com/session"],
+    ["cloudflared", "https://random-words.trycloudflare.com?token=secret"],
+    ["cloudflared", "https://random-words.trycloudflare.com#fragment"],
+    ["cloudflared", "https://random-words.trycloudflare.com.attacker.example"],
+    ["cloudflared", "https://bad_label.trycloudflare.com"],
+    ["cloudflared", "https://double..trycloudflare.com"],
+    ["cloudflared", "https://random-words.trycloudflare.com\t/"],
+    ["cloudflared", "https://trycloudflare.com"],
+    ["ngrok", "https://localhost"],
+    ["ngrok", "https://127.0.0.1"],
+    ["ngrok", "https://[::1]"],
+    ["ngrok", "https://assigned-name.ngrok-free.app.attacker.example"],
+    ["tailscale", "https://device.tailnet-name.ts.net.attacker.example"],
+    ["tailscale", "https://ts.net"],
+    ["tailscale", "not a URL"],
+    ["tailscale", null],
+  ];
+  for (const [provider, candidate] of rejected) {
+    assert.equal(validateTunnelEndpoint(provider, candidate), null, String(candidate));
+  }
+});
+
+test("provider output parser ignores malicious URLs and selects a valid endpoint", () => {
+  assert.equal(
+    firstValidTunnelEndpoint(
+      "cloudflared",
+      "ignore https://localhost and https://valid.trycloudflare.com.attacker.example then https://valid.trycloudflare.com",
+    ),
+    "https://valid.trycloudflare.com",
+  );
+  assert.equal(
+    firstValidTunnelEndpoint("ngrok", "url=\"https://user:secret@assigned.ngrok-free.app\""),
+    null,
+  );
+});
+
+test("ngrok and tailscale execute the validated system realpath", {
+  skip: process.platform === "win32",
+}, async () => {
+  const root = makeTempDir("tunnel-exec-");
+  try {
+    const packaged = join(root, "node_modules", ".bin");
+    const system = join(root, "system-bin");
+    mkdirSync(packaged, { recursive: true });
+    mkdirSync(system, { recursive: true });
+
+    writeExecutable(join(packaged, "ngrok"), [
+      "#!/bin/sh",
+      "if [ \"$1\" = \"--version\" ]; then exit 0; fi",
+      "printf '%s\\n' 'url=\"https://wrapper.ngrok-free.app\"'",
+    ].join("\n"));
+    writeExecutable(join(system, "ngrok"), [
+      "#!/bin/sh",
+      "if [ \"$1\" = \"--version\" ]; then exit 0; fi",
+      "printf '%s\\n' 'url=\"https://system.ngrok-free.app\"'",
+      "sleep 1",
+    ].join("\n"));
+    writeExecutable(join(packaged, "tailscale"), [
+      "#!/bin/sh",
+      "if [ \"$1\" = \"--version\" ]; then exit 0; fi",
+      "if [ \"$1\" = \"status\" ]; then printf '%s\\n' '{\"Self\":{\"DNSName\":\"wrapper.tailnet.ts.net.\"}}'; fi",
+    ].join("\n"));
+    writeExecutable(join(system, "tailscale"), [
+      "#!/bin/sh",
+      "if [ \"$1\" = \"--version\" ]; then exit 0; fi",
+      "if [ \"$1\" = \"status\" ]; then printf '%s\\n' '{\"Self\":{\"HostName\":\"wrong-short-name\",\"DNSName\":\"system.tailnet.ts.net.\"}}'; fi",
+    ].join("\n"));
+
+    await withPrependedPath([packaged, system], async () => {
+      assert.equal(resolveRunnableSystemExecutable("ngrok"), join(system, "ngrok"));
+      assert.equal(resolveRunnableSystemExecutable("tailscale"), join(system, "tailscale"));
+
+      const ngrok = getProvider("ngrok");
+      assert.ok(ngrok);
+      const ngrokHandle = await ngrok.start({ port: 4321 });
+      assert.equal(ngrokHandle.url, "https://system.ngrok-free.app");
+      ngrokHandle.stop();
+
+      const tailscale = getProvider("tailscale");
+      assert.ok(tailscale);
+      const tailscaleHandle = await tailscale.start({ port: 4321 });
+      assert.equal(tailscaleHandle.url, "https://system.tailnet.ts.net");
+      tailscaleHandle.stop();
+    });
+  } finally {
+    removeTempDir(root);
+  }
+});
+
+test("tailscale rejects HostName when public DNSName is absent", {
+  skip: process.platform === "win32",
+}, async () => {
+  const root = makeTempDir("tailscale-hostname-");
+  try {
+    writeExecutable(join(root, "tailscale"), [
+      "#!/bin/sh",
+      "if [ \"$1\" = \"--version\" ]; then exit 0; fi",
+      "if [ \"$1\" = \"status\" ]; then printf '%s\\n' '{\"Self\":{\"HostName\":\"not-a-public-dns-name\"}}'; fi",
+    ].join("\n"));
+    await withPrependedPath([root], async () => {
+      const tailscale = getProvider("tailscale");
+      assert.ok(tailscale);
+      await assert.rejects(
+        () => tailscale.start({ port: 4321 }),
+        /could not determine tailscale funnel URL/,
+      );
+    });
+  } finally {
+    removeTempDir(root);
+  }
 });
 
 test("every provider declares an installHint string (may be empty for off)", () => {
@@ -61,13 +289,29 @@ test("readNgrokApiUrl: selects the tunnel forwarding the requested port", async 
     async json() {
       return {
         tunnels: [
-          { public_url: "https://wrong.ngrok-free.dev", config: { addr: "http://localhost:1234" } },
-          { public_url: "https://right.ngrok-free.dev", config: { addr: "http://localhost:4321" } },
+          { public_url: "https://wrong.ngrok-free.app", config: { addr: "http://localhost:1234" } },
+          { public_url: "https://right.ngrok-free.app.attacker.example", config: { addr: "http://localhost:4321" } },
+          { public_url: "https://right.ngrok-free.app", config: { addr: "http://127.0.0.1:4321" } },
         ],
       };
     },
   })) as typeof fetch;
-  assert.equal(await readNgrokApiUrl(4321, fetchImpl), "https://right.ngrok-free.dev");
+  assert.equal(await readNgrokApiUrl(4321, fetchImpl), "https://right.ngrok-free.app");
+});
+
+test("readNgrokApiUrl: rejects a malicious endpoint for the requested port", async () => {
+  const fetchImpl = (async () => ({
+    ok: true,
+    async json() {
+      return {
+        tunnels: [{
+          public_url: "https://right.ngrok-free.app.attacker.example",
+          config: { addr: "http://localhost:4321" },
+        }],
+      };
+    },
+  })) as typeof fetch;
+  assert.equal(await readNgrokApiUrl(4321, fetchImpl), null);
 });
 
 test("readNgrokApiUrl: returns null when the API has no matching tunnel", async () => {

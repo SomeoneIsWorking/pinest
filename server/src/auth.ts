@@ -17,40 +17,50 @@ import debug from "./log.ts";
  * touches Firebase (it flows over the WS tunnel).
  */
 
-import { createServer } from "node:http";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { homedir } from "node:os";
-import { execSync, spawn } from "node:child_process";
+import { execSync } from "node:child_process";
+import {
+  clearCachedAuth,
+  readCachedAuth,
+  writeCachedAuth,
+} from "./auth-cache.ts";
+import {
+  browserLogin,
+  type BrowserLoginOptions,
+  type LoginIdentity,
+  type VerifiedLogin,
+} from "./browser-login.ts";
 
 const AGENT_DIR = join(homedir(), ".pi", "agent");
 const RC_DIR = join(AGENT_DIR, "remote-code");
-const AUTH_PATH = process.env.RC_AUTH_PATH
-  || join(RC_DIR, "auth.json");
-// An explicit path is authoritative, including when it is deliberately absent
-// to select hosted auth. Falling through to a machine-local default would make
-// tests and headless callers depend on unrelated host state.
-const SERVICE_ACCOUNT_PATHS = process.env.RC_SERVICE_ACCOUNT_PATH
-  ? [process.env.RC_SERVICE_ACCOUNT_PATH]
-  : [join(RC_DIR, "serviceAccountKey.json")];
-
-const LOGIN_HTML = readFileSync(join(import.meta.dirname, "login.html"), "utf-8");
+const DEFAULT_SERVICE_ACCOUNT_PATH = join(RC_DIR, "serviceAccountKey.json");
 
 export interface ServiceAccount {
   project_id: string;
   [key: string]: unknown;
 }
 
-export interface Identity {
-  uid: string;
-  email: string;
+export type Identity = LoginIdentity;
+
+export interface AdminUserRecord extends Identity {
+  disabled?: boolean;
+  emailVerified?: boolean;
+  providerData?: Array<{ providerId?: string }>;
+}
+
+export interface AdminDecodedToken extends Identity {
+  exp?: number;
+  email_verified?: boolean;
+  firebase?: { sign_in_provider?: string };
 }
 
 /** Minimal surface of firebase-admin auth we depend on (easily stubbed). */
 export interface AdminAuth {
-  getUser(uid: string): Promise<Identity>;
-  getUserByEmail(email: string): Promise<Identity>;
-  verifyIdToken(token: string): Promise<Identity>;
+  getUser(uid: string): Promise<AdminUserRecord>;
+  getUserByEmail(email: string): Promise<AdminUserRecord>;
+  verifyIdToken(token: string, checkRevoked?: boolean): Promise<AdminDecodedToken>;
 }
 
 export interface PresenceDoc {
@@ -75,7 +85,7 @@ export interface FirebaseAuth {
   /** Publish the presence/discovery doc: users/{uid}. */
   publishPresence(uid: string, doc: PresenceDoc): Promise<void>;
   /** Force a fresh browser sign-in (the /pinest-auth command). */
-  forceReLogin(): Promise<Identity>;
+  forceReLogin(expectedUid?: string): Promise<Identity>;
   /** Human name for status lines ("hosted" vs "admin:<project>"). */
   readonly mode: string;
 }
@@ -95,16 +105,27 @@ const HOSTED_DEFAULTS = {
 };
 
 export function readServiceAccount(): ServiceAccount {
-  const found = SERVICE_ACCOUNT_PATHS.find((p) => existsSync(p));
+  const { paths, explicit } = serviceAccountPaths();
+  const found = paths.find((p) => existsSync(p));
   if (!found) {
     throw new Error(
-      `serviceAccountKey not found — looked in:\n  ${SERVICE_ACCOUNT_PATHS.join("\n  ")}`);
+      `${explicit ? "explicit " : ""}serviceAccountKey not found — looked in:\n  ${paths.join("\n  ")}`);
   }
   return JSON.parse(readFileSync(found, "utf-8"));
 }
 
 export function hasServiceAccount(): boolean {
-  return SERVICE_ACCOUNT_PATHS.some((p) => existsSync(p));
+  const { paths, explicit } = serviceAccountPaths();
+  const found = paths.some((p) => existsSync(p));
+  if (explicit && !found) readServiceAccount();
+  return found;
+}
+
+function serviceAccountPaths(): { paths: string[]; explicit: boolean } {
+  const explicitPath = process.env.RC_SERVICE_ACCOUNT_PATH;
+  return explicitPath === undefined
+    ? { paths: [DEFAULT_SERVICE_ACCOUNT_PATH], explicit: false }
+    : { paths: [explicitPath], explicit: true };
 }
 
 export function firebaseWebConfig(): WebConfig {
@@ -121,61 +142,32 @@ function webProjectId(): string {
   return process.env.RC_FIREBASE_PROJECT || HOSTED_DEFAULTS.projectId;
 }
 
-// ── Cached identity + refresh token ─────────────────────────────────────────
-interface CachedAuth extends Identity {
-  refreshToken?: string;
-  ts?: number;
-}
-
-function readCachedAuth(): CachedAuth | null {
-  for (const p of [AUTH_PATH]) {
-    if (!existsSync(p)) continue;
-    try {
-      const cached = JSON.parse(readFileSync(p, "utf-8"));
-      if (cached?.uid || cached?.email) return cached;
-    } catch { /* corrupt cache — fall through */ }
-  }
-  return null;
-}
-
-function writeCachedAuth(auth: CachedAuth): void {
-  mkdirSync(dirname(AUTH_PATH), { recursive: true });
-  writeFileSync(AUTH_PATH, JSON.stringify(auth, null, 2));
-}
-
-function clearCachedAuth(): void {
-  for (const p of [AUTH_PATH]) {
-    try { unlinkSync(p); } catch { /* not cached — fine */ }
-  }
-}
-
-/** Extract the `exp` claim from a JWT id token (no signature check — Google just issued it). */
-function tokenExpiry(idToken: string): number {
+/** Read claims only after Firebase has accepted the token. */
+function verifiedTokenClaims(idToken: string): {
+  expiresAt: number;
+  authenticatedAt: number;
+  emailVerified: boolean;
+  provider: string;
+} | null {
   try {
     const part = idToken.split(".")[1];
     if (!part) throw new Error("not a JWT");
     const payload = JSON.parse(Buffer.from(part, "base64url").toString("utf-8"));
-    return typeof payload.exp === "number" ? payload.exp * 1000 : Date.now() + 55 * 60_000;
+    if (typeof payload.exp !== "number"
+      || !Number.isFinite(payload.exp)
+      || typeof payload.auth_time !== "number"
+      || !Number.isFinite(payload.auth_time)
+      || payload.auth_time < 0
+      || payload.auth_time > Math.floor(Date.now() / 1000)) return null;
+    return {
+      expiresAt: payload.exp * 1000,
+      authenticatedAt: payload.auth_time,
+      emailVerified: payload.email_verified === true,
+      provider: payload.firebase?.sign_in_provider ?? "",
+    };
   } catch {
-    return Date.now() + 55 * 60_000;
+    return null;
   }
-}
-
-function openBrowser(url: string): void {
-  // CI/agent guard: automated runs must never open windows. Tests and
-  // headless hosts set RC_NO_BROWSER=1 (see test/auth.test.ts assertions).
-  if (process.env.RC_NO_BROWSER) {
-    throw new Error(`RC_NO_BROWSER is set — refused to open ${url}`);
-  }
-  const cmds: Record<string, [string, string[]]> = {
-    darwin: ["open", [url]],
-    linux: ["xdg-open", [url]],
-    win32: ["cmd", ["/c", "start", "", url]],
-  };
-  const [bin, args] = cmds[process.platform] ?? cmds.linux!;
-  try {
-    spawn(bin, args, { stdio: "ignore", detached: true }).unref();
-  } catch { /* user can open manually */ }
 }
 
 function gcloudBin(): string {
@@ -200,6 +192,7 @@ const NOT_SIGNED_IN =
 export interface RestDeps {
   /** Injectable for tests. Defaults to global fetch. */
   fetchImpl?: typeof fetch;
+  browserLoginOptions?: BrowserLoginOptions;
 }
 
 async function identityToolkitLookup(apiKey: string, idToken: string, fetchImpl: typeof fetch): Promise<Identity | null> {
@@ -211,8 +204,28 @@ async function identityToolkitLookup(apiKey: string, idToken: string, fetchImpl:
   if (!res.ok) return null; // invalid/expired token — a NEGATIVE, not an error
   const data = await res.json() as any;
   const user = data?.users?.[0];
-  if (!user?.localId) return null;
-  return { uid: user.localId, email: user.email ?? "" };
+  const claims = verifiedTokenClaims(idToken);
+  const validSince = user?.validSince === undefined
+    ? null
+    : Number(user.validSince);
+  const hasGoogleProvider = (user?.providerUserInfo ?? [])
+    .some((provider: any) => provider?.providerId === "google.com");
+  if (!user?.localId
+    || user.disabled === true
+    || user.emailVerified !== true
+    || !hasGoogleProvider
+    || !claims
+    || !claims.emailVerified
+    || claims.provider !== "google.com"
+    || (validSince !== null
+      && (!Number.isFinite(validSince)
+        || validSince < 0
+        || claims.authenticatedAt < validSince))) return null;
+  return {
+    uid: user.localId,
+    email: user.email ?? "",
+    expiresAt: claims.expiresAt,
+  };
 }
 
 async function securetokenRefresh(apiKey: string, refreshToken: string, fetchImpl: typeof fetch): Promise<{ idToken: string; refreshToken: string; uid: string } | null> {
@@ -227,6 +240,27 @@ async function securetokenRefresh(apiKey: string, refreshToken: string, fetchImp
   return { idToken: data.id_token, refreshToken: data.refresh_token ?? refreshToken, uid: data.user_id };
 }
 
+async function verifyHostedLoginPair(
+  apiKey: string,
+  idToken: string,
+  refreshToken: string,
+  fetchImpl: typeof fetch,
+): Promise<VerifiedLogin | null> {
+  const identity = await identityToolkitLookup(apiKey, idToken, fetchImpl);
+  if (!identity) return null;
+  const refreshed = await securetokenRefresh(apiKey, refreshToken, fetchImpl);
+  if (!refreshed) return null;
+  const refreshedIdentity = await identityToolkitLookup(
+    apiKey,
+    refreshed.idToken,
+    fetchImpl,
+  );
+  if (!refreshedIdentity
+    || refreshed.uid !== identity.uid
+    || refreshedIdentity.uid !== identity.uid) return null;
+  return { identity, refreshToken: refreshed.refreshToken };
+}
+
 /** Convert a flat presence doc to Firestore REST fields. */
 export function presenceToFirestoreFields(doc: PresenceDoc): Record<string, any> {
   const fields: Record<string, any> = {
@@ -239,78 +273,21 @@ export function presenceToFirestoreFields(doc: PresenceDoc): Record<string, any>
   return fields;
 }
 
-/**
- * Start a local server, open the browser to the Firebase Google sign-in page,
- * wait for the page to POST back the tokens, verify, return identity.
- */
-function browserLogin(verify: (idToken: string) => Promise<Identity | null>): Promise<Identity & { refreshToken?: string }> {
-  return new Promise((resolve, reject) => {
-    const cfg = firebaseWebConfig();
-    const html = LOGIN_HTML
-      .replace("__FIREBASE_CONFIG__", JSON.stringify(cfg))
-      .replace("__PROJECT_ID__", cfg.projectId);
-
-    const server = createServer(async (req, res) => {
-      const url = new URL(req.url ?? "/", "http://localhost");
-
-      if (url.pathname === "/" && req.method === "GET") {
-        res.writeHead(200, { "Content-Type": "text/html" });
-        res.end(html);
-        return;
-      }
-
-      if (url.pathname === "/callback" && req.method === "POST") {
-        let body = "";
-        req.on("data", (c: Buffer) => (body += c.toString()));
-        req.on("end", async () => {
-          try {
-            const { idToken, refreshToken } = JSON.parse(body);
-            const identity = await verify(idToken);
-            if (!identity) throw new Error("token verification failed");
-            res.writeHead(200, { "Content-Type": "text/html" });
-            res.end("<h1>✓ Signed in</h1><p>You can close this tab and return to your terminal.</p>");
-            server.close();
-            clearTimeout(timer);
-            resolve({ ...identity, refreshToken });
-          } catch (e) {
-            res.writeHead(400, { "Content-Type": "text/html" });
-            res.end(`<h1>Sign-in failed</h1><p>${(e as Error).message}</p>`);
-          }
-        });
-        return;
-      }
-
-      res.writeHead(404);
-      res.end("Not found");
-    });
-
-    const PORT = 8731;
-    const timer = setTimeout(() => {
-      server.close();
-      reject(new Error("Login timed out (5 minutes). Re-run to try again."));
-    }, 5 * 60 * 1000);
-
-    server.listen(PORT, "127.0.0.1", () => {
-      const url = `http://localhost:${PORT}/`;
-      debug(`[pinest] If a browser didn't open, visit: ${url}`);
-      openBrowser(url);
-    });
-
-    server.on("error", (e) => {
-      clearTimeout(timer);
-      reject(e);
-    });
-  });
-}
-
 // ── RestImpl — the distribution default (hosted project, no key file) ───────
 class RestFirebase implements FirebaseAuth {
   readonly mode = "hosted";
   private fetchImpl: typeof fetch;
-  private machineToken: { idToken: string; expiresAt: number; refreshToken: string } | null = null;
+  private browserLoginOptions: BrowserLoginOptions;
+  private machineToken: {
+    idToken: string;
+    expiresAt: number;
+    refreshToken: string;
+    identity: Identity;
+  } | null = null;
 
   constructor(deps: RestDeps = {}) {
     this.fetchImpl = deps.fetchImpl ?? fetch;
+    this.browserLoginOptions = deps.browserLoginOptions ?? {};
   }
 
   private async refreshMachineToken(): Promise<string> {
@@ -323,13 +300,25 @@ class RestFirebase implements FirebaseAuth {
       clearCachedAuth();
       throw new Error("session expired — run /pinest-auth to sign in again");
     }
+    const identity = await identityToolkitLookup(cfg.apiKey, fresh.idToken, this.fetchImpl);
+    if (!identity || identity.uid !== fresh.uid
+      || (cached?.uid && cached.uid !== identity.uid)) {
+      clearCachedAuth();
+      throw new Error("refreshed token identity did not match the cached owner");
+    }
     this.machineToken = {
       idToken: fresh.idToken,
       refreshToken: fresh.refreshToken,
-      expiresAt: tokenExpiry(fresh.idToken),
+      expiresAt: identity.expiresAt!,
+      identity,
     };
     // Keep the cache current (uid/email stable; refreshToken rotates).
-    writeCachedAuth({ uid: fresh.uid, email: cached?.email ?? "", refreshToken: fresh.refreshToken, ts: Date.now() });
+    writeCachedAuth({
+      uid: identity.uid,
+      email: identity.email,
+      refreshToken: fresh.refreshToken,
+      ts: Date.now(),
+    });
     return fresh.idToken;
   }
 
@@ -347,8 +336,8 @@ class RestFirebase implements FirebaseAuth {
     const cached = readCachedAuth();
     if (cached?.refreshToken) {
       try {
-        const idToken = await this.machineIdToken();
-        const identity = await identityToolkitLookup(cfg.apiKey, idToken, this.fetchImpl);
+        await this.machineIdToken();
+        const identity = this.machineToken?.identity;
         if (identity) {
           debug(`[pinest] Signed in as ${identity.email} (cached)`);
           return identity;
@@ -361,14 +350,19 @@ class RestFirebase implements FirebaseAuth {
 
     // 2. Browser login flow (zero-config onboarding).
     debug("[pinest] No cached login. Opening browser for Google sign-in…");
-    const { uid, email, refreshToken } = await browserLogin(
-      (t) => identityToolkitLookup(cfg.apiKey, t, this.fetchImpl));
-    if (refreshToken) {
-      // Cache the refresh token; the next machineIdToken() call mints a fresh
-      // ID token from it (one extra roundtrip, and always-rotated tokens).
-      writeCachedAuth({ uid, email, refreshToken, ts: Date.now() });
-      this.machineToken = null;
-    }
+    const { identity, refreshToken } = await browserLogin(
+      cfg,
+      (idToken, candidateRefreshToken) => verifyHostedLoginPair(
+        cfg.apiKey,
+        idToken,
+        candidateRefreshToken,
+        this.fetchImpl,
+      ),
+      this.browserLoginOptions,
+    );
+    const { uid, email } = identity;
+    writeCachedAuth({ uid, email, refreshToken, ts: Date.now() });
+    this.machineToken = null;
     debug(`[pinest] Signed in as ${email} (uid ${uid})`);
     return { uid, email };
   }
@@ -386,47 +380,117 @@ class RestFirebase implements FirebaseAuth {
     const cfg = firebaseWebConfig();
     const mask = Object.keys(presenceToFirestoreFields(doc))
       .map((f) => `updateMask.fieldPaths=${encodeURIComponent(f)}`).join("&");
-    const res = await this.fetchImpl(
-      `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/users/${uid}?${mask}`,
-      {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${await this.machineIdToken()}`,
-        },
-        body: JSON.stringify({ fields: presenceToFirestoreFields(doc) }),
-      });
-    if (res.status === 401) {
-      // Token rotated out under us — refresh once and retry.
-      await this.refreshMachineToken();
-      return this.publishPresence(uid, doc);
-    }
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new Error(`presence publish failed (${res.status}): ${text.slice(0, 200)}`);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await this.fetchImpl(
+        `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/users/${uid}?${mask}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${await this.machineIdToken()}`,
+          },
+          body: JSON.stringify({ fields: presenceToFirestoreFields(doc) }),
+        });
+      if (res.status === 401 && attempt === 0) {
+        await this.refreshMachineToken();
+        continue;
+      }
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`presence publish failed (${res.status}): ${text.slice(0, 200)}`);
+      }
+      return;
     }
   }
 
-  async forceReLogin(): Promise<Identity> {
-    clearCachedAuth();
+  async forceReLogin(expectedUid?: string): Promise<Identity> {
+    const current = readCachedAuth();
+    const ownerUid = expectedUid ?? current?.uid;
+    const cfg = firebaseWebConfig();
+    const { identity, refreshToken } = await browserLogin(
+      cfg,
+      async (idToken, candidateRefreshToken) => {
+        const result = await verifyHostedLoginPair(
+          cfg.apiKey,
+          idToken,
+          candidateRefreshToken,
+          this.fetchImpl,
+        );
+        return result && (!ownerUid || result.identity.uid === ownerUid)
+          ? result
+          : null;
+      },
+      this.browserLoginOptions,
+    );
+    if (ownerUid && identity.uid !== ownerUid) {
+      throw new Error("re-authenticated account does not match the current owner");
+    }
+    writeCachedAuth({
+      uid: identity.uid,
+      email: identity.email,
+      refreshToken,
+      ts: Date.now(),
+    });
     this.machineToken = null;
-    return this.resolveOwner();
+    return { uid: identity.uid, email: identity.email };
   }
 }
 
 // ── AdminImpl — the self-host path (service account present) ────────────────
-class AdminFirebase implements FirebaseAuth {
+function adminOwnerIdentity(user: AdminUserRecord): Identity {
+  const googleLinked = user.providerData?.some(
+    (provider) => provider.providerId === "google.com",
+  );
+  if (!user.uid || !user.email
+    || user.disabled === true
+    || user.emailVerified !== true
+    || !googleLinked) {
+    throw new Error("owner must be an enabled, verified Google account");
+  }
+  return { uid: user.uid, email: user.email };
+}
+
+function adminTokenIdentity(token: AdminDecodedToken): Identity {
+  if (!token.uid || !token.email
+    || token.email_verified !== true
+    || token.firebase?.sign_in_provider !== "google.com"
+    || typeof token.exp !== "number") {
+    throw new Error("token must belong to a verified Google account");
+  }
+  return { uid: token.uid, email: token.email, expiresAt: token.exp * 1000 };
+}
+
+export function assertAdminAppProject(
+  app: { options?: { projectId?: string } },
+  expectedProjectId: string,
+): void {
+  if (app.options?.projectId !== expectedProjectId) {
+    throw new Error(
+      `existing pinest-admin app belongs to ${app.options?.projectId ?? "an unknown project"}; `
+      + `refusing to reuse it for ${expectedProjectId}`,
+    );
+  }
+}
+
+export class AdminFirebase implements FirebaseAuth {
   readonly mode: string;
   private adminAuth: AdminAuth;
   private db: any;
+  private browserLoginOptions: BrowserLoginOptions;
 
-  private constructor(adminAuth: AdminAuth, db: any, projectId: string) {
+  constructor(
+    adminAuth: AdminAuth,
+    db: any,
+    projectId: string,
+    deps: RestDeps = {},
+  ) {
     this.adminAuth = adminAuth;
     this.db = db;
     this.mode = `admin:${projectId}`;
+    this.browserLoginOptions = deps.browserLoginOptions ?? {};
   }
 
-  static async create(): Promise<AdminFirebase> {
+  static async create(deps: RestDeps = {}): Promise<AdminFirebase> {
     const [{ cert, getApps, initializeApp }, { getAuth }, { getFirestore }] = await Promise.all([
       import("firebase-admin/app"),
       import("firebase-admin/auth"),
@@ -434,21 +498,31 @@ class AdminFirebase implements FirebaseAuth {
     ]);
     const sa = readServiceAccount() as any;
     const existingApp = getApps().find((candidate) => candidate.name === "pinest-admin");
+    if (existingApp) assertAdminAppProject(existingApp, sa.project_id as string);
     const app = existingApp
-      ?? initializeApp({ credential: cert(sa) }, "pinest-admin");
+      ?? initializeApp({ credential: cert(sa), projectId: sa.project_id }, "pinest-admin");
     const db = getFirestore(app);
     if (!existingApp) db.settings({ ignoreUndefinedProperties: true });
-    return new AdminFirebase(getAuth(app) as unknown as AdminAuth, db, sa.project_id as string);
+    return new AdminFirebase(
+      getAuth(app) as unknown as AdminAuth,
+      db,
+      sa.project_id as string,
+      deps,
+    );
   }
 
   private async resolveCached(): Promise<Identity | null> {
     const cached = readCachedAuth();
     if (!cached) return null;
     if (cached.uid) {
-      try { return await this.adminAuth.getUser(cached.uid); } catch { /* fall through */ }
+      try {
+        return adminOwnerIdentity(await this.adminAuth.getUser(cached.uid));
+      } catch {
+        return null;
+      }
     }
     if (cached.email) {
-      try { return await this.adminAuth.getUserByEmail(cached.email); } catch { /* fall through */ }
+      try { return adminOwnerIdentity(await this.adminAuth.getUserByEmail(cached.email)); } catch { /* fall through */ }
     }
     return null;
   }
@@ -461,8 +535,7 @@ class AdminFirebase implements FirebaseAuth {
       // Auto-detect email (gcloud) is still safe headless — no windows.
       const autoEmail = detectAutoEmail();
       if (autoEmail) {
-        const u = await this.adminAuth.getUserByEmail(autoEmail);
-        return { uid: u.uid, email: u.email };
+        return adminOwnerIdentity(await this.adminAuth.getUserByEmail(autoEmail));
       }
       throw new Error(NOT_SIGNED_IN);
     }
@@ -471,16 +544,22 @@ class AdminFirebase implements FirebaseAuth {
     const autoEmail = detectAutoEmail();
     if (autoEmail) {
       try {
-        const u = await this.adminAuth.getUserByEmail(autoEmail);
-        writeCachedAuth({ uid: u.uid, email: u.email, ts: Date.now() });
-        debug(`[pinest] Auto-paired with ${u.email} (from local account)`);
-        return { uid: u.uid, email: u.email };
+        const identity = adminOwnerIdentity(
+          await this.adminAuth.getUserByEmail(autoEmail),
+        );
+        writeCachedAuth({ ...identity, ts: Date.now() });
+        debug(`[pinest] Auto-paired with ${identity.email} (from local account)`);
+        return identity;
       } catch { /* not a Firebase user yet → browser */ }
     }
 
     debug("[pinest] No cached login. Opening browser for Google sign-in…");
-    const { uid, email } = await browserLogin((t) => this.adminAuth.verifyIdToken(t).then(
-      (i) => ({ uid: i.uid, email: i.email })));
+    const { identity } = await browserLogin(
+      firebaseWebConfig(),
+      (idToken, refreshToken) => this.verifyLoginPair(idToken, refreshToken),
+      this.browserLoginOptions,
+    );
+    const { uid, email } = identity;
     writeCachedAuth({ uid, email, ts: Date.now() });
     debug(`[pinest] Signed in as ${email} (uid ${uid})`);
     return { uid, email };
@@ -488,8 +567,7 @@ class AdminFirebase implements FirebaseAuth {
 
   async verifyToken(token: string): Promise<Identity | null> {
     try {
-      const decoded = await this.adminAuth.verifyIdToken(token);
-      return { uid: decoded.uid, email: decoded.email };
+      return adminTokenIdentity(await this.adminAuth.verifyIdToken(token, true));
     } catch {
       return null;
     }
@@ -505,24 +583,51 @@ class AdminFirebase implements FirebaseAuth {
     }, { merge: true });
   }
 
-  async forceReLogin(): Promise<Identity> {
-    clearCachedAuth();
+  async forceReLogin(expectedUid?: string): Promise<Identity> {
+    const current = readCachedAuth();
+    const ownerUid = expectedUid ?? current?.uid;
     debug("[pinest] Forcing fresh sign-in. Opening browser…");
-    const { uid, email } = await browserLogin((t) => this.adminAuth.verifyIdToken(t).then(
-      (i) => ({ uid: i.uid, email: i.email })));
+    const { identity } = await browserLogin(
+      firebaseWebConfig(),
+      async (idToken, refreshToken) => {
+        const result = await this.verifyLoginPair(idToken, refreshToken);
+        return result && (!ownerUid || result.identity.uid === ownerUid)
+          ? result
+          : null;
+      },
+      this.browserLoginOptions,
+    );
+    const { uid, email } = identity;
+    if (ownerUid && uid !== ownerUid) {
+      throw new Error("re-authenticated account does not match the current owner");
+    }
     writeCachedAuth({ uid, email, ts: Date.now() });
     debug(`[pinest] Re-signed in as ${email} (uid ${uid})`);
     return { uid, email };
+  }
+
+  private async verifyLoginPair(
+    idToken: string,
+    _refreshToken: string,
+  ): Promise<VerifiedLogin | null> {
+    try {
+      const identity = adminTokenIdentity(
+        await this.adminAuth.verifyIdToken(idToken, true),
+      );
+      // Admin sessions authenticate Firebase ID tokens directly and never
+      // persist or consume browser refresh tokens. Exchanging one through the
+      // hosted project's public API key would cross Firebase project bounds.
+      return { identity, refreshToken: "" };
+    } catch {
+      return null;
+    }
   }
 }
 
 /** Choose the backend: service account → admin; otherwise hosted (zero-config). */
 export async function createFirebase(deps: RestDeps = {}): Promise<FirebaseAuth> {
   if (hasServiceAccount()) {
-    return AdminFirebase.create();
+    return AdminFirebase.create(deps);
   }
   return new RestFirebase(deps);
 }
-
-// ── Kept for compatibility with existing imports/tests ──────────────────────
-export { AUTH_PATH };
