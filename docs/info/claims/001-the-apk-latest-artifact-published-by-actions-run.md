@@ -1,10 +1,11 @@
 ---
 id: C001
 kind: claim
-status: holds
+status: falsified
 created: 2026-08-30
-tags: 
+tags:
 depends: app/tools/verify_apk.py
+falsified_on: 2026-08-30
 ---
 
 ## Claim
@@ -18,3 +19,9 @@ Downloaded the public GitHub release asset after run 33280431296 and passed app/
 ## What would falsify it
 
 The rolling apk-latest release asset is replaced, or its package, signer, or artifact hash differs.
+
+## FALSIFIED 2026-08-30
+
+The superseded mutable apk-latest release and tag were deliberately deleted after the immutable replacement passed independent verification.
+
+> Anything that cited this claim as proof must be re-checked. Grep the repo for it.
