@@ -356,9 +356,12 @@ jobs:
           esac
           [ "${#EXPECTED_ARCHIVE_SHA256}" -eq 64 ] || { echo "::error::invalid attested artifact digest"; exit 1; }
           (cd release && sha256sum --check pinest.apk.sha256)
+          build_tools="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          "$build_tools/apksigner" verify --print-certs release/pinest.apk > release/pinest.apk.certificates.txt
           mapfile -t identity < <(python3 - <<'PY'
           import json
           from pathlib import Path
+          import re
 
           identity = json.loads(Path("release/pinest.release-identity.json").read_text())
           provenance = json.loads(Path("release/pinest.apk.provenance.json").read_text())
@@ -371,22 +374,39 @@ jobs:
               raise SystemExit("release package disagrees with attested provenance")
           if identity["certificate_sha256"] != artifact.get("signer_sha256"):
               raise SystemExit("release signer disagrees with attested provenance")
+          signer_lines = [
+              line.strip()
+              for line in Path("release/pinest.apk.certificates.txt").read_text().splitlines()
+              if "signer" in line.lower()
+              and "certificate sha-256 digest:" in line.lower()
+          ]
+          signers = set()
+          for line in signer_lines:
+              match = re.fullmatch(
+                  r"(?:Signer #\d+|V\d+(?:\.\d+)? Signer:)\s+"
+                  r"certificate SHA-256 digest:\s*"
+                  r"([0-9a-fA-F]{64}|(?:[0-9a-fA-F]{2}:){31}[0-9a-fA-F]{2})\s*",
+                  line,
+                  re.IGNORECASE,
+              )
+              if not match:
+                  raise SystemExit("expected exactly one APK signer; malformed apksigner output")
+              signers.add(match.group(1).replace(":", "").lower())
+          if len(signers) != 1:
+              raise SystemExit(f"expected exactly one APK signer; found {len(signers)}")
           print(identity["package"])
           print(identity["certificate_sha256"])
+          print(signers.pop())
           PY
           )
-          [ "${#identity[@]}" -eq 2 ] || { echo "::error::invalid release identity"; exit 1; }
+          [ "${#identity[@]}" -eq 3 ] || { echo "::error::invalid release identity"; exit 1; }
           expected_package="${identity[0]}"
           expected_signer="${identity[1]}"
-          build_tools="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          actual_signer="${identity[2]}"
           package="$($build_tools/aapt dump badging release/pinest.apk | sed -n "s/^package: name='\([^']*\)'.*/\1/p")"
           [ "$package" = "$expected_package" ] || { echo "::error::unexpected APK package: $package"; exit 1; }
-          certificates="$($build_tools/apksigner verify --print-certs release/pinest.apk)"
-          signer_count="$(printf '%s\n' "$certificates" | grep -Ec '^Signer #[0-9]+ certificate SHA-256 digest: ')"
-          [ "$signer_count" -eq 1 ] || { echo "::error::expected exactly one APK signer"; exit 1; }
-          signer="$(printf '%s\n' "$certificates" | sed -n 's/^Signer #[0-9][0-9]* certificate SHA-256 digest: //p' | tr '[:upper:]' '[:lower:]')"
-          [ "$signer" = "$expected_signer" ] || {
-            echo "::error::unexpected APK signer: $signer"; exit 1;
+          [ "$actual_signer" = "$expected_signer" ] || {
+            echo "::error::unexpected APK signer: $actual_signer"; exit 1;
           }
           for subject in release/pinest.apk release/pinest.apk.sha256 release/pinest.apk.provenance.json release/pinest.release-identity.json; do
             gh attestation verify "$subject" \

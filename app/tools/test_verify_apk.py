@@ -61,6 +61,31 @@ class SignerFingerprintTests(unittest.TestCase):
             EXPECTED_CERT_SHA256,
         )
 
+    def test_reads_versioned_apksigner_digest(self) -> None:
+        output = (
+            "V3.0 Signer: certificate DN: CN=PiNest\n"
+            "V3.0 Signer: certificate SHA-256 digest: "
+            f"{EXPECTED_CERT_SHA256}\n"
+        )
+
+        self.assertEqual(
+            extract_signer_fingerprint(output),
+            EXPECTED_CERT_SHA256,
+        )
+
+    def test_repeated_scheme_lines_for_one_certificate_are_one_signer(self) -> None:
+        output = (
+            "Signer #1 certificate SHA-256 digest: "
+            f"{EXPECTED_CERT_SHA256}\n"
+            "V3.0 Signer: certificate SHA-256 digest: "
+            f"{EXPECTED_CERT_SHA256}\n"
+        )
+
+        self.assertEqual(
+            extract_signer_fingerprint(output),
+            EXPECTED_CERT_SHA256,
+        )
+
     def test_refuses_missing_or_malformed_digest(self) -> None:
         malformed = (
             "",

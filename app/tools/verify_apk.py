@@ -92,25 +92,36 @@ def apk_package(apk: Path) -> str:
 
 def extract_signer_fingerprint(certificates: str) -> str:
     signer_lines = [
-        line
+        line.strip()
         for line in certificates.splitlines()
-        if re.match(r"Signer #\d+ certificate SHA-256 digest:", line, re.IGNORECASE)
+        if "signer" in line.lower() and "certificate sha-256 digest:" in line.lower()
     ]
-    if len(signer_lines) != 1:
-        raise VerificationError(
-            "apksigner must report exactly one APK signer SHA-256 fingerprint; "
-            f"found {len(signer_lines)} in {certificates!r}",
+    fingerprints: set[str] = set()
+    for line in signer_lines:
+        match = re.fullmatch(
+            r"(?:Signer #\d+|V\d+(?:\.\d+)? Signer:)\s+"
+            r"certificate SHA-256 digest:\s*(\S+)\s*",
+            line,
+            re.IGNORECASE,
         )
-
-    match = re.fullmatch(
-        r"Signer #\d+ certificate SHA-256 digest:\s*"
-        rf"({FINGERPRINT_PATTERN.pattern})\s*",
-        signer_lines[0],
-        re.IGNORECASE,
-    )
-    if not match:
-        raise VerificationError(f"apksigner reported a malformed signer digest: {signer_lines[0]!r}")
-    return normalize_fingerprint(match.group(1))
+        if not match:
+            raise VerificationError(
+                "apksigner must report exactly one valid APK signer SHA-256 fingerprint; "
+                f"malformed line {line!r}",
+            )
+        try:
+            fingerprints.add(normalize_fingerprint(match.group(1)))
+        except VerificationError as error:
+            raise VerificationError(
+                "apksigner must report exactly one valid APK signer SHA-256 fingerprint; "
+                f"malformed line {line!r}",
+            ) from error
+    if len(fingerprints) != 1:
+        raise VerificationError(
+            "apksigner must report exactly one unique APK signer SHA-256 fingerprint; "
+            f"found {len(fingerprints)} in {certificates!r}",
+        )
+    return fingerprints.pop()
 
 
 def signer_fingerprint(apk: Path) -> str:
