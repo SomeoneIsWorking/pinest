@@ -7,7 +7,7 @@ browser.
 
 - Open the web client at **[pinest.web.app](https://pinest.web.app)**.
 - On Android, open **Settings → Android app (APK)** in the web client, or use
-  the [rolling APK release](https://github.com/SomeoneIsWorking/pinest/releases/tag/apk-latest).
+  the [latest attested APK release](https://github.com/SomeoneIsWorking/pinest/releases/latest).
   The Android package is `com.barishamil.pinest`.
 - Google sign-in pairs the client with a host using the same account.
 
@@ -35,9 +35,24 @@ planned; the package name will remain `com.barishamil.pinest`.
 
 ## Install the pi extension
 
-Requirements are Node.js 22 or newer and
-[pi](https://github.com/earendil-works/pi). Install PiNest through pi's package
-manager:
+Requirements are Node.js 22 or newer,
+[pi](https://github.com/earendil-works/pi), and an explicitly installed tunnel
+binary for remote access. Cloudflared is the default; PiNest deliberately does
+not download native executables during `npm install`.
+
+- macOS: `brew install cloudflared`
+- Debian/Ubuntu: configure Cloudflare's official package repository, then run
+  `sudo apt install cloudflared`.
+- Fedora/RHEL: configure Cloudflare's official package repository, then ask the
+  user to run `sudo dnf install cloudflared`.
+- Windows: `winget install --id Cloudflare.cloudflared`
+
+Cloudflare's repository setup instructions are at
+[pkg.cloudflare.com](https://pkg.cloudflare.com/). Confirm the selected binary
+with `cloudflared --version`. Ngrok and Tailscale Funnel remain explicit
+alternatives, and tunnel provider `off` disables public tunneling.
+
+Install PiNest through pi's package manager:
 
 ```sh
 pi install git:github.com/SomeoneIsWorking/pinest
@@ -62,6 +77,13 @@ and pi owns the on-host JSONL history. Each host accepts the Firebase identity
 of its configured owner. An optional Firebase Admin service-account backend is
 available for self-hosting.
 
+Reverse engineering the protocol does not bypass the owner-UID check, but this
+is not an absolute-security claim. A stolen owner token, compromised host or
+client, and the selected tunnel provider remain trust boundaries; the current
+protocol does not add application-level end-to-end encryption across the tunnel
+provider. See the complete [security model](docs/security.md) and
+[vulnerability-reporting policy](SECURITY.md).
+
 ## Development
 
 Server changes must pass:
@@ -83,4 +105,5 @@ node drills/compact-clear.mjs --negative
 
 Flutter changes must pass `flutter analyze` and `flutter test` from `app/`.
 The web client deploys locally with `app/deploy.sh`; pushes affecting `app/`
-build the Android APK and publish the rolling GitHub release through CI.
+build, sign, attest, and publish an immutable per-commit Android release through
+CI.

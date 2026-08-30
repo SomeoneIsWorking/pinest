@@ -60,6 +60,25 @@ The agent must load and honor project `AGENTS.md` (goals/state/issues/codemap
 registries). pi loads context files natively; this project must not weaken
 that, and its own docs follow the same registries.
 
+## G6 — One owner can access one host's sessions
+
+Protocol knowledge alone must never authorize a client. A host is durably
+bound to one Firebase UID; a different UID cannot read, route to, mutate, or
+delete that owner's sessions even if it sends arbitrary protocol messages or
+restarts against the same local registry.
+
+- Success: foreign, expired, revoked, malformed, oversized, unknown-target,
+  and concurrent-collision controls all fail before a pi session or its
+  history is touched; changing browser credentials cannot silently transfer
+  ownership or preserve old sockets.
+- Least authority: discovery contains no chat data, public sockets and payloads
+  are bounded, release signing is isolated from dependency execution, and
+  machine credentials are private by construction.
+- Non-goal: an absolute-security guarantee. The owner's account and devices,
+  the host OS account, Firebase, and the selected tunnel provider remain trust
+  boundaries. Application-level end-to-end encryption across the tunnel
+  provider is a separate architectural outcome.
+
 ## Constraints
 
 - Architecture continues PiNest's: interactive pi host + in-process extension

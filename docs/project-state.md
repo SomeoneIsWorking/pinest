@@ -48,11 +48,19 @@ Status: `verified`
 `server/src/registry.ts`: `PI_AGENT_DIR/remote-code/sessions.json` (env
 `RC_REGISTRY_PATH`), atomic tmp+rename writes, missing file → empty,
 corrupt/wrong-shape → loud `RegistryError` (never silently wiped), CRUD +
-close/remove with optional history deletion.
+close/remove with optional history deletion. The first authenticated owner
+durably claims an ownerless registry; same-owner reopen succeeds and a
+different UID is refused before any row access or mutation. Directory/file
+modes are repaired to 0700/0600 and symlinks/non-regular paths are refused.
+History deletion is transactional: same-directory quarantine, persisted row
+removal, then unlink; a failed stage restores both authorities or reports the
+exact recovery path. Any unusable registry aborts remote bootstrap instead of
+continuing with memory-only sessions.
 
-Evidence: `server/test/registry.test.ts` — 11 tests incl. round-trip through a
-fresh registry instance, corrupt-file refusal leaving the file intact, no tmp
-droppings after 5 saves.
+Evidence: registry/resume tests cover owner claim/mismatch, private modes,
+symlink refusal, fresh-instance round-trip, corrupt-file refusal, no tmp
+droppings, and injected save/unlink/rollback failures. The integrated server
+gate passes 247 tests with 4 intentional real-provider skips.
 
 ## S3 — Resume: sessions survive host restart
 
@@ -161,6 +169,17 @@ report of tests opening the browser, the path was traced to the extension-
 load test invoking `/pinest-auth` un-isolated; fixed (temp-dir auth env,
 port-blocker for the login server) and verified: zero :8731 listeners across
 the full suite.
+
+The authentication boundary is hardened independently of the remaining live
+browser exercise (I-026–I-034): cached refresh credentials require a real
+private directory and 0600 file; browser login is canonical-loopback only and
+uses a 32-byte single-use nonce, exact Origin/Host/JSON checks, a 32 KiB body
+cap, and ID/refresh-token UID correlation. Hosted admission requires an
+enabled, verified Google identity and checks `auth_time` against Firebase
+`validSince`; Admin admission checks revocation and refuses cross-project app
+reuse. `/pinest-auth` refreshes only the current owner, closes existing
+sockets, and all later presence writes use current rather than captured owner
+state.
 
 Rules DEPLOYED to pinest-app (live release → ruleset 04f3c8ab, deployed
 2026-08-28 via the Rules API with the owner's gcloud credentials; previous
@@ -324,29 +343,32 @@ live refreshes (I-023). A genuinely stuck queued message can be drained via
 The web client deploys from the local system via `app/deploy.sh` after every
 update; the earlier GitHub Actions deploy path was removed by user decision
 (I-015). The Android APK, by contrast, is built and published by CI
-(`.github/workflows/apk.yml`: analyze + test + `flutter build apk --release`
-on every `main` push touching `app/**`) as the rolling `apk-latest` GitHub
-release asset, which the web client's Settings → "Android app (APK)" button
-downloads (I-024). `deploy.sh` no longer bundles an APK.
-Release signing now fails closed rather than falling back to the debug key.
-All four `ANDROID_KEYSTORE_*` GitHub secrets are configured for the stable
-release certificate, SHA-256
-`83:98:6D:18:59:DE:4C:E0:97:9A:E4:3C:9E:18:40:36:E4:9B:DE:3C:BC:A3:7E:F2:C8:EF:A9:3F:D7:51:A3:F5`,
-and CI runs `app/tools/verify_apk.py` against the package and certificate before
-publication. GitHub Actions run
+on every `main` push touching `app/**`; `deploy.sh` no longer bundles an APK.
+The hardening pipeline separates read-only validation, a credential-free
+unsigned build, environment-scoped signing without checkout/build code,
+read-only exact identity verification, GitHub attestation, and a write-only
+final publisher. Actions, Flutter, and Gradle inputs are digest-pinned;
+Gradle dependency and plugin artifacts are covered by a strict SHA-256
+verification manifest whose corrupted-checksum control fails before project
+configuration; artifacts move by immutable ID with digest checks; releases use
+unique `apk-<commit>` tags and the client downloads through GitHub's
+latest-release redirect (I-024, I-036). Release signing fails closed rather than falling back
+to the debug key. All four `ANDROID_KEYSTORE_*` secrets are scoped to the
+main-only `apk-release` environment. The stable package and certificate
+SHA-256 are recorded in the single authority `app/release-identity.json`, and
+CI runs `app/tools/verify_apk.py` against that identity before publication.
+GitHub Actions run
 [`33280431296`](https://github.com/SomeoneIsWorking/pinest/actions/runs/33280431296)
 published the stable-signed rolling release. The independently downloaded
-public `pinest.apk` verifies as package `com.barishamil.pinest`, signer SHA-256
-`83986D1859DE4CE0979AE43C9E184036E49BDE3CBCA37EF2C8EFA93FD751A3F5`,
-and artifact SHA-256
-`04c1a7ec562ad36a82e0a9850620e93d02114c5a4b16562207098e3b625f89d6`.
+public `pinest.apk` verifies against `app/release-identity.json`, with artifact
+SHA-256 `04c1a7ec562ad36a82e0a9850620e93d02114c5a4b16562207098e3b625f89d6`.
 
 The application identity is now `com.barishamil.pinest` across Android,
 Linux, iOS and macOS (Apple test bundles use the derived `.RunnerTests`
 suffix). Firebase has matching Android and Apple registrations; the Apple app
 is `1:271491621267:ios:2a99ee36a80675287b8866`, and obsolete external
-`com.bhamil.remote_pi_app` / `com.bhamil.remotePiApp` registrations were
-removed. `DefaultFirebaseOptions.android` and the Apple targets now carry
+registrations under the prior identifiers were removed.
+`DefaultFirebaseOptions.android` and the Apple targets now carry
 their native app IDs instead of reusing the web app. Android sign-in uses
 `signInWithProvider` rather than the web-only `signInWithPopup`, but is still
 UNVERIFIED on a real device.
@@ -371,7 +393,42 @@ Gaps: run against the live host from an actual phone; hosted (RestImpl)
 backend not yet exercised by a real browser sign-in; stream deltas
 (I-006 item 5) still cumulative — protocol+app change together.
 
+## S7 — Single-owner isolation and hardened public boundaries
+
+Status: `partial`
+
+The host now authenticates, authorizes, and persists the owner boundary as
+separate checks. WebSocket admission requires an unexpired Firebase identity
+matching the host UID, closes at token expiry, and limits unauthenticated
+sockets (32), concurrent verification (8), rolling verification calls (30 per
+60 seconds), frame size (16 MiB), authentication time (10 seconds), and
+outbound buffering (16 MiB). Commands pass one exhaustive runtime parser with
+bounded text, paths, IDs, history, image count/size, exact target authorization,
+and awaited lifecycle-ID reservations. Unknown or stale sessions cannot fall
+through to the host, and concurrent resume cannot orphan a second agent.
+
+The web origin no longer runs inherited CDN scripts and ships a tested CSP,
+HSTS, framing, MIME, referrer, opener/resource, and permissions policy.
+Discovery rules allow owner-only `get`, deny list/delete/cross-UID access, and
+constrain the exact presence shape and timestamp. Tunnel executables must be
+operator-installed real system paths; output is accepted only as a
+provider-specific credential-free HTTPS origin forwarding to loopback.
+
+Evidence: integrated server gate — 247 pass, 4 intentional skips; TypeScript
+typecheck and runtime npm audit clean. Focused Flutter tests cover the actual
+CSP inline-script hash, discovery downgrade/credential rejection, Firestore
+rule source, and the cumulative 10 MiB outgoing-image bound. Live Firestore and
+Hosting post-landing controls remain to be recorded.
+
+Gap: secure URL syntax and owner-only Firestore writes reduce discovery
+poisoning, but do not cryptographically bind a rotating endpoint to a host
+device (I-030). The tunnel provider also remains inside the content
+confidentiality boundary because there is no application-level device key or
+end-to-end encryption (I-038). This is intentionally not an absolute-security
+claim.
+
 ## Current focus
 
-Run the app against the live host from a phone and exercise one real hosted
-(RestImpl) browser sign-in end-to-end.
+Design host/device-key binding and application-level tunnel encryption for
+I-030/I-038, then run the app against the live host from a phone and exercise
+one real hosted (RestImpl) browser sign-in end-to-end.

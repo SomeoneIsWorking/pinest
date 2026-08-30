@@ -37,6 +37,8 @@ import type { SessionRow, SessionSnapshot, ClientCommand, ServerMessage } from "
 import { installCrashReporter } from "./crash.ts";
 import { DEFAULT_MODEL } from "./product-defaults.ts";
 import { HostContextController } from "./host-context.ts";
+import { dispatchClientCommand } from "./command-validation.ts";
+import { reauthenticateRemoteOwner, verifiedOwnerToken } from "./owner-runtime.ts";
 
 const REGISTRY_PATH = process.env.RC_REGISTRY_PATH
   || join(homedir(), ".pi", "agent", "remote-code", "sessions.json");
@@ -190,6 +192,17 @@ function stateMessage(): ServerMessage {
 
 function broadcastState(): void {
   broadcast(stateMessage());
+}
+
+function publishCurrentPresence(online: boolean): Promise<void> {
+  if (!_fb || !_ownerUid) return Promise.resolve();
+  return _fb.publishPresence(_ownerUid, {
+    url: _ws?.tunnelUrl ?? null,
+    online,
+    ownerEmail: _ownerEmail ?? undefined,
+    hostname: hostname(),
+    ts: Date.now(),
+  });
 }
 
 /** Registry rows overlaid with live status (live: true = loaded in-process). */
@@ -378,15 +391,10 @@ async function bootstrap(): Promise<void> {
   _ownerUid = uid;
   _ownerEmail = email;
 
-  // Session registry (durable). A corrupt registry must not kill the host —
-  // report loudly, run without registry features.
-  try {
-    _registry = new SessionRegistry(REGISTRY_PATH).load();
-  } catch (e) {
-    debug("[remote-code] registry load failed:", (e as Error).message);
-    broadcast({ type: "error", message: `session registry unusable: ${(e as Error).message}` });
-    _registry = null;
-  }
+  // Persistence and owner binding are authorization authorities, not optional
+  // features. An unusable registry aborts remote bootstrap; continuing with
+  // memory-only sessions would violate both durability and tenant isolation.
+  _registry = new SessionRegistry(REGISTRY_PATH).load().claimOwner(uid);
 
   // Stable host session id across restarts (unless explicitly pinned by env):
   // reuse the registry's host row so app bindings survive a host restart.
@@ -422,31 +430,25 @@ async function bootstrap(): Promise<void> {
   _ws = new WSServer({ port: 0, expectedUid: uid });
   _ws.setVerifyFn(async (token) => {
     const identity = await fb.verifyToken(token);
-    return identity?.uid ?? null;
+    return verifiedOwnerToken(identity);
   });
   _ws.on("command", (cmd) => { void handleCommand(cmd); });
   _ws.setStateProvider(stateMessage);
   _ws.tunnelOnDead = () => {
     debug("[remote-code] tunnel died — restarting");
-    void _ws?.restartTunnel(loadConfig().tunnelProvider).then(() => publishPresence(true));
+    void _ws?.restartTunnel(loadConfig().tunnelProvider).then(() => publishCurrentPresence(true));
   };
-  await _ws.start();
   await restorePersistedSessions();
+  // Do not admit commands while durable sessions are still being restored:
+  // an early session_resume could otherwise open the same pi transcript twice.
+  await _ws.start();
 
   // Presence: publish IMMEDIATELY (url may be null until the tunnel lands)
   // and republish when it does. The tunnel runs in the BACKGROUND — a slow
   // or dead network must never block the registry/presence work below it.
-  const publishPresence = (online: boolean): Promise<void> => fb.publishPresence(uid, {
-    url: _ws?.tunnelUrl ?? null,
-    online,
-    ownerEmail: email,
-    hostname: hostname(),
-    ts: Date.now(),
-  });
-
   // Heartbeat: keep the URL doc fresh
   _heartbeat = setInterval(() => {
-    publishPresence(true).catch(() => {});
+    publishCurrentPresence(true).catch(() => {});
   }, 20_000);
   _heartbeat.unref?.();
 
@@ -465,13 +467,13 @@ async function bootstrap(): Promise<void> {
       uiNotify(ws.tunnelUrl
         ? `[pinest] tunnel up: ${ws.tunnelUrl}`
         : `[pinest] tunnel started via ${used ?? "(none)"} but reported no URL — remote access is local-only`);
-      return publishPresence(true);
+      return publishCurrentPresence(true);
     })
     .catch((e) => {
       debug("[remote-code] Tunnel failed:", (e as Error).message, "— running local-only");
       renderFooter();
       uiNotify(`[pinest] tunnel failed: ${(e as Error).message} — local-only`, "warning");
-      return publishPresence(true);
+      return publishCurrentPresence(true);
     });
 
   // Register this interactive session
@@ -518,7 +520,7 @@ async function bootstrap(): Promise<void> {
   if (_activeSessionId !== configuredActive) {
     saveConfig({ activeSessionId: _activeSessionId });
   }
-  await publishPresence(true).catch((e) =>
+  await publishCurrentPresence(true).catch((e) =>
     debug("[remote-code] initial presence publish failed:", (e as Error).message));
 
   // Footer
@@ -530,7 +532,7 @@ async function bootstrap(): Promise<void> {
   const shutdown = async (): Promise<void> => {
     try {
       await teardownRemote();
-      await publishPresence(false);
+      await publishCurrentPresence(false);
     } catch { /* best effort */ }
     process.exit(0);
   };
@@ -539,39 +541,32 @@ async function bootstrap(): Promise<void> {
 }
 
 // ── Command handling ────────────────────────────────────────────────────────
-async function handleCommand(cmd: ClientCommand): Promise<void> {
+async function handleCommand(input: unknown): Promise<void> {
   try {
-    if (cmd.type === "session_spawn" || cmd.type === "session_despawn") {
-      // Supervisor handles spawn/despawn
-      if (cmd.type === "session_spawn") return await spawnSession(cmd);
-      if (cmd.type === "session_despawn") return await despawnSession(cmd);
-    }
-    if (cmd.type === "session_list") {
-      return broadcast({ type: "session_list", sessions: mergedRegistryRows() });
-    }
-    if (cmd.type === "session_resume") return await resumeSession(cmd);
-    if (cmd.type === "session_rename") return await renameSession(cmd);
-    if (cmd.type === "session_select") return selectSession(cmd);
-    if (cmd.type === "session_delete") return await deleteSession(cmd);
-    if (cmd.type === "path_check") return checkPath(cmd);
-    if (cmd.type === "folder_create") return createFolder(cmd);
-    if (cmd.type === "set_compact_threshold") return setCompactThreshold(cmd);
-    if (cmd.type === "reload") {
-      // Explicit request from the app. A refused reload must be visible —
-      // otherwise the app shows nothing and looks like it worked.
-      const r = queueReload();
-      if (!r.ok) broadcast({ type: "error", message: `[remote-code] ${r.message}` });
-      return;
-    }
-    const sid = (cmd as { sessionId?: string }).sessionId;
-    if (sid && _supervisor?.sessions.has(sid)) {
-      return void await _supervisor.handleSessionCommand(cmd);
-    }
-    if (!sid || sid === _sessionId) {
-      return await handleInteractiveCommand(cmd);
-    }
-    // Unrouted (e.g. list_paths)
-    return await handleInteractiveCommand(cmd);
+    await dispatchClientCommand(input, {
+      hostSessionId: _sessionId,
+      isLiveSpawned: (id) => !!_supervisor?.sessions.has(id),
+      isRegistered: (id) => !!_registry?.get(id),
+      isRegisteredHost: (id) => !!_registry?.get(id)?.isHost,
+      isSessionIdInUse: (id) => _sessions.has(id) || !!_supervisor?.sessions.has(id) || !!_registry?.get(id),
+      newSessionId: randomUUID,
+      host: handleInteractiveCommand,
+      spawned: (cmd) => _supervisor!.handleSessionCommand(cmd).then(() => undefined),
+      spawn: spawnSession,
+      despawn: despawnSession,
+      sessionList: () => broadcast({ type: "session_list", sessions: mergedRegistryRows() }),
+      resume: resumeSession,
+      rename: renameSession,
+      select: selectSession,
+      delete: deleteSession,
+      pathCheck: checkPath,
+      folderCreate: createFolder,
+      compactThreshold: setCompactThreshold,
+      reload: () => {
+        const r = queueReload();
+        if (!r.ok) broadcast({ type: "error", message: `[remote-code] ${r.message}` });
+      },
+    });
   } catch (e) {
     debug("[remote-code] command error:", (e as Error).message);
     broadcast({ type: "error", message: String((e as Error).message || e) });
@@ -579,10 +574,8 @@ async function handleCommand(cmd: ClientCommand): Promise<void> {
 }
 
 async function spawnSession(cmd: Extract<ClientCommand, { type: "session_spawn" }>): Promise<void> {
-  const id = cmd.sessionId || randomUUID();
   await _supervisor!.spawn({
     ...cmd,
-    sessionId: id,
     cwd: cmd.cwd ? resolvePathInput(cmd.cwd) : undefined,
   });
   broadcastState();
@@ -593,6 +586,7 @@ async function despawnSession(cmd: Extract<ClientCommand, { type: "session_despa
     await _supervisor.despawn(cmd.sessionId);
   } else {
     // Not live (e.g. after host restart) — just close the registry row.
+    if (!_registry?.get(cmd.sessionId)) throw new Error(`unknown session ${cmd.sessionId}`);
     _registry?.close(cmd.sessionId);
     removeSession(cmd.sessionId);
   }
@@ -667,14 +661,12 @@ const RESUME_NUDGE =
   "Re-check the current state of the files you were editing, then continue from where you left off.";
 
 async function renameSession(cmd: Extract<ClientCommand, { type: "session_rename" }>): Promise<void> {
-  const name = cmd.name.trim();
-  if (!name) throw new Error("session name cannot be empty");
   if (_supervisor?.sessions.has(cmd.sessionId)) {
-    await _supervisor.rename(cmd.sessionId, name);
+    await _supervisor.rename(cmd.sessionId, cmd.name);
   } else {
     if (!_registry?.get(cmd.sessionId)) throw new Error(`unknown session ${cmd.sessionId}`);
-    _registry.upsert({ id: cmd.sessionId, name });
-    upsertSession(cmd.sessionId, { name });
+    _registry.upsert({ id: cmd.sessionId, name: cmd.name });
+    upsertSession(cmd.sessionId, { name: cmd.name });
   }
   broadcastState();
 }
@@ -689,10 +681,8 @@ function selectSession(cmd: Extract<ClientCommand, { type: "session_select" }>):
 }
 
 async function setCompactThreshold(cmd: Extract<ClientCommand, { type: "set_compact_threshold" }>): Promise<void> {
-  const t = Math.floor(cmd.thresholdTokens);
-  if (!Number.isFinite(t) || t < 1_000) throw new Error("threshold must be >= 1000 tokens");
-  saveConfig({ compactAtTokens: t });
-  debug(`[remote-code] auto-compact threshold set to ${t} tokens`);
+  saveConfig({ compactAtTokens: cmd.thresholdTokens });
+  debug(`[remote-code] auto-compact threshold set to ${cmd.thresholdTokens} tokens`);
   broadcastState();
 }
 
@@ -1100,16 +1090,19 @@ const remoteCode = (pi: ExtensionAPI): void => {
         ctx?.ui?.notify?.("[pinest] Opening browser for sign-in…", "info");
         const fb = await fbAsync();
         _fb = fb;
-        const { uid, email } = await fb.forceReLogin();
-        _ownerUid = uid;
-        _ownerEmail = email;
-        // Re-publish presence under the new identity.
-        if (_ws?.tunnelUrl) {
-          fb.publishPresence(uid, {
-            url: _ws.tunnelUrl, online: true, ownerEmail: email,
-            hostname: hostname(), ts: Date.now(),
-          }).catch(() => {});
-        }
+        const { email } = await reauthenticateRemoteOwner({
+          currentUid: _ownerUid,
+          forceReLogin: (expectedUid) => fb.forceReLogin(expectedUid),
+          setOwner: (owner) => {
+            _ownerUid = owner.uid;
+            _ownerEmail = owner.email;
+          },
+          hasRemoteStack: () => !!_ws,
+          closeAuthenticatedClients: () => _ws?.closeAuthenticatedClients(),
+          publishPresence: () => publishCurrentPresence(true).catch((e) =>
+            debug("[remote-code] reauth presence publish failed:", (e as Error).message)),
+          bootstrap,
+        });
         say(ctx, `[remote-code] signed in as ${email}`);
       } catch (e) {
         say(ctx, `[remote-code] auth failed: ${(e as Error)?.message || e}`);
@@ -1281,11 +1274,7 @@ const remoteCode = (pi: ExtensionAPI): void => {
       say(ctx, `[remote-code] provider set to "${picked.name}", restarting tunnel…`);
       const used = await _ws?.restartTunnel(picked.name);
       // Re-publish URL to Firebase so the app picks up the new endpoint.
-      if (_ownerUid && _ws?.tunnelUrl && _fb) {
-        _fb.publishPresence(_ownerUid, {
-          url: _ws.tunnelUrl, online: true, ts: Date.now(),
-        }).catch(() => {});
-      }
+      await publishCurrentPresence(true).catch(() => {});
       say(ctx, `[remote-code] tunnel ${used ? `up via ${used}` : "off"} → ${_ws?.tunnelUrl ?? "local-only"}`);
     },
   });

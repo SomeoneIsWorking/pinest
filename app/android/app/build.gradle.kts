@@ -1,21 +1,34 @@
 import java.util.Properties
 
-// Release signing comes from android/key.properties, which CI writes from
-// repository secrets (see .github/workflows/apk.yml). A release build without
-// that durable identity must fail instead of publishing a debug-signed APK.
+// Release signing comes from android/key.properties. A release build without
+// that durable identity fails unless CI explicitly requests an unsigned APK
+// with ORG_GRADLE_PROJECT_pinestUnsignedRelease=true. The modes are mutually
+// exclusive so an unsigned build cannot silently ignore configured signing.
 val keystorePropertiesFile = rootProject.file("key.properties")
 val keystoreProperties = Properties().apply {
     if (keystorePropertiesFile.exists()) keystorePropertiesFile.inputStream().use { load(it) }
 }
 val hasReleaseKeystore = keystorePropertiesFile.exists()
+val unsignedReleaseRequested = providers.gradleProperty("pinestUnsignedRelease").orNull?.let { value ->
+    value.toBooleanStrictOrNull()
+        ?: throw GradleException("pinestUnsignedRelease must be exactly 'true' or 'false'.")
+} ?: false
 val releaseBuildRequested = gradle.startParameter.taskNames.any {
     it.contains("release", ignoreCase = true)
 }
 
-if (releaseBuildRequested && !hasReleaseKeystore) {
+if (releaseBuildRequested && unsignedReleaseRequested && hasReleaseKeystore) {
+    throw GradleException(
+        "Unsigned Android release requested while android/key.properties exists; " +
+            "remove the signing configuration or omit pinestUnsignedRelease.",
+    )
+}
+
+if (releaseBuildRequested && !unsignedReleaseRequested && !hasReleaseKeystore) {
     throw GradleException(
         "Android release signing requires android/key.properties; " +
-            "configure the durable PiNest release keystore first.",
+            "configure the durable PiNest release keystore or explicitly request the CI-only " +
+            "unsigned mode with ORG_GRADLE_PROJECT_pinestUnsignedRelease=true.",
     )
 }
 
@@ -39,10 +52,7 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.barishamil.pinest"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
@@ -62,7 +72,7 @@ android {
 
     buildTypes {
         release {
-            if (hasReleaseKeystore) {
+            if (hasReleaseKeystore && !unsignedReleaseRequested) {
                 signingConfig = signingConfigs.getByName("release")
             }
         }

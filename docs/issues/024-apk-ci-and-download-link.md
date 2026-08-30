@@ -15,10 +15,10 @@ as `/pinest.apk`. Consequences:
 ## Change
 
 - `.github/workflows/apk.yml` — on every push to `main` touching `app/**` (and
-  on PRs, and on demand): `flutter analyze`, `flutter test`, `flutter build apk
-  --release`, upload the APK as a run artifact, and — for non-PR runs — refresh
-  the rolling `apk-latest` GitHub release with `pinest.apk`. The repo is public,
-  so that asset is a public download.
+  on PRs, and on demand): validate the client, build without signing material,
+  sign in the protected `apk-release` environment, verify package/single
+  signer, attest the result, and publish a unique `apk-<commit>` release. The
+  repo is public, so GitHub's latest-release redirect is a public stable URL.
 - `app/lib/services/apk_release.dart` — the release URL, in one place.
 - `app/lib/screens/settings_screen.dart` — the **Android app (APK)** button
   opens that URL instead of the same-origin `/pinest.apk`.
@@ -32,9 +32,8 @@ Only the APK ships from CI. The web client is still deployed locally
 
 The Android target had never been built from a clean checkout: the Google
 Services gradle plugin needs `google-services.json`, which was in no clone at
-all, and the Firebase project's registered Android app was package
-`com.bhamil.remote_pi_app` while the app builds as a different id. Fixed by
-settling on **`com.barishamil.pinest`** (user's call):
+all, and the Firebase project's registered Android app used an obsolete
+package. Fixed by settling on **`com.barishamil.pinest`** (user's call):
 
 - `applicationId`/`namespace` + `MainActivity` package renamed; the stale
   `com/pinest/…` and `com/bhamil/…` source dirs are gone; the launcher label
@@ -50,9 +49,8 @@ settling on **`com.barishamil.pinest`** (user's call):
   `com.barishamil.pinest.RunnerTests` identifier.
 - Firebase now has a matching Apple app
   (`1:271491621267:ios:2a99ee36a80675287b8866`), which supplies the native iOS
-  and macOS options. The obsolete external Firebase registrations for
-  `com.bhamil.remote_pi_app` and `com.bhamil.remotePiApp` were removed rather
-  than retained as alternate identities.
+  and macOS options. Obsolete external Firebase registrations under the prior
+  identifiers were removed rather than retained as alternate identities.
 
 ## Android sign-in
 
@@ -66,25 +64,24 @@ attached to this machine.
 
 ## Signing and publication
 
-The stable release keystore exists and all four repository secrets are now
-configured: `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
-`ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`. Its certificate SHA-256 is:
+The stable release keystore exists and all four `apk-release` environment
+secrets are configured: `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
+`ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`. The release package and
+certificate SHA-256 have one tracked authority: `app/release-identity.json`.
 
-`83:98:6D:18:59:DE:4C:E0:97:9A:E4:3C:9E:18:40:36:E4:9B:DE:3C:BC:A3:7E:F2:C8:EF:A9:3F:D7:51:A3:F5`
+Release signing fails closed at both layers: normal Gradle release tasks require
+`android/key.properties`, while the credential-free CI build must explicitly
+request a mutually exclusive unsigned mode. Pull requests receive no secrets
+and build only a debug APK. Release work crosses six jobs by immutable artifact
+ID and checked archive digest; the signing job has no checkout, Flutter,
+Gradle, or write token, and only `apksigner` sees the four secrets. The verifier
+refuses a package other than `com.barishamil.pinest`, malformed/multiple
+signers, or a certificate other than the recorded identity. GitHub attests the
+verified bytes before a separate publisher with the only `contents:write`
+permission creates a new release; no tag or asset is force-moved or clobbered.
 
-Release signing fails closed at both layers: the workflow refuses any missing
-secret and Gradle refuses a release task without `android/key.properties`.
-Pull requests receive no secrets and build only a debug APK; they neither name
-nor publish a release artifact. Non-PR release builds run
-`app/tools/verify_apk.py`, which refuses a package other than
-`com.barishamil.pinest` or a signer other than the recorded certificate before
-upload/publication.
-
-GitHub Actions run
-[`33280431296`](https://github.com/SomeoneIsWorking/pinest/actions/runs/33280431296)
-built, verified, and published the first stable-key `apk-latest` release. An
-existing debug-signed installation needs one uninstall before installing this
-stable-key APK; subsequent builds signed by the stable key update in place.
+An existing debug-signed installation needs one uninstall before installing a
+stable-key APK; subsequent builds signed by this certificate update in place.
 
 ## Verification state
 
@@ -93,14 +90,11 @@ Verified after publication:
 - Firebase and platform registrations/configuration agree on
   `com.barishamil.pinest`; the new Apple app is recorded above and obsolete
   external registrations are gone.
-- The signing secrets are configured, Gradle and the workflow fail closed, and
-  the verifier pins package plus certificate rather than trusting a successful
-  build alone.
+- The signing secrets are environment-scoped, Gradle and the workflow fail
+  closed, and the verifier pins package plus one exact certificate rather than
+  trusting a successful build alone.
 - The verifier has negative controls for the old release certificate and a
   deliberately wrong expected package; both are refused.
-- The public `pinest.apk` downloaded from the rolling release passes the same
-  verifier independently of CI: package `com.barishamil.pinest`, signer
-  SHA-256
-  `83986D1859DE4CE0979AE43C9E184036E49BDE3CBCA37EF2C8EFA93FD751A3F5`,
-  artifact SHA-256
-  `04c1a7ec562ad36a82e0a9850620e93d02114c5a4b16562207098e3b625f89d6`.
+- Publication verification is recorded only after the new immutable pipeline
+  completes and the latest public APK, checksum, and attestation bundle are
+  independently rechecked.

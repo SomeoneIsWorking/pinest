@@ -10,6 +10,6 @@ flutter analyze
 flutter test
 flutter build web --release --pwa-strategy=none
 # The APK is NOT bundled here: CI (.github/workflows/apk.yml) builds it on every
-# push to main and publishes it as the `apk-latest` release asset the settings
-# screen links to. Two sources would mean one of them silently going stale.
+# push to main and publishes an attested immutable release selected through
+# GitHub's latest-release redirect. Two sources would mean one silently stale.
 firebase deploy --only hosting -P pinest-app

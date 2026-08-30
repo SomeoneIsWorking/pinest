@@ -5,28 +5,55 @@ rules_version = '2';
 // Firebase holds auth + discovery ONLY: one tiny presence doc per user.
 // Chat content never touches Firestore (it flows over the WS tunnel).
 //
-// CHANGED vs PiNest: the machine no longer needs a service account. It
-// authenticates as the USER (browser Google sign-in + refresh token) and
-// publishes its own presence doc through Firestore REST — hence owner
-// create/update on users/{uid}. The Admin-SDK self-host path bypasses rules
-// either way.
+// The hosted machine authenticates as the user and publishes only its own
+// tightly shaped presence doc. The Admin-SDK self-host path bypasses rules.
 //
 // Deploy once with: firebase deploy --only firestore:rules --project pinest-app
 
 service cloud.firestore {
   match /databases/{database}/documents {
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function hasValidHttpsUrl(url) {
+      return url == null || (url is string
+        && url.size() <= 2048
+        && url.matches(
+          'https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(/[A-Za-z0-9._~!$&()*+,;=:@%/-]*)?'
+        ));
+    }
+
+    function hasValidPresenceShape() {
+      let data = request.resource.data;
+      let now = request.time.toMillis();
+      return data.keys().hasAll(
+          ['url', 'online', 'ownerEmail', 'hostname', 'ts'])
+        && data.keys().hasOnly(
+          ['url', 'online', 'ownerEmail', 'hostname', 'ts'])
+        && hasValidHttpsUrl(data.url)
+        && data.online is bool
+        && data.ownerEmail is string
+        && data.ownerEmail.size() >= 3
+        && data.ownerEmail.size() <= 320
+        && request.auth.token.email is string
+        && data.ownerEmail == request.auth.token.email
+        && data.hostname is string
+        && data.hostname.size() >= 1
+        && data.hostname.size() <= 255
+        && data.ts is int
+        && data.ts >= now - 120000
+        && data.ts <= now + 120000;
+    }
 
     // ── Presence/discovery doc (ephemeral, overwritten by the machine) ───
     // The phone/web app reads it; the machine writes it with its own ID token.
     match /users/{uid} {
-      allow get, list: if request.auth != null && request.auth.uid == uid;
-      allow create, update: if request.auth != null
-        && request.auth.uid == uid
-        // only the whitelisted fields, no surprises
-        && request.resource.data.diff(resource.data == null ? {} : resource.data)
-             .affectedKeys().hasOnly(['url', 'online', 'ownerEmail', 'hostname', 'ts'])
-        && request.resource.data.size() <= 5;
-
+      allow get: if isOwner(uid);
+      allow create: if isOwner(uid) && hasValidPresenceShape();
+      allow update: if isOwner(uid)
+        && hasValidPresenceShape()
+        && request.resource.data.ownerEmail == resource.data.ownerEmail;
     }
 
     match /{document=**} {
