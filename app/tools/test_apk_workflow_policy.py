@@ -190,6 +190,16 @@ def workflow_policy_violations(source: str) -> list[str]:
         findings.append("publish must re-check signed provenance")
     if "git push" in publish or "--clobber" in publish or "apk-latest" in publish:
         findings.append("publish must not move or overwrite a release")
+    if "gh release view" in publish:
+        findings.append("publish must not treat every release lookup failure as absence")
+    if 'existing_release_id="$(' not in publish or "gh api --paginate" not in publish:
+        findings.append("publish must fail closed while checking the release tag")
+    explicit_release_repository = (
+        'gh release create "$release_tag" \\\n            --repo "$GITHUB_REPOSITORY"',
+        'gh release edit "$release_tag" \\\n            --repo "$GITHUB_REPOSITORY"',
+    )
+    if not all(command in publish for command in explicit_release_repository):
+        findings.append("no-checkout release commands must name the repository explicitly")
     if 'release_tag="apk-$GITHUB_SHA"' not in publish or "--draft" not in publish or "--latest" not in publish:
         findings.append("publish must create a unique per-commit release before marking it latest")
     if "current_main=" not in publish or 'current_main" != "$GITHUB_SHA' not in publish:
@@ -281,6 +291,17 @@ class ApkWorkflowPolicyTests(unittest.TestCase):
     def test_rejects_static_release_tag(self) -> None:
         mutated = self.source.replace('release_tag="apk-$GITHUB_SHA"', 'release_tag="apk-latest"', 1)
         self.assert_policy_rejects(mutated, "must not move or overwrite")
+
+    def test_rejects_ambiguous_release_lookup_failure(self) -> None:
+        mutated = self.source.replace("gh api --paginate", "gh release view", 1)
+        self.assert_policy_rejects(mutated, "every release lookup failure as absence")
+
+    def test_rejects_no_checkout_release_without_explicit_repository(self) -> None:
+        command = (
+            'gh release create "$release_tag" \\\n            --repo "$GITHUB_REPOSITORY"'
+        )
+        mutated = self.source.replace(command, 'gh release create "$release_tag" \\', 1)
+        self.assert_policy_rejects(mutated, "name the repository explicitly")
 
     def test_rejects_manual_release_without_main_gate(self) -> None:
         mutated = self.source.replace("github.ref == 'refs/heads/main'", "github.ref != ''", 1)
