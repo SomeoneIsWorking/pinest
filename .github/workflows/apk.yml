@@ -431,7 +431,11 @@ jobs:
             exit 0
           fi
           release_tag="apk-$GITHUB_SHA"
-          if gh release view "$release_tag" >/dev/null 2>&1; then
+          existing_release_id="$(
+            gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"$release_tag\") | .id"
+          )"
+          if [ -n "$existing_release_id" ]; then
             echo "::error::immutable release already exists: $release_tag"
             exit 1
           fi
@@ -439,6 +443,7 @@ jobs:
 
           Verify \`pinest.apk\` with the published SHA-256 file and Sigstore bundle, or run \`gh attestation verify pinest.apk --repo ${GITHUB_REPOSITORY}\`."
           gh release create "$release_tag" \
+            --repo "$GITHUB_REPOSITORY" \
             release/pinest.apk \
             release/pinest.apk.sha256 \
             release/pinest.apk.provenance.json \
@@ -448,4 +453,7 @@ jobs:
             --title "PiNest Android ${GITHUB_SHA::12}" \
             --notes "$notes" \
             --draft
-          gh release edit "$release_tag" --draft=false --latest
+          gh release edit "$release_tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false \
+            --latest
