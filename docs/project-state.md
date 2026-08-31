@@ -2,9 +2,22 @@
 
 Factual capability inventory. IDs are stable. Statuses: `verified` (evidence
 cited), `partial`, `blocked`, `missing`. One current focus at the bottom.
+
+## Capability inventory
+
+| ID | Capability or outcome | State | Factual dependency | Goals |
+| --- | --- | --- | --- | --- |
+| S1 | PiNest extension is ported and loads under pi | verified | — | G1, G5 |
+| S2 | Session registry is private, owner-bound, and persisted to disk | verified | S1 | G2, G6 |
+| S3 | Sessions survive a real host crash/restart and resume with full history | partial | S2 | G2 |
+| S4 | Explicit live harness reload adopts running sessions safely | verified | S1, S2 | G3 |
+| S5b | Hosted discovery and browser authentication provide zero-config distribution | partial | S1, S2 | G1, G6 |
+| S5 | GLM-5.3-Flash defaults to a one-million-token context with configured compaction | verified | S1 | G4 |
+| S6 | Flutter clients provide durable remote session control and release delivery | partial | S1, S2 | G1, G2 |
+| S7 | One owner is isolated through hardened authentication, protocol, discovery, and release boundaries | partial | S2, S5b, S6 | G6 |
 Atomic work and findings live in `docs/issues/`.
 
-## S1 — PiNest extension ported and loading under pi
+### S1 — PiNest extension ported and loading under pi
 
 Status: `verified`
 
@@ -41,7 +54,7 @@ server-authoritative active session selection to clients (I-013).
 Gaps: one real browser sign-in to exercise the hosted RestImpl path end to end
 (AdminFirebase is what runs on the dev machine today).
 
-## S2 — Session registry persisted to disk
+### S2 — Session registry persisted to disk
 
 Status: `verified`
 
@@ -62,7 +75,7 @@ symlink refusal, fresh-instance round-trip, corrupt-file refusal, no tmp
 droppings, and injected save/unlink/rollback failures. The integrated server
 gate passes 247 tests with 4 intentional real-provider skips.
 
-## S3 — Resume: sessions survive host restart
+### S3 — Resume: sessions survive host restart
 
 Status: `partial`
 
@@ -81,7 +94,7 @@ from the app end-to-end.
 
 Gaps: real-host restart drill; app UI for resume (I-007).
 
-## S4 — Harness self-modification applies live
+### S4 — Harness self-modification applies live
 
 Status: `verified`
 
@@ -153,7 +166,7 @@ at runtime), and the host bootstrap re-registered thinking level from a
 nonexistent `getThinkingLevel()` raw — flipping the app display from
 "default" to "off" on every reload (fixed via `reportThinkingLevel`).
 
-## S5b — Hosted discovery backend (zero-config distribution)
+### S5b — Hosted discovery backend (zero-config distribution)
 
 Status: `partial`
 
@@ -190,7 +203,7 @@ non-whitelisted field 403.
 Gaps: one real browser sign-in to exercise RestImpl end-to-end (AdminFirebase
 is what runs on the dev machine today).
 
-## S5 — GLM-5.3-Flash via OpenCode Go, compact at ~400k
+### S5 — GLM-5.3-Flash via OpenCode Go, compact at ~400k
 
 Status: `verified`
 
@@ -209,7 +222,7 @@ authenticate without env vars; real-LLM integration tests pass against
 `openrouter/nvidia/nemotron-3-super-120b-a12b:free` (free tier; the gemma
 free model 429-rate-limits).
 
-## S6 — Flutter client with durable session UI
+### S6 — Flutter client with durable session UI
 
 Status: `partial`
 
@@ -397,7 +410,7 @@ Gaps: run against the live host from an actual phone; hosted (RestImpl)
 backend not yet exercised by a real browser sign-in; stream deltas
 (I-006 item 5) still cumulative — protocol+app change together.
 
-## S7 — Single-owner isolation and hardened public boundaries
+### S7 — Single-owner isolation and hardened public boundaries
 
 Status: `partial`
 
@@ -440,6 +453,6 @@ claim.
 
 ## Current focus
 
-Design host/device-key binding and application-level tunnel encryption for
+S7 is the current focus: design host/device-key binding and application-level tunnel encryption for
 I-030/I-038, then run the app against the live host from a phone and exercise
 one real hosted (RestImpl) browser sign-in end-to-end.
