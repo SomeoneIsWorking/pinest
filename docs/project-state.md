@@ -1,5 +1,12 @@
 # Project state — remote-code
 
+## Comparison baseline
+
+The baseline is operating a pi coding-agent session only from the host terminal, with no authenticated
+remote browser or phone control and no project-owned durable session registry. PiNest adds private
+remote session creation, observation, input, interruption, resume, discovery, and mobile delivery for
+one owner.
+
 Factual capability inventory. IDs are stable. Statuses: `verified` (evidence
 cited), `partial`, `blocked`, `missing`. One current focus at the bottom.
 
@@ -15,7 +22,44 @@ cited), `partial`, `blocked`, `missing`. One current focus at the bottom.
 | S5 | GLM-5.3-Flash defaults to a one-million-token context with configured compaction | verified | S1 | G4 |
 | S6 | Flutter clients provide durable remote session control and release delivery | partial | S1, S2 | G1, G2 |
 | S7 | One owner is isolated through hardened authentication, protocol, discovery, and release boundaries | partial | S2, S5b, S6 | G6 |
+| S8 | Remote clients create, list, resume, rename, and delete sessions across project directories | partial | S2, S6 | G1, G2 |
+| S9 | Remote clients stream conversations, steer or queue input, paste images, inspect tools, and stop runs | partial | S1, S6 | G1 |
+| S10 | Clients show model/context usage and expose automatic and manual compaction controls | partial | S5, S6 | G1, G4 |
+| S11 | The authenticated web client connects to the owner's advertised host over the internet | partial | S5b, S7 | G1, G6 |
+| S12 | An installable, attested Android APK is published for the mobile client | verified | S6, S7 | G1, G6 |
+| S13 | The mobile client is distributed through Google Play | missing | S6, S7 | G1 |
 Atomic work and findings live in `docs/issues/`.
+
+### S8 — Remote session lifecycle
+
+The server and clients expose create, list, resume, rename, and delete operations over the owned
+registry. Gap: a real host-crash, reconnect, and full client lifecycle drill remains.
+
+### S9 — Live remote interaction
+
+The clients implement streamed messages, steering and queued follow-ups, image paste, tool-call
+inspection, and remote stop. Gap: the complete operation set is not yet qualified end to end on every
+shipping client.
+
+### S10 — Context and compaction controls
+
+The client displays model/context usage and exposes configured automatic compaction plus visible
+manual `/compact` and `/clear` operations. Gap: provider and reconnect behavior remains incomplete.
+
+### S11 — Authenticated internet connection
+
+Hosted discovery, Google authentication, and the browser transport are implemented. Gap: one real
+browser sign-in through the hosted RestImpl path remains unverified.
+
+### S12 — Android APK delivery
+
+Evidence: the documented release path publishes an installable per-commit Android APK with signing
+and attestation metadata through the repository's releases.
+
+### S13 — Google Play delivery
+
+Missing capability: the Android client is not distributed through Google Play; direct APK release is
+the current channel.
 
 ### S1 — PiNest extension ported and loading under pi
 
