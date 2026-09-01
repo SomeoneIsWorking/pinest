@@ -11,7 +11,7 @@
   },
   "scripts": {
     "start": "pi -e server/src/index.ts",
-    "test": "npm run test:structure && node --test \"server/test/*.test.ts\"",
+    "test": "npm run test:structure && RC_FIREBASE_API_KEY=\"${RC_FIREBASE_API_KEY:-test-api-key}\" node --test \"server/test/*.test.ts\"",
     "test:structure": "python3 -m unittest discover -s tools -p \"test_*.py\" && python3 tools/check_structure.py",
     "typecheck": "tsc --noEmit -p server/tsconfig.json"
   },
