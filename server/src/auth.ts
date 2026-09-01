@@ -98,11 +98,25 @@ export interface WebConfig {
   appId: string;
 }
 
+// The apiKey is not stored in the repository. Supply it through
+// RC_FIREBASE_API_KEY; a deployment without it fails at readWebConfig()
+// rather than starting with an unusable Firebase configuration.
 const HOSTED_DEFAULTS = {
-  apiKey: "FIREBASE_WEB_API_KEY_REMOVED_FROM_HISTORY",
+  apiKey: "",
   appId: "1:271491621267:web:3822b177db9e36a57b8866",
   projectId: "pinest-app",
 };
+
+function requireApiKey(): string {
+  const key = process.env.RC_FIREBASE_API_KEY || HOSTED_DEFAULTS.apiKey;
+  if (!key) {
+    throw new Error(
+      "RC_FIREBASE_API_KEY is not set — the Firebase web apiKey is injected at " +
+        "deploy time and is not stored in the repository.",
+    );
+  }
+  return key;
+}
 
 export function readServiceAccount(): ServiceAccount {
   const { paths, explicit } = serviceAccountPaths();
@@ -131,7 +145,7 @@ function serviceAccountPaths(): { paths: string[]; explicit: boolean } {
 export function firebaseWebConfig(): WebConfig {
   const sa = hasServiceAccount() ? readServiceAccount() : null;
   return {
-    apiKey: process.env.RC_FIREBASE_API_KEY || HOSTED_DEFAULTS.apiKey,
+    apiKey: requireApiKey(),
     authDomain: `${sa?.project_id ?? webProjectId()}.firebaseapp.com`,
     projectId: sa?.project_id ?? webProjectId(),
     appId: process.env.RC_FIREBASE_APP_ID || HOSTED_DEFAULTS.appId,
