@@ -21,13 +21,21 @@ of starting with an unusable configuration.
 ## Gradle
 
 The google-services plugin needs a real `app/android/app/google-services.json`.
-That file is git-ignored and CI writes it from `GOOGLE_SERVICES_JSON_BASE64`
-before `flutter pub get`. To build locally, download it from the Firebase
-console for the `pinest-app` Android app, or decode your own copy of the secret:
+That file is git-ignored. The `build_unsigned` job writes it from
+`GOOGLE_SERVICES_JSON_BASE64` before `flutter pub get`.
+
+The `validate` job may not read any secret — it runs dependency code, and
+keeping it secret-free is enforced by `app/tools/test_apk_workflow_policy.py`.
+It therefore copies `app/android/app/google-services.template.json`, which is
+identical apart from a placeholder key. That is enough for the google-services
+Gradle plugin to compile the Android target; the pull-request debug APK it
+produces cannot reach Firebase and is never published.
+
+To build locally, download the real file from the Firebase console for the
+`pinest-app` Android app, or use the template for a compile-only build:
 
 ```sh
-gh secret list                     # confirms the secret exists; values are write-only
-base64 -d < google-services.json.b64 > app/android/app/google-services.json
+cp app/android/app/google-services.template.json app/android/app/google-services.json
 ```
 
 ## Hosted discovery server
