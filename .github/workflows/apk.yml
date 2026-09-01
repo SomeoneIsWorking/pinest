@@ -53,16 +53,10 @@ jobs:
             --install-dir "$RUNNER_TOOL_CACHE/pinest-flutter-sdk" \
             --archive-cache "$RUNNER_TOOL_CACHE/pinest-flutter/${{ steps.flutter-pin.outputs.archive_name }}"
 
-      - name: Write Firebase Android config
-        env:
-          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+      - name: Stage placeholder Firebase config
         run: |
           set -eu
-          [ -n "${GOOGLE_SERVICES_JSON_BASE64:-}" ] || {
-            echo "::error::GOOGLE_SERVICES_JSON_BASE64 is missing"; exit 1;
-          }
-          printf '%s' "$GOOGLE_SERVICES_JSON_BASE64" | base64 -d > android/app/google-services.json
-          python3 -c "import json,sys; json.load(open('android/app/google-services.json'))"
+          cp android/app/google-services.template.json android/app/google-services.json
 
       - run: flutter pub get --enforce-lockfile
       - run: flutter analyze
@@ -73,13 +67,7 @@ jobs:
       # job, but their Android target still has to compile.
       - name: Build debug APK for pull request
         if: github.event_name == 'pull_request'
-        env:
-          FIREBASE_ANDROID_API_KEY: ${{ secrets.FIREBASE_ANDROID_API_KEY }}
-          FIREBASE_WEB_API_KEY: ${{ secrets.FIREBASE_WEB_API_KEY }}
-          FIREBASE_IOS_API_KEY: ${{ secrets.FIREBASE_IOS_API_KEY }}
-        run: |
-          set -eu
-          flutter build apk --debug --no-pub --dart-define=FIREBASE_ANDROID_API_KEY="$FIREBASE_ANDROID_API_KEY" --dart-define=FIREBASE_WEB_API_KEY="$FIREBASE_WEB_API_KEY" --dart-define=FIREBASE_IOS_API_KEY="$FIREBASE_IOS_API_KEY"
+        run: flutter build apk --debug --no-pub
 
   build_unsigned:
     needs: validate
