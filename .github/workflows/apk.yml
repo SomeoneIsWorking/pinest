@@ -53,6 +53,17 @@ jobs:
             --install-dir "$RUNNER_TOOL_CACHE/pinest-flutter-sdk" \
             --archive-cache "$RUNNER_TOOL_CACHE/pinest-flutter/${{ steps.flutter-pin.outputs.archive_name }}"
 
+      - name: Write Firebase Android config
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          set -eu
+          [ -n "${GOOGLE_SERVICES_JSON_BASE64:-}" ] || {
+            echo "::error::GOOGLE_SERVICES_JSON_BASE64 is missing"; exit 1;
+          }
+          printf '%s' "$GOOGLE_SERVICES_JSON_BASE64" | base64 -d > android/app/google-services.json
+          python3 -c "import json,sys; json.load(open('android/app/google-services.json'))"
+
       - run: flutter pub get --enforce-lockfile
       - run: flutter analyze
       - run: flutter test
@@ -62,7 +73,13 @@ jobs:
       # job, but their Android target still has to compile.
       - name: Build debug APK for pull request
         if: github.event_name == 'pull_request'
-        run: flutter build apk --debug --no-pub
+        env:
+          FIREBASE_ANDROID_API_KEY: ${{ secrets.FIREBASE_ANDROID_API_KEY }}
+          FIREBASE_WEB_API_KEY: ${{ secrets.FIREBASE_WEB_API_KEY }}
+          FIREBASE_IOS_API_KEY: ${{ secrets.FIREBASE_IOS_API_KEY }}
+        run: |
+          set -eu
+          flutter build apk --debug --no-pub --dart-define=FIREBASE_ANDROID_API_KEY="$FIREBASE_ANDROID_API_KEY" --dart-define=FIREBASE_WEB_API_KEY="$FIREBASE_WEB_API_KEY" --dart-define=FIREBASE_IOS_API_KEY="$FIREBASE_IOS_API_KEY"
 
   build_unsigned:
     needs: validate
@@ -101,6 +118,17 @@ jobs:
             --install-dir "$RUNNER_TOOL_CACHE/pinest-flutter-sdk" \
             --archive-cache "$RUNNER_TOOL_CACHE/pinest-flutter/${{ steps.flutter-pin.outputs.archive_name }}"
 
+      - name: Write Firebase Android config
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          set -eu
+          [ -n "${GOOGLE_SERVICES_JSON_BASE64:-}" ] || {
+            echo "::error::GOOGLE_SERVICES_JSON_BASE64 is missing"; exit 1;
+          }
+          printf '%s' "$GOOGLE_SERVICES_JSON_BASE64" | base64 -d > android/app/google-services.json
+          python3 -c "import json,sys; json.load(open('android/app/google-services.json'))"
+
       - run: flutter pub get --enforce-lockfile
 
       # Gradle's explicit property is the only route that permits an unsigned
@@ -109,7 +137,16 @@ jobs:
         env:
           GRADLE_OPTS: -Dorg.gradle.daemon=false
           ORG_GRADLE_PROJECT_pinestUnsignedRelease: 'true'
-        run: flutter build apk --release --no-pub --build-number "$GITHUB_RUN_NUMBER"
+          FIREBASE_ANDROID_API_KEY: ${{ secrets.FIREBASE_ANDROID_API_KEY }}
+          FIREBASE_WEB_API_KEY: ${{ secrets.FIREBASE_WEB_API_KEY }}
+          FIREBASE_IOS_API_KEY: ${{ secrets.FIREBASE_IOS_API_KEY }}
+        run: |
+          set -eu
+          for var in FIREBASE_ANDROID_API_KEY FIREBASE_WEB_API_KEY FIREBASE_IOS_API_KEY; do
+            eval "value=\${$var:-}"
+            [ -n "$value" ] || { echo "::error::$var is missing"; exit 1; }
+          done
+          flutter build apk --release --no-pub --build-number "$GITHUB_RUN_NUMBER" --dart-define=FIREBASE_ANDROID_API_KEY="$FIREBASE_ANDROID_API_KEY" --dart-define=FIREBASE_WEB_API_KEY="$FIREBASE_WEB_API_KEY" --dart-define=FIREBASE_IOS_API_KEY="$FIREBASE_IOS_API_KEY"
 
       - name: Locate and prove the APK is unsigned
         run: |
