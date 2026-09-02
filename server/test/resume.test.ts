@@ -45,6 +45,8 @@ test("resume: spawn → despawn → 'restart' → resume restores history", asyn
   assert.equal(row.status, "idle");
   assert.equal(row.isHost, false);
   assert.ok(row.piSessionPath, "row carries the pi session file path");
+  assert.ok(row.model, "spawn persists model to the registry row");
+  assert.ok(sup.sessions.get("r1").model, "live session carries model");
 
   // Seed conversation history via pi's own API. The session file is only
   // flushed once an assistant message exists — so append user then assistant.
