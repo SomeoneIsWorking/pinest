@@ -850,9 +850,15 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
 function listModels() {
   try {
     const reg = (_ctx as any)?.modelRegistry;
-    reg?.refresh?.();
-    return (reg?.getAvailable?.() ?? []).map(mapModel);
+    if (reg) {
+      return (reg.getAvailable?.() ?? []).map(mapModel);
+    }
+    const runtime = (_ctx as any)?.session?.modelRuntime ?? (_ctx as any)?._modelRuntime;
+    if (runtime) {
+      return (runtime.getAvailableSnapshot?.() ?? []).map(mapModel);
+    }
   } catch { return []; }
+  return [];
 }
 
 function checkPath(cmd: Extract<ClientCommand, { type: "path_check" }>): void {

@@ -701,7 +701,7 @@ class _ChatScreenState extends State<ChatScreen> {
       BarAction(
         label: '/model ${s?.modelName ?? s?.model ?? ""}'.trim(),
         icon: Icons.memory,
-        onTap: models.isEmpty ? null : () => _showModels(context, svc, models),
+        onTap: (s == null) ? null : () => _showModels(context, svc, models),
       ),
       BarAction(
         label: '/thinking ${s?.thinkingLevel ?? "off"}',
@@ -1222,15 +1222,22 @@ class _ChatScreenState extends State<ChatScreen> {
   ) {
     final s = _session(svc);
     if (s == null) return;
+    svc.listModels(s);
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      builder: (_) => ModelSheet(
-        models: models,
-        onPick: (m) {
-          svc.setModel(s, m.provider, m.id);
-          context.read<UserPreferences>().saveModel('${m.provider}/${m.id}');
-          Navigator.pop(context);
+      builder: (_) => Consumer<AgentService>(
+        builder: (ctx, agentSvc, _) {
+          final liveModels = agentSvc.modelsFor(s.id);
+          final effectiveModels = liveModels.isNotEmpty ? liveModels : models;
+          return ModelSheet(
+            models: effectiveModels,
+            onPick: (m) {
+              agentSvc.setModel(s, m.provider, m.id);
+              ctx.read<UserPreferences>().saveModel('${m.provider}/${m.id}');
+              Navigator.pop(ctx);
+            },
+          );
         },
       ),
     );
