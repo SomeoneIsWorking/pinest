@@ -429,9 +429,28 @@ async function bootstrap(): Promise<void> {
   // Presence: publish IMMEDIATELY (url may be null until the tunnel lands)
   // and republish when it does. The tunnel runs in the BACKGROUND — a slow
   // or dead network must never block the registry/presence work below it.
-  // Heartbeat: keep the URL doc fresh
+  // Heartbeat: keep the URL doc fresh and automatically recover/reconnect
+  // the tunnel if it was dropped, killed, or failed to start initially.
   _heartbeat = setInterval(() => {
-    publishCurrentPresence(true).catch(() => {});
+    const { tunnelProvider: pref } = loadConfig();
+    if (_ws && pref !== "off" && !_ws.tunnelUrl && !_tunnelStarting) {
+      _tunnelStarting = true;
+      renderFooter();
+      _ws.restartTunnel(pref)
+        .then(() => {
+          renderFooter();
+          return publishCurrentPresence(true);
+        })
+        .catch((e) => {
+          debug("[remote-code] heartbeat tunnel restart failed:", (e as Error).message);
+        })
+        .finally(() => {
+          _tunnelStarting = false;
+          renderFooter();
+        });
+    } else {
+      publishCurrentPresence(true).catch(() => {});
+    }
   }, 20_000);
   _heartbeat.unref?.();
 
