@@ -1,0 +1,496 @@
+# Builds, signs, attests, and publishes the Flutter Android client. The web
+# client downloads pinest.apk through GitHub's immutable latest-release route.
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - '.github/workflows/apk.yml'
+  pull_request:
+    paths:
+      - 'app/**'
+      - '.github/workflows/apk.yml'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: apk-${{ github.event_name == 'pull_request' && github.ref || 'release' }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - id: flutter-pin
+        name: Read authoritative Flutter SDK pin
+        run: python3 tools/install_flutter.py --emit-github-metadata "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.tool_cache }}/pinest-flutter/${{ steps.flutter-pin.outputs.archive_name }}
+          key: flutter-linux-x64-${{ steps.flutter-pin.outputs.version }}-${{ steps.flutter-pin.outputs.archive_sha256 }}
+
+      - name: Install checksum-pinned Flutter SDK
+        run: |
+          python3 tools/install_flutter.py \
+            --install-dir "$RUNNER_TOOL_CACHE/pinest-flutter-sdk" \
+            --archive-cache "$RUNNER_TOOL_CACHE/pinest-flutter/${{ steps.flutter-pin.outputs.archive_name }}"
+
+      - name: Stage placeholder Firebase config
+        run: |
+          set -eu
+          cp android/app/google-services.template.json android/app/google-services.json
+
+      - run: flutter pub get --enforce-lockfile
+      - run: flutter analyze
+      - run: flutter test
+      - run: python3 -m unittest discover -s tools -p "test_*.py"
+
+      # Pull requests receive no signing secrets and cannot reach any release
+      # job, but their Android target still has to compile.
+      - name: Build debug APK for pull request
+        if: github.event_name == 'pull_request'
+        run: flutter build apk --debug --no-pub
+
+  build_unsigned:
+    needs: validate
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - id: flutter-pin
+        name: Read authoritative Flutter SDK pin
+        run: python3 tools/install_flutter.py --emit-github-metadata "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.tool_cache }}/pinest-flutter/${{ steps.flutter-pin.outputs.archive_name }}
+          key: flutter-linux-x64-${{ steps.flutter-pin.outputs.version }}-${{ steps.flutter-pin.outputs.archive_sha256 }}
+
+      - name: Install checksum-pinned Flutter SDK
+        run: |
+          python3 tools/install_flutter.py \
+            --install-dir "$RUNNER_TOOL_CACHE/pinest-flutter-sdk" \
+            --archive-cache "$RUNNER_TOOL_CACHE/pinest-flutter/${{ steps.flutter-pin.outputs.archive_name }}"
+
+      - name: Write Firebase Android config
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          set -eu
+          [ -n "${GOOGLE_SERVICES_JSON_BASE64:-}" ] || {
+            echo "::error::GOOGLE_SERVICES_JSON_BASE64 is missing"; exit 1;
+          }
+          printf '%s' "$GOOGLE_SERVICES_JSON_BASE64" | base64 -d > android/app/google-services.json
+          python3 -c "import json,sys; json.load(open('android/app/google-services.json'))"
+
+      - run: flutter pub get --enforce-lockfile
+
+      # Gradle's explicit property is the only route that permits an unsigned
+      # release. A configured keystore and this mode are mutually exclusive.
+      - name: Build unsigned release APK
+        env:
+          GRADLE_OPTS: -Dorg.gradle.daemon=false
+          ORG_GRADLE_PROJECT_pinestUnsignedRelease: 'true'
+          FIREBASE_ANDROID_API_KEY: ${{ secrets.FIREBASE_ANDROID_API_KEY }}
+          FIREBASE_WEB_API_KEY: ${{ secrets.FIREBASE_WEB_API_KEY }}
+          FIREBASE_IOS_API_KEY: ${{ secrets.FIREBASE_IOS_API_KEY }}
+        run: |
+          set -eu
+          for var in FIREBASE_ANDROID_API_KEY FIREBASE_WEB_API_KEY FIREBASE_IOS_API_KEY; do
+            eval "value=\${$var:-}"
+            [ -n "$value" ] || { echo "::error::$var is missing"; exit 1; }
+          done
+          flutter build apk --release --no-pub --build-number "$GITHUB_RUN_NUMBER" --dart-define=FIREBASE_ANDROID_API_KEY="$FIREBASE_ANDROID_API_KEY" --dart-define=FIREBASE_WEB_API_KEY="$FIREBASE_WEB_API_KEY" --dart-define=FIREBASE_IOS_API_KEY="$FIREBASE_IOS_API_KEY"
+
+      - name: Locate and prove the APK is unsigned
+        run: |
+          set -eu
+          mapfile -t apks < <(find build/app/outputs/flutter-apk -maxdepth 1 -type f -name '*release*.apk' -print)
+          [ "${#apks[@]}" -eq 1 ] || {
+            echo "::error::expected exactly one release APK, found ${#apks[@]}"; exit 1;
+          }
+          build_tools="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          [ -x "$build_tools/apksigner" ] || { echo "::error::apksigner not found"; exit 1; }
+          mkdir -p release
+          cp "${apks[0]}" release/pinest-unsigned.apk
+          if "$build_tools/apksigner" verify release/pinest-unsigned.apk >/dev/null 2>&1; then
+            echo "::error::unsigned build unexpectedly carries a valid signature"; exit 1
+          fi
+
+      - id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pinest-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+          path: app/release/pinest-unsigned.apk
+          if-no-files-found: error
+          retention-days: 1
+
+  sign:
+    needs: build_unsigned
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    permissions: {}
+    # Repository administrators should additionally restrict this environment
+    # to main in GitHub's deployment-branch policy and require approval.
+    environment: apk-release
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build_unsigned.outputs.artifact-id }}
+          path: unsigned
+          digest-mismatch: error
+
+      - name: Validate transfer and align unsigned APK
+        env:
+          EXPECTED_ARCHIVE_SHA256: ${{ needs.build_unsigned.outputs.artifact-digest }}
+        run: |
+          set -eu
+          case "$EXPECTED_ARCHIVE_SHA256" in
+            *[!0-9a-f]*|'') echo "::error::invalid unsigned artifact digest"; exit 1 ;;
+          esac
+          [ "${#EXPECTED_ARCHIVE_SHA256}" -eq 64 ] || { echo "::error::invalid unsigned artifact digest"; exit 1; }
+          build_tools="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          [ -x "$build_tools/zipalign" ] || { echo "::error::zipalign not found"; exit 1; }
+          [ -x "$build_tools/apksigner" ] || { echo "::error::apksigner not found"; exit 1; }
+          echo "BUILD_TOOLS_DIR=$build_tools" >> "$GITHUB_ENV"
+          mkdir -p scratch/signing release
+          "$build_tools/zipalign" -p -f 4 unsigned/pinest-unsigned.apk scratch/signing/pinest-aligned.apk
+
+      # Only apksigner receives the durable release credentials. No checkout,
+      # Flutter, Gradle, dependency, or repository script runs in this job.
+      - name: Sign aligned APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -eu
+          [ -n "${KEYSTORE_BASE64:-}" ] || { echo "::error::ANDROID_KEYSTORE_BASE64 is missing"; exit 1; }
+          [ -n "${KEYSTORE_PASSWORD:-}" ] || { echo "::error::ANDROID_KEYSTORE_PASSWORD is missing"; exit 1; }
+          [ -n "${KEY_ALIAS:-}" ] || { echo "::error::ANDROID_KEY_ALIAS is missing"; exit 1; }
+          [ -n "${KEY_PASSWORD:-}" ] || { echo "::error::ANDROID_KEY_PASSWORD is missing"; exit 1; }
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > scratch/signing/upload-keystore.jks
+          "$BUILD_TOOLS_DIR/apksigner" sign \
+            --ks scratch/signing/upload-keystore.jks \
+            --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass env:KEYSTORE_PASSWORD \
+            --key-pass env:KEY_PASSWORD \
+            --out release/pinest.apk \
+            scratch/signing/pinest-aligned.apk
+          cp release/pinest.apk release/pinest-v0.1.0.apk
+
+      - name: Destroy signing material
+        if: always()
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("scratch/signing/upload-keystore.jks")
+          if path.exists():
+              path.unlink()
+          PY
+
+      - name: Verify signed container
+        run: "$BUILD_TOOLS_DIR/apksigner verify --verbose release/pinest.apk"
+
+      - id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pinest-signed-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            release/pinest.apk
+            release/pinest-v0.1.0.apk
+          if-no-files-found: error
+          retention-days: 1
+
+  verify:
+    needs: sign
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.sign.outputs.artifact-id }}
+          path: release
+          digest-mismatch: error
+
+      - name: Verify identity and write checksums
+        env:
+          EXPECTED_ARCHIVE_SHA256: ${{ needs.sign.outputs.artifact-digest }}
+        run: |
+          set -eu
+          case "$EXPECTED_ARCHIVE_SHA256" in
+            *[!0-9a-f]*|'') echo "::error::invalid signed artifact digest"; exit 1 ;;
+          esac
+          [ "${#EXPECTED_ARCHIVE_SHA256}" -eq 64 ] || { echo "::error::invalid signed artifact digest"; exit 1; }
+          python3 app/tools/verify_apk.py release/pinest.apk \
+            --write-provenance release/pinest.apk.provenance.json \
+            --source-repository "$GITHUB_REPOSITORY" \
+            --source-commit "$GITHUB_SHA" \
+            --source-ref "$GITHUB_REF" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT"
+          cp app/release-identity.json release/pinest.release-identity.json
+          cp release/pinest.apk release/pinest-v0.1.0.apk
+          (cd release && sha256sum pinest.apk > pinest.apk.sha256 && sha256sum pinest-v0.1.0.apk > pinest-v0.1.0.apk.sha256 && sha256sum --check pinest.apk.sha256 && sha256sum --check pinest-v0.1.0.apk.sha256)
+
+      - id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pinest-verified-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            release/pinest.apk
+            release/pinest-v0.1.0.apk
+            release/pinest.apk.sha256
+            release/pinest-v0.1.0.apk.sha256
+            release/pinest.apk.provenance.json
+            release/pinest.release-identity.json
+          if-no-files-found: error
+          retention-days: 1
+
+  attest:
+    needs: verify
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.verify.outputs.artifact-id }}
+          path: release
+          digest-mismatch: error
+
+      - name: Validate verified artifact transfer
+        env:
+          EXPECTED_ARCHIVE_SHA256: ${{ needs.verify.outputs.artifact-digest }}
+        run: |
+          set -eu
+          case "$EXPECTED_ARCHIVE_SHA256" in
+            *[!0-9a-f]*|'') echo "::error::invalid verified artifact digest"; exit 1 ;;
+          esac
+          [ "${#EXPECTED_ARCHIVE_SHA256}" -eq 64 ] || { echo "::error::invalid verified artifact digest"; exit 1; }
+          (cd release && sha256sum --check pinest.apk.sha256)
+
+      - id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release/pinest.apk
+            release/pinest-v0.1.0.apk
+            release/pinest.apk.sha256
+            release/pinest-v0.1.0.apk.sha256
+            release/pinest.apk.provenance.json
+            release/pinest.release-identity.json
+
+      - name: Verify and package signed provenance
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          set -eu
+          cp "$BUNDLE_PATH" release/pinest.apk.attestation.jsonl
+          for subject in release/pinest.apk release/pinest-v0.1.0.apk release/pinest.apk.sha256 release/pinest-v0.1.0.apk.sha256 release/pinest.apk.provenance.json release/pinest.release-identity.json; do
+            gh attestation verify "$subject" \
+              --bundle release/pinest.apk.attestation.jsonl \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/apk.yml" \
+              --source-digest "$GITHUB_SHA" \
+              --source-ref "$GITHUB_REF" \
+              --deny-self-hosted-runners
+          done
+
+      - id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pinest-attested-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            release/pinest.apk
+            release/pinest-v0.1.0.apk
+            release/pinest.apk.sha256
+            release/pinest-v0.1.0.apk.sha256
+            release/pinest.apk.provenance.json
+            release/pinest.apk.attestation.jsonl
+            release/pinest.release-identity.json
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: attest
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.attest.outputs.artifact-id }}
+          path: release
+          digest-mismatch: error
+
+      # This step receives no GH_TOKEN and executes no repository code. It
+      # checks every byte, the package, the sole signer, and signed provenance.
+      - name: Verify final release immediately before publication
+        env:
+          EXPECTED_ARCHIVE_SHA256: ${{ needs.attest.outputs.artifact-digest }}
+        run: |
+          set -eu
+          case "$EXPECTED_ARCHIVE_SHA256" in
+            *[!0-9a-f]*|'') echo "::error::invalid attested artifact digest"; exit 1 ;;
+          esac
+          [ "${#EXPECTED_ARCHIVE_SHA256}" -eq 64 ] || { echo "::error::invalid attested artifact digest"; exit 1; }
+          (cd release && sha256sum --check pinest.apk.sha256)
+          build_tools="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          "$build_tools/apksigner" verify --print-certs release/pinest.apk > release/pinest.apk.certificates.txt
+          mapfile -t identity < <(python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import re
+
+          identity = json.loads(Path("release/pinest.release-identity.json").read_text())
+          provenance = json.loads(Path("release/pinest.apk.provenance.json").read_text())
+          if not isinstance(identity, dict) or set(identity) != {"certificate_sha256", "package"}:
+              raise SystemExit("invalid release identity shape")
+          artifact = provenance.get("artifact")
+          if not isinstance(artifact, dict):
+              raise SystemExit("invalid APK provenance artifact")
+          if identity["package"] != artifact.get("package"):
+              raise SystemExit("release package disagrees with attested provenance")
+          if identity["certificate_sha256"] != artifact.get("signer_sha256"):
+              raise SystemExit("release signer disagrees with attested provenance")
+          signer_lines = [
+              line.strip()
+              for line in Path("release/pinest.apk.certificates.txt").read_text().splitlines()
+              if "signer" in line.lower()
+              and "certificate sha-256 digest:" in line.lower()
+          ]
+          signers = set()
+          for line in signer_lines:
+              match = re.fullmatch(
+                  r"(?:Signer #\d+|V\d+(?:\.\d+)? Signer:)\s+"
+                  r"certificate SHA-256 digest:\s*"
+                  r"([0-9a-fA-F]{64}|(?:[0-9a-fA-F]{2}:){31}[0-9a-fA-F]{2})\s*",
+                  line,
+                  re.IGNORECASE,
+              )
+              if not match:
+                  raise SystemExit("expected exactly one APK signer; malformed apksigner output")
+              signers.add(match.group(1).replace(":", "").lower())
+          if len(signers) != 1:
+              raise SystemExit(f"expected exactly one APK signer; found {len(signers)}")
+          print(identity["package"])
+          print(identity["certificate_sha256"])
+          print(signers.pop())
+          PY
+          )
+          [ "${#identity[@]}" -eq 3 ] || { echo "::error::invalid release identity"; exit 1; }
+          expected_package="${identity[0]}"
+          expected_signer="${identity[1]}"
+          actual_signer="${identity[2]}"
+          package="$($build_tools/aapt dump badging release/pinest.apk | sed -n "s/^package: name='\([^']*\)'.*/\1/p")"
+          [ "$package" = "$expected_package" ] || { echo "::error::unexpected APK package: $package"; exit 1; }
+          [ "$actual_signer" = "$expected_signer" ] || {
+            echo "::error::unexpected APK signer: $actual_signer"; exit 1;
+          }
+          for subject in release/pinest.apk release/pinest.apk.sha256 release/pinest.apk.provenance.json release/pinest.release-identity.json; do
+            gh attestation verify "$subject" \
+              --bundle release/pinest.apk.attestation.jsonl \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/apk.yml" \
+              --source-digest "$GITHUB_SHA" \
+              --source-ref "$GITHUB_REF" \
+              --deny-self-hosted-runners
+          done
+
+      # Only this step receives the contents:write token. It refuses to mutate
+      # an existing release and publishes only if this is still main's head.
+      - name: Publish immutable per-commit release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          current_main="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          if [ "$current_main" != "$GITHUB_SHA" ]; then
+            echo "::notice::not publishing stale commit $GITHUB_SHA; main is $current_main"
+            exit 0
+          fi
+          release_tag="apk-$GITHUB_SHA"
+          existing_release_id="$(
+            gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"$release_tag\") | .id"
+          )"
+          if [ -n "$existing_release_id" ]; then
+            echo "::error::immutable release already exists: $release_tag"
+            exit 1
+          fi
+          notes="Attested Android build of \`${GITHUB_SHA}\` from [run ${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}).
+
+          Verify \`pinest-v0.1.0.apk\` with the published SHA-256 file and Sigstore bundle, or run \`gh attestation verify pinest-v0.1.0.apk --repo ${GITHUB_REPOSITORY}\`."
+          gh release create "$release_tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            release/pinest-v0.1.0.apk \
+            release/pinest.apk \
+            release/pinest.apk.sha256 \
+            release/pinest-v0.1.0.apk.sha256 \
+            release/pinest.apk.provenance.json \
+            release/pinest.apk.attestation.jsonl \
+            release/pinest.release-identity.json \
+            --target "$GITHUB_SHA" \
+            --title "PiNest Android v0.1.0 (${GITHUB_SHA::12})" \
+            --notes "$notes" \
+            --draft
+          gh release edit "$release_tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false \
+            --latest
