@@ -215,7 +215,7 @@ jobs:
             --key-pass env:KEY_PASSWORD \
             --out release/pinest.apk \
             scratch/signing/pinest-aligned.apk
-          cp release/pinest.apk release/pinest-v0.1.0.apk
+          cp release/pinest.apk release/pinest-v0.1.1.apk
 
       - name: Destroy signing material
         if: always()
@@ -237,7 +237,7 @@ jobs:
           name: pinest-signed-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             release/pinest.apk
-            release/pinest-v0.1.0.apk
+            release/pinest-v0.1.1.apk
           if-no-files-found: error
           retention-days: 1
 
@@ -278,8 +278,8 @@ jobs:
             --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT"
           cp app/release-identity.json release/pinest.release-identity.json
-          cp release/pinest.apk release/pinest-v0.1.0.apk
-          (cd release && sha256sum pinest.apk > pinest.apk.sha256 && sha256sum pinest-v0.1.0.apk > pinest-v0.1.0.apk.sha256 && sha256sum --check pinest.apk.sha256 && sha256sum --check pinest-v0.1.0.apk.sha256)
+          cp release/pinest.apk release/pinest-v0.1.1.apk
+          (cd release && sha256sum pinest.apk > pinest.apk.sha256 && sha256sum pinest-v0.1.1.apk > pinest-v0.1.1.apk.sha256 && sha256sum --check pinest.apk.sha256 && sha256sum --check pinest-v0.1.1.apk.sha256)
 
       - id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -287,9 +287,9 @@ jobs:
           name: pinest-verified-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             release/pinest.apk
-            release/pinest-v0.1.0.apk
+            release/pinest-v0.1.1.apk
             release/pinest.apk.sha256
-            release/pinest-v0.1.0.apk.sha256
+            release/pinest-v0.1.1.apk.sha256
             release/pinest.apk.provenance.json
             release/pinest.release-identity.json
           if-no-files-found: error
@@ -329,9 +329,9 @@ jobs:
         with:
           subject-path: |
             release/pinest.apk
-            release/pinest-v0.1.0.apk
+            release/pinest-v0.1.1.apk
             release/pinest.apk.sha256
-            release/pinest-v0.1.0.apk.sha256
+            release/pinest-v0.1.1.apk.sha256
             release/pinest.apk.provenance.json
             release/pinest.release-identity.json
 
@@ -341,7 +341,7 @@ jobs:
         run: |
           set -eu
           cp "$BUNDLE_PATH" release/pinest.apk.attestation.jsonl
-          for subject in release/pinest.apk release/pinest-v0.1.0.apk release/pinest.apk.sha256 release/pinest-v0.1.0.apk.sha256 release/pinest.apk.provenance.json release/pinest.release-identity.json; do
+          for subject in release/pinest.apk release/pinest-v0.1.1.apk release/pinest.apk.sha256 release/pinest-v0.1.1.apk.sha256 release/pinest.apk.provenance.json release/pinest.release-identity.json; do
             gh attestation verify "$subject" \
               --bundle release/pinest.apk.attestation.jsonl \
               --repo "$GITHUB_REPOSITORY" \
@@ -357,9 +357,9 @@ jobs:
           name: pinest-attested-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             release/pinest.apk
-            release/pinest-v0.1.0.apk
+            release/pinest-v0.1.1.apk
             release/pinest.apk.sha256
-            release/pinest-v0.1.0.apk.sha256
+            release/pinest-v0.1.1.apk.sha256
             release/pinest.apk.provenance.json
             release/pinest.apk.attestation.jsonl
             release/pinest.release-identity.json
@@ -476,18 +476,18 @@ jobs:
           fi
           notes="Attested Android build of \`${GITHUB_SHA}\` from [run ${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}).
 
-          Verify \`pinest-v0.1.0.apk\` with the published SHA-256 file and Sigstore bundle, or run \`gh attestation verify pinest-v0.1.0.apk --repo ${GITHUB_REPOSITORY}\`."
+          Verify \`pinest-v0.1.1.apk\` with the published SHA-256 file and Sigstore bundle, or run \`gh attestation verify pinest-v0.1.1.apk --repo ${GITHUB_REPOSITORY}\`."
           gh release create "$release_tag" \
             --repo "$GITHUB_REPOSITORY" \
-            release/pinest-v0.1.0.apk \
+            release/pinest-v0.1.1.apk \
             release/pinest.apk \
             release/pinest.apk.sha256 \
-            release/pinest-v0.1.0.apk.sha256 \
+            release/pinest-v0.1.1.apk.sha256 \
             release/pinest.apk.provenance.json \
             release/pinest.apk.attestation.jsonl \
             release/pinest.release-identity.json \
             --target "$GITHUB_SHA" \
-            --title "PiNest Android v0.1.0 (${GITHUB_SHA::12})" \
+            --title "PiNest Android v0.1.1 (${GITHUB_SHA::12})" \
             --notes "$notes" \
             --draft
           gh release edit "$release_tag" \
