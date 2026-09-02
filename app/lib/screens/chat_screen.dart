@@ -456,7 +456,7 @@ class _ChatScreenState extends State<ChatScreen> {
     // sidebar — two copies would drift in what is enabled when.
     final actions = <BarAction>[
       BarAction(
-        label: '/model ${s?.modelName ?? ""}'.trim(),
+        label: '/model ${s?.modelName ?? s?.model ?? ""}'.trim(),
         icon: Icons.memory,
         onTap: models.isEmpty ? null : () => _showModels(context, svc, models),
       ),

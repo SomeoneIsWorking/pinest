@@ -136,13 +136,19 @@ export class Supervisor {
   }
 
   private async findModel(spec: string): Promise<ReturnType<ModelRegistry["find"]> | null> {
-    const slash = spec.indexOf("/");
-    if (slash === -1) return null;
-    const provider = spec.slice(0, slash);
-    const id = spec.slice(slash + 1);
     const reg = await this.modelRegistry();
     await reg.refresh().catch(() => undefined);
-    return reg.find(provider, id) ?? null;
+    const slash = spec.indexOf("/");
+    if (slash !== -1) {
+      const provider = spec.slice(0, slash);
+      const id = spec.slice(slash + 1);
+      const exact = reg.find(provider, id);
+      if (exact) return exact;
+    }
+    const available = reg.getAvailable();
+    return available.find(
+      (m) => m.id === spec || m.name.toLowerCase() === spec.toLowerCase() || `${m.provider}/${m.id}` === spec,
+    ) ?? null;
   }
 
   constructor(ownerUid: string, callbacks: SupervisorCallbacks, registry: SessionRegistry | null = null, opts: SupervisorOptions = {}) {
@@ -194,19 +200,38 @@ export class Supervisor {
     };
     this.sessions.set(id, s);
 
+    const initialModel = (session as any).model;
+    if (initialModel) {
+      s.model = `${initialModel.provider}/${initialModel.id}`;
+      s.modelName = initialModel.name;
+    }
+
     if (cmd.model) {
       try {
         const mdl = await this.findModel(cmd.model);
-        if (mdl) { await session.setModel(mdl); s.model = cmd.model; s.modelName = mdl.name; }
-        else debug(`[remote-code] spawn: model ${cmd.model} not found`);
-      } catch (e) { debug("[remote-code] spawn setModel:", (e as Error).message); }
+        if (mdl) {
+          await session.setModel(mdl);
+          s.model = `${mdl.provider}/${mdl.id}`;
+          s.modelName = mdl.name;
+        } else {
+          debug(`[remote-code] spawn: model ${cmd.model} not found`);
+        }
+      } catch (e) {
+        debug("[remote-code] spawn setModel:", (e as Error).message);
+      }
+    }
+
+    const actualModel = (session as any).model;
+    if (actualModel) {
+      s.model = `${actualModel.provider}/${actualModel.id}`;
+      s.modelName = actualModel.name;
     }
 
     this.callbacks.upsertSession(id, {
       name, cwd, model: s.model, modelName: s.modelName,
       status: "idle", isInteractive: false, createdAt: Date.now(),
     });
-    this.persistRow(id, { status: "idle" });
+    this.persistRow(id, { status: "idle", model: s.model, modelName: s.modelName });
     this.wire(id, s);
     debug(`[remote-code] Spawned session ${id} in ${cwd}`);
   }
@@ -315,6 +340,12 @@ export class Supervisor {
           const { session } = await createAgentSession(this.createSessionOpts(s.cwd));
           s.session = session;
           s.status = "idle";
+          const newModel = (session as any).model;
+          if (newModel) {
+            s.model = `${newModel.provider}/${newModel.id}`;
+            s.modelName = newModel.name;
+            this.persistRow(id, { model: s.model, modelName: s.modelName });
+          }
           // The old session's queue and mid-turn state belong to a transcript
           // that no longer exists — carrying them over left ghost "queued"
           // bubbles on a session that had just been cleared.
@@ -529,9 +560,16 @@ export class Supervisor {
    */
   refreshUsage(notify = true): void {
     for (const [id, s] of this.sessions) {
+      const m = (s.session as any)?.model;
+      if (m && !s.model) {
+        s.model = `${m.provider}/${m.id}`;
+        s.modelName = m.name;
+        this.persistRow(id, { model: s.model, modelName: m.name });
+      }
       const u = this.usageWithCompactAt(s);
       this.callbacks.upsertSession(id, {
         status: s.status === "working" ? "working" : "idle",
+        ...(s.model ? { model: s.model, modelName: s.modelName } : {}),
         ...(u ? { contextUsage: u } : {}),
       }, notify);
     }
