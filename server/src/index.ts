@@ -30,6 +30,7 @@ import { StreamSegmenter } from "./stream.ts";
 import { loadConfig, saveConfig } from "./config.ts";
 import { PROVIDERS } from "./tunnel.ts";
 import { createAttachView } from "./attach-view.ts";
+import { registerHostCommands } from "./host-commands.ts";
 import { SourceWatcher, firstSyntaxError } from "./watch.ts";
 export { firstSyntaxError } from "./watch.ts";
 import { resolveThinkingLevel, reportThinkingLevel } from "./thinking.ts";
@@ -95,6 +96,7 @@ let _turnStarted = false;
 let _pendingMessages: string[] = [];
 /** Subset of _pendingMessages submitted as steers (see protocol note). */
 let _pendingSteering: string[] = [];
+let _pendingImagesByText: Record<string, UserImage[]> = {};
 
 /** Serialized user-message submission queue.
  *
@@ -695,9 +697,11 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
       const text = cmd.text.trim().length === 0 ? "[image]" : cmd.text;
       _pendingMessages = pushPending(_pendingMessages, text);
       if (deliverAs === "steer") _pendingSteering = pushPending(_pendingSteering, text);
+      if (images.length > 0) _pendingImagesByText[text] = images;
       upsertSession(_sessionId, {
         pendingMessages: [..._pendingMessages],
         pendingSteering: [..._pendingSteering],
+        pendingImagesByText: { ..._pendingImagesByText },
       });
       _submitter?.submit(text, images, deliverAs);
       break;
@@ -733,22 +737,88 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
       break;
     }
     case "queue_clear":
-      // The host's extension API exposes no queue drain (AgentSession
-      // clearQueue is not reachable from ExtensionAPI/Context) — clearing the
-      // mirror is all we can do; the host queue cannot accumulate ghosts
-      // because the message_start mirror pops exactly when pi does.
+      try {
+        const anySession = (_ctx as any)?.session ?? (_ctx as any)?._session ?? (_pi as any)?.session;
+        anySession?.clearQueue?.();
+      } catch { /* getter-absent session */ }
       _pendingMessages = [];
       _pendingSteering = [];
-      upsertSession(_sessionId, { pendingMessages: [], pendingSteering: [] });
+      _pendingImagesByText = {};
+      upsertSession(_sessionId, { pendingMessages: [], pendingSteering: [], pendingImagesByText: {} });
       break;
     case "queue_delete":
+      try {
+        const anySession = (_ctx as any)?.session ?? (_ctx as any)?._session ?? (_pi as any)?.session;
+        if (typeof anySession?.clearQueue === "function") {
+          const { steering, followUp } = anySession.clearQueue();
+          const target = cmd.text;
+          const remainingSteer = (steering ?? []).filter((t: string) => t !== target);
+          const remainingFollow = (followUp ?? []).filter((t: string) => t !== target);
+          for (const t of remainingSteer) {
+            anySession.prompt(t, { streamingBehavior: "steer", source: "extension" });
+          }
+          for (const t of remainingFollow) {
+            anySession.prompt(t, { streamingBehavior: "followUp", source: "extension" });
+          }
+        }
+      } catch { /* getter-absent session */ }
       _pendingMessages = popPending(_pendingMessages, cmd.text);
       _pendingSteering = popPending(_pendingSteering, cmd.text);
+      delete _pendingImagesByText[cmd.text];
       upsertSession(_sessionId, {
         pendingMessages: [..._pendingMessages],
         pendingSteering: [..._pendingSteering],
+        pendingImagesByText: { ..._pendingImagesByText },
       });
       break;
+    case "session_tree_get": {
+      try {
+        const sm = (_ctx as any)?.sessionManager ?? (_pi as any)?.sessionManager;
+        const tree = sm?.getTree?.() ?? [];
+        const leafId = sm?.getLeafId?.() ?? null;
+        broadcast({
+          type: "session_tree",
+          cmdId: cmd.id,
+          sessionId: _sessionId,
+          tree,
+          leafId,
+        });
+      } catch (e) {
+        broadcast({
+          type: "error",
+          sessionId: _sessionId,
+          message: `Failed to get session tree: ${(e as Error).message || e}`,
+        });
+      }
+      break;
+    }
+    case "session_tree_navigate": {
+      try {
+        const session = (_ctx as any)?.session ?? (_ctx as any)?._session ?? (_pi as any)?.session;
+        if (typeof (_ctx as any)?.navigateTree === "function") {
+          await (_ctx as any).navigateTree(cmd.entryId, { summarize: cmd.summarize });
+        } else if (typeof session?.navigateTree === "function") {
+          await session.navigateTree(cmd.entryId, { summarize: cmd.summarize });
+        }
+        const sm = (_ctx as any)?.sessionManager ?? (_pi as any)?.sessionManager;
+        const tree = sm?.getTree?.() ?? [];
+        const leafId = sm?.getLeafId?.() ?? null;
+        broadcast({
+          type: "session_tree",
+          cmdId: cmd.id,
+          sessionId: _sessionId,
+          tree,
+          leafId,
+        });
+      } catch (e) {
+        broadcast({
+          type: "error",
+          sessionId: _sessionId,
+          message: `Failed to navigate tree: ${(e as Error).message || e}`,
+        });
+      }
+      break;
+    }
     case "list_paths": {
       // Resolve ~ and relative prefixes against the spawn dialog's starting dir.
       const paths = listPaths(cmd.prefix || "");
@@ -897,9 +967,11 @@ function bridge(pi: ExtensionAPI): void {
       if (delivered && _pendingMessages.includes(delivered)) {
         _pendingMessages = popPending(_pendingMessages, delivered);
         _pendingSteering = popPending(_pendingSteering, delivered);
+        delete _pendingImagesByText[delivered];
         upsertSession(_sessionId, {
           pendingMessages: [..._pendingMessages],
           pendingSteering: [..._pendingSteering],
+          pendingImagesByText: { ..._pendingImagesByText },
         });
       }
       // The message just became part of the session — push history so the
@@ -1154,128 +1226,18 @@ const remoteCode = (pi: ExtensionAPI): void => {
     },
   });
 
-  // ── /pinest-sessions — list, kill, or attach a session ─────────────────────
-  pi.registerCommand("pinest-sessions", {
-    description: "PiNest: list sessions, then kill or attach one in an overlay",
-    handler: async (_args: string, ctx: ExtensionCommandContext) => {
-      captureUi(ctx);
-      try {
-        // Build the session list: the interactive host + all headless sessions.
-        const hostSnap = _sessions.get(_sessionId);
-        const entries: Array<{ id: string; isHost: boolean; label: string }> = [
-          { id: _sessionId, isHost: true, label: `${hostSnap?.name ?? "this terminal"}  ${hostSnap?.status === "working" ? "⚡" : "○"}  ${hostSnap?.modelName ?? ""}  (host)` },
-          ...[...(_supervisor?.sessions ?? new Map())].map(([id, s]: [string, any]) => ({
-            id, isHost: false, label: `${s.name ?? "session"}  ${s.status === "working" ? "⚡" : "○"}  ${s.modelName ?? s.model ?? ""}  ${s.cwd}`,
-          })),
-        ];
-
-        if (!ctx?.ui?.select) {
-          const lines = entries.map((e) => `  ${e.label}`);
-          say(ctx, `[remote-code] sessions (${entries.length}). Interactive picker needs TUI mode.\n${lines.join("\n")}`);
-          return;
-        }
-
-        const choice = await ctx.ui.select("PiNest sessions", entries.map((e) => e.label));
-        if (choice === undefined) return; // dismissed
-        const picked = entries.find((e) => e.label === choice);
-        if (!picked) return;
-
-        if (picked.isHost) {
-          // Can't attach the host to itself; can't "kill" it meaningfully here.
-          say(ctx, "[pinest] that's the current terminal session.");
-          return;
-        }
-
-        // Action picker for a headless session.
-        const action = await ctx.ui.select(`Session: ${picked.label}`, ["Attach (open in overlay)", "Kill", "Cancel"]);
-        if (action === undefined || action === "Cancel") return;
-
-        if (action === "Kill") {
-          await _supervisor!.despawn(picked.id);
-          broadcastState();
-          say(ctx, `[remote-code] killed "${picked.label.split("  ")[0]}"`);
-          return;
-        }
-
-        if (action === "Attach (open in overlay)") {
-          if (!ctx?.ui?.custom) { say(ctx, "[pinest] attach overlay needs TUI mode."); return; }
-          const entry: any = _supervisor?.sessions.get(picked.id);
-          if (!entry) { say(ctx, "[pinest] session not found (may have exited)"); return; }
-
-          await (ctx.ui as any).custom(
-            (tui: any, theme: any, _kb: unknown, done: () => void) => createAttachView({
-              session: entry.session,
-              snapshot: { name: entry.name, cwd: entry.cwd, status: entry.status, model: entry.model, modelName: entry.modelName },
-              theme, tui, onDone: () => done(),
-            }),
-            { overlay: true, overlayOptions: { width: "80%", maxHeight: "85%", anchor: "center", margin: { top: 1 } } },
-          );
-        }
-      } catch (e) {
-        say(ctx, `[remote-code] sessions error: ${(e as Error)?.message || e}`);
-      }
-    },
-  });
-
-  // ── /pinest-provider — pick a tunnel provider via the pi dialog ────────────
-  // Separate command (not a subcommand) because pi has trouble with
-  // multi-word commands. Opens the SDK's native select() picker dialog.
-  pi.registerCommand("pinest-provider", {
-    description: "PiNest: choose the remote tunnel provider (cloudflared, ngrok, tailscale, off)",
-    handler: async (_args: string, ctx: ExtensionCommandContext) => {
-      captureUi(ctx);
-      const configured = loadConfig().tunnelProvider;
-      const active = _ws?.tunnel?.provider ?? null;
-
-      // Build option strings. Available providers are selectable; unavailable
-      // binary providers are shown grayed-out with an install hint so the user
-      // knows they exist but can't pick them yet.
-      const dim = (s: string): string => `\x1b[2m${s}\x1b[22m`; // ANSI dim
-      const opts = PROVIDERS.map((p) => {
-        const avail = p.available();
-        const here = [p.name === configured ? "configured" : "", p.name === active ? "active" : ""].filter(Boolean);
-        const tag = here.length ? `  [${here.join(", ")}]` : "";
-        return avail ? `${p.label}${tag}` : dim(`${p.label}  (not installed — ${p.installHint})${tag}`);
-      });
-
-      if (!ctx?.ui?.select) {
-        // No dialog-capable UI (print/json mode) — fall back to text listing.
-        const lines = PROVIDERS.map((p) =>
-          `${p.name === configured ? "▶" : " "} ${p.available() ? p.label : dim(p.label + " — " + p.installHint)}`,
-        );
-        say(ctx, `[remote-code] tunnel provider picker needs interactive UI.\n${lines.join("\n")}\nSet via config: PI_AGENT_DIR/remote-code/config.json`);
-        return;
-      }
-
-      const choice = await ctx.ui.select("PiNest tunnel provider", opts);
-      if (choice === undefined) return; // user dismissed
-
-      // Find which provider the selected string corresponds to (by index or label prefix).
-      const index = opts.indexOf(choice);
-      const picked = index >= 0
-        ? PROVIDERS[index]
-        : PROVIDERS.find((p) => choice.replace(/\x1b\[[0-9;]*m/g, "").startsWith(p.label));
-      if (!picked) return;
-      if (!picked.available()) {
-        ctx.ui?.notify?.(`Install first: ${picked.installHint}`, "warning");
-        return;
-      }
-
-      saveConfig({ tunnelProvider: picked.name });
-      say(ctx, `[remote-code] provider set to "${picked.name}", restarting tunnel…`);
-      _tunnelStarting = picked.name !== "off";
-      renderFooter();
-      try {
-        const used = await _ws?.restartTunnel(picked.name);
-        // Re-publish URL to Firebase so the app picks up the new endpoint.
-        await publishCurrentPresence(true).catch(() => {});
-        say(ctx, `[remote-code] tunnel ${used ? `up via ${used}` : "off"} → ${_ws?.tunnelUrl ?? "local-only"}`);
-      } finally {
-        _tunnelStarting = false;
-        renderFooter();
-      }
-    },
-  });
+  registerHostCommands(pi, () => ({
+    sessionId: _sessionId,
+    sessions: _sessions,
+    supervisor: _supervisor,
+    ws: _ws,
+    say,
+    captureUi,
+    broadcastState,
+    renderFooter,
+    publishCurrentPresence: (online?: boolean) => publishCurrentPresence(online ?? true),
+    setTunnelStarting: (starting: boolean) => { _tunnelStarting = starting; },
+  }));
 };
 
 export default remoteCode;

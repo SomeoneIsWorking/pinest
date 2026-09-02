@@ -7,7 +7,9 @@ import 'auth_service.dart';
 import 'correlated_request_broker.dart';
 import 'session_cache.dart';
 import '../models/session.dart';
+export '../models/session.dart' show PendingImage;
 import '../models/chat_item.dart';
+import '../models/session_tree.dart';
 
 bool _itemsMatch(Map<String, dynamic> a, Map<String, dynamic> b) {
   if (a['role'] != b['role']) return false;
@@ -477,6 +479,21 @@ class AgentService extends ChangeNotifier {
         final cmdId = msg['cmdId'] as String? ?? '';
         _requests.complete(cmdId, msg);
         break;
+      case 'session_tree': {
+        final sid = msg['sessionId'] as String? ?? '';
+        final rawTree = msg['tree'] as List? ?? const [];
+        final tree = rawTree
+            .whereType<Map<String, dynamic>>()
+            .map(SessionTreeNode.fromJson)
+            .toList();
+        _trees[sid] = tree;
+        _leafIds[sid] = msg['leafId'] as String?;
+        final cmdId = msg['cmdId'] as String? ?? '';
+        if (cmdId.isNotEmpty) {
+          _requests.complete(cmdId, msg);
+        }
+        break;
+      }
       case 'error':
         _error = msg['message'] as String?;
         if (_error != null && _error!.isNotEmpty) {
@@ -577,6 +594,51 @@ class AgentService extends ChangeNotifier {
   /// Remove one specific queued/steering message from the session.
   void deleteQueuedMessage(Session s, String text) =>
       _send({'type': 'queue_delete', 'sessionId': s.id, 'text': text});
+
+  final Map<String, List<SessionTreeNode>> _trees = {};
+  final Map<String, String?> _leafIds = {};
+
+  List<SessionTreeNode> treeFor(String sessionId) =>
+      _trees[sessionId] ?? const [];
+  String? leafIdFor(String sessionId) => _leafIds[sessionId];
+
+  bool isMessageQueued(String sessionId, String text) {
+    final s = _sessions.cast<Session?>().firstWhere(
+      (it) => it?.id == sessionId,
+      orElse: () => null,
+    );
+    if (s == null) return false;
+    return s.pendingMessages.contains(text) || s.pendingSteering.contains(text);
+  }
+
+  Future<List<SessionTreeNode>> fetchSessionTree(Session s) =>
+      _requests.request<List<SessionTreeNode>>(
+        send: (id) => _send({
+          'type': 'session_tree_get',
+          'sessionId': s.id,
+          'id': id,
+        }),
+        decode: (message) {
+          final raw = message['tree'] as List? ?? const [];
+          return raw
+              .whereType<Map<String, dynamic>>()
+              .map(SessionTreeNode.fromJson)
+              .toList();
+        },
+        fallback: _trees[s.id] ?? const [],
+        timeout: const Duration(seconds: 5),
+      );
+
+  void navigateSessionTree(
+    Session s,
+    String entryId, {
+    bool summarize = false,
+  }) => _send({
+    'type': 'session_tree_navigate',
+    'sessionId': s.id,
+    'entryId': entryId,
+    'summarize': summarize,
+  });
 
   /// Set the auto-compact threshold (context tokens) on the host.
   void setCompactThreshold(int tokens) =>
@@ -739,15 +801,6 @@ class WebSocketConnection {
     _channel?.sink.close();
     _open = false;
   }
-}
-
-/// An image the user attached to a message, base64-encoded for the wire.
-class PendingImage {
-  final String mimeType;
-  final Uint8List bytes;
-  PendingImage({required this.mimeType, required this.bytes});
-
-  String get base64 => base64Encode(bytes);
 }
 
 /// A one-shot, user-facing message from the server (see `AgentService.notices`).

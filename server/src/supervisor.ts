@@ -82,6 +82,7 @@ interface LiveSession {
   pending: string[];
   /** Subset of `pending` that the agent reports as STEERS. */
   pendingSteering: string[];
+  pendingImagesByText?: Record<string, UserImage[]>;
   /** True between a run's message_start and agent_end (submission gate). */
   turnStarted: boolean;
   submitter: MessageSubmitter | null;
@@ -298,6 +299,9 @@ export class Supervisor {
           s.status = "working";
           const images = (cmd.images ?? []) as UserImage[];
           const text = cmd.text.trim().length === 0 ? "[image]" : cmd.text;
+          if (images.length > 0) {
+            s.pendingImagesByText = { ...(s.pendingImagesByText ?? {}), [text]: images };
+          }
           this.callbacks.upsertSession(cmd.sessionId, {
             status: "working",
           });
@@ -379,6 +383,7 @@ export class Supervisor {
           // dequeues by text-match at message_start; a delivered text that
           // never matched stays queued forever).
           try { (s.session as any).clearQueue?.(); } catch { /* getter-absent session */ }
+          s.pendingImagesByText = {};
           this.syncQueue(cmd.sessionId, s);
           break;
         }
@@ -397,7 +402,58 @@ export class Supervisor {
               }
             }
           } catch { /* getter-absent session */ }
+          if (s.pendingImagesByText) {
+            delete s.pendingImagesByText[cmd.text];
+          }
           this.syncQueue(cmd.sessionId, s);
+          break;
+        }
+        case "session_tree_get": {
+          try {
+            const sessionManager = (s.session as any).sessionManager;
+            const tree = sessionManager?.getTree?.() ?? [];
+            const leafId = sessionManager?.getLeafId?.() ?? null;
+            this.callbacks.broadcast({
+              type: "session_tree",
+              cmdId: cmd.id,
+              sessionId: cmd.sessionId,
+              tree,
+              leafId,
+            });
+          } catch (e) {
+            this.callbacks.broadcast({
+              type: "error",
+              sessionId: cmd.sessionId,
+              message: `Failed to get session tree: ${(e as Error).message || e}`,
+            });
+          }
+          break;
+        }
+        case "session_tree_navigate": {
+          try {
+            if (typeof (s.session as any).navigateTree === "function") {
+              await (s.session as any).navigateTree(cmd.entryId, {
+                summarize: cmd.summarize,
+              });
+              this.syncQueue(cmd.sessionId, s);
+              const sessionManager = (s.session as any).sessionManager;
+              const tree = sessionManager?.getTree?.() ?? [];
+              const leafId = sessionManager?.getLeafId?.() ?? null;
+              this.callbacks.broadcast({
+                type: "session_tree",
+                cmdId: cmd.id,
+                sessionId: cmd.sessionId,
+                tree,
+                leafId,
+              });
+            }
+          } catch (e) {
+            this.callbacks.broadcast({
+              type: "error",
+              sessionId: cmd.sessionId,
+              message: `Failed to navigate tree: ${(e as Error).message || e}`,
+            });
+          }
           break;
         }
       }
@@ -432,6 +488,7 @@ export class Supervisor {
     this.callbacks.upsertSession(id, {
       pendingMessages: [...s.pending],
       pendingSteering: [...s.pendingSteering],
+      pendingImagesByText: { ...(s.pendingImagesByText ?? {}) },
     });
   }
 
@@ -460,9 +517,17 @@ export class Supervisor {
         // are pi's own (at message_start) — we only mirror what it tells us.
         s.pending = [...(event.steering ?? []), ...(event.followUp ?? [])];
         s.pendingSteering = [...(event.steering ?? [])];
+        if (s.pendingImagesByText) {
+          for (const k of Object.keys(s.pendingImagesByText)) {
+            if (!s.pending.includes(k)) {
+              delete s.pendingImagesByText[k];
+            }
+          }
+        }
         this.callbacks.upsertSession(id, {
           pendingMessages: [...s.pending],
           pendingSteering: [...s.pendingSteering],
+          pendingImagesByText: { ...(s.pendingImagesByText ?? {}) },
         });
         return;
       }

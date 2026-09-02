@@ -91,6 +91,8 @@ export interface SessionSnapshot {
    * must be able to tell the two apart — and it must survive a client reload,
    * which client-side bookkeeping does not. */
   pendingSteering?: string[];
+  /** Attached images for pending queued/steering messages, preserved across client reloads. */
+  pendingImagesByText?: Record<string, UserImage[]>;
 }
 
 export type ServerMessage =
@@ -113,6 +115,7 @@ export type ServerMessage =
   | { type: "tool"; sessionId: string; tool: ToolEvent }
   | { type: "models"; sessionId?: string; models: ModelInfo[] }
   | { type: "paths"; cmdId?: string; paths: string[] }
+  | { type: "session_tree"; sessionId: string; tree: unknown[]; leafId: string | null; cmdId?: string }
   | { type: "path_check"; cmdId?: string; exists: boolean; isDirectory: boolean }
   | { type: "folder_created"; cmdId?: string; path?: string; error?: string };
 
@@ -145,6 +148,8 @@ export type ClientCommand =
       cursor?: number }
   | { type: "queue_clear"; sessionId?: string }
   | { type: "queue_delete"; sessionId?: string; text: string }
+  | { type: "session_tree_get"; sessionId?: string; id?: string }
+  | { type: "session_tree_navigate"; sessionId?: string; entryId: string; summarize?: boolean; id?: string }
   | { type: "list_paths"; sessionId?: string; prefix?: string; id?: string }
   | { type: "path_check"; path: string; id?: string }
   | { type: "folder_create"; path: string; id?: string }

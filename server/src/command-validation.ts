@@ -42,6 +42,8 @@ const SESSION_COMMAND_TYPES = new Set<ClientCommand["type"]>([
   "get_history",
   "queue_clear",
   "queue_delete",
+  "session_tree_get",
+  "session_tree_navigate",
 ]);
 
 export class CommandValidationError extends Error {}
@@ -289,6 +291,25 @@ export function parseClientCommand(input: unknown): ClientCommand {
         text: rawText,
       };
     }
+    case "session_tree_get": {
+      rejectUnknownFields(command, ["type", "sessionId", "id"]);
+      return {
+        type: "session_tree_get",
+        sessionId: sessionId(command, false),
+        id: commandId(command),
+      };
+    }
+    case "session_tree_navigate": {
+      rejectUnknownFields(command, ["type", "sessionId", "entryId", "summarize", "id"]);
+      const entryId = requiredString(command, "entryId", { maxCharacters: 128, trim: true });
+      return {
+        type: "session_tree_navigate",
+        sessionId: sessionId(command, false),
+        entryId,
+        summarize: typeof command.summarize === "boolean" ? command.summarize : undefined,
+        id: commandId(command),
+      };
+    }
     case "model_set":
       rejectUnknownFields(command, ["type", "sessionId", "provider", "modelId"]);
       return {
@@ -404,7 +425,9 @@ export type SessionCommand = Extract<ClientCommand, {
     | "list_models"
     | "get_history"
     | "queue_clear"
-    | "queue_delete";
+    | "queue_delete"
+    | "session_tree_get"
+    | "session_tree_navigate";
 }>;
 
 export function isSessionCommand(command: ClientCommand): command is SessionCommand {

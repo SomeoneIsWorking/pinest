@@ -13,6 +13,7 @@ import 'chat_screen.dart';
 import 'spawn_dialog.dart';
 import 'settings_screen.dart';
 import 'app_toast.dart';
+import 'tree_dialog.dart';
 
 /// Responsive shell: tabbed on wide screens (web/desktop), drawer on mobile.
 class MainShell extends StatefulWidget {
@@ -75,6 +76,7 @@ class _MainShellState extends State<MainShell> {
   }
 
   Widget _wide(BuildContext context, AgentService svc, List<Session> sessions) {
+    final active = _activeSession(sessions);
     // TabBar + TabBarView require a TabController ancestor; without it they
     // throw a null-check crash the moment sessions render. DefaultTabController
     // provides one (length 1 when empty so it never asserts).
@@ -92,6 +94,13 @@ class _MainShellState extends State<MainShell> {
                 tooltip: 'Download Android APK',
                 onPressed: () => openExternalUrl(apkDownloadUrl),
               ),
+            IconButton(
+              icon: const Icon(Icons.account_tree_outlined),
+              tooltip: 'Session tree (/tree)',
+              onPressed: active == null
+                  ? null
+                  : () => showTreeDialog(context, svc, active),
+            ),
             IconButton(
               icon: _spawning
                   ? const SizedBox(
@@ -176,6 +185,13 @@ class _MainShellState extends State<MainShell> {
               tooltip: 'Download Android APK',
               onPressed: () => openExternalUrl(apkDownloadUrl),
             ),
+          IconButton(
+            icon: const Icon(Icons.account_tree_outlined),
+            tooltip: 'Session tree (/tree)',
+            onPressed: selected == null
+                ? null
+                : () => showTreeDialog(context, svc, selected),
+          ),
           IconButton(
             icon: const Icon(Icons.settings),
             tooltip: 'Settings',
@@ -406,6 +422,10 @@ class _SessionList extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final selected = sessions.cast<Session?>().firstWhere(
+      (s) => s?.id == selectedId,
+      orElse: () => null,
+    );
     return ListView(
       children: [
         DrawerHeader(
@@ -475,6 +495,16 @@ class _SessionList extends StatelessWidget {
             );
           },
         ),
+        if (selected != null)
+          ListTile(
+            leading: const Icon(Icons.account_tree_outlined),
+            title: const Text('Session Tree'),
+            subtitle: const Text('Explore and jump across branch points (/tree)'),
+            onTap: () {
+              Navigator.pop(context);
+              showTreeDialog(context, context.read<AgentService>(), selected);
+            },
+          ),
         ListTile(
           leading: const Icon(Icons.settings),
           title: const Text('Settings'),

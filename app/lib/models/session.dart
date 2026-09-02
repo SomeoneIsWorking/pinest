@@ -1,5 +1,29 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 /// A live session, as seen in the ephemeral state doc.
 /// Not a stored record — just a snapshot of what's running right now.
+
+class PendingImage {
+  final String mimeType;
+  final Uint8List bytes;
+
+  const PendingImage({required this.mimeType, required this.bytes});
+
+  factory PendingImage.fromBase64({
+    required String mimeType,
+    required String data,
+  }) {
+    try {
+      return PendingImage(mimeType: mimeType, bytes: base64Decode(data));
+    } catch (_) {
+      return PendingImage(mimeType: mimeType, bytes: Uint8List(0));
+    }
+  }
+
+  String get base64 => base64Encode(bytes);
+}
+
 class Session {
   final String id;
   final String name;
@@ -29,6 +53,10 @@ class Session {
   /// the end of the assistant's current step, not at the end of the turn.
   final List<String> pendingSteering;
 
+  /// Attached images for pending queued/steering messages, preserved across
+  /// app reloads and device switches.
+  final Map<String, List<PendingImage>> pendingImagesByText;
+
   Session({
     required this.id,
     required this.name,
@@ -47,6 +75,7 @@ class Session {
     this.isResumable = false,
     this.pendingMessages = const [],
     this.pendingSteering = const [],
+    this.pendingImagesByText = const {},
   });
 
   factory Session.fromLiveMap(Map<String, dynamic> map) =>
@@ -58,6 +87,26 @@ class Session {
   factory Session._fromMap(Map<String, dynamic> map, {required bool registry}) {
     final context = registry ? null : map['contextUsage'] as Map?;
     final rawStatus = map['status'] as String? ?? 'idle';
+
+    final rawImgs = registry ? null : map['pendingImagesByText'] as Map?;
+    final pendingImagesByText = <String, List<PendingImage>>{};
+    if (rawImgs != null) {
+      for (final entry in rawImgs.entries) {
+        final list = entry.value as List?;
+        if (list != null) {
+          pendingImagesByText[entry.key.toString()] = list
+              .whereType<Map>()
+              .map(
+                (img) => PendingImage.fromBase64(
+                  mimeType: img['mimeType']?.toString() ?? 'image/png',
+                  data: img['data']?.toString() ?? '',
+                ),
+              )
+              .toList();
+        }
+      }
+    }
+
     return Session(
       id: map['id'] as String? ?? '',
       name: map['name'] as String? ?? 'session',
@@ -80,6 +129,7 @@ class Session {
       pendingSteering: registry
           ? const []
           : (map['pendingSteering'] as List?)?.cast<String>() ?? const [],
+      pendingImagesByText: pendingImagesByText,
     );
   }
 
