@@ -14,7 +14,9 @@ import '../models/session.dart';
 import '../models/chat_item.dart';
 import '../models/tool_call_view.dart';
 import 'app_toast.dart';
+import 'model_sheet.dart';
 import 'tool_call_card.dart';
+import 'tree_dialog.dart';
 
 class ChatScreen extends StatefulWidget {
   final String sessionId;
@@ -251,6 +253,15 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _send() {
     final text = _input.text.trim();
+    if (text == '/tree') {
+      _input.clear();
+      final svc = context.read<AgentService>();
+      final s = _session(svc);
+      if (s != null) {
+        showTreeDialog(context, svc, s);
+      }
+      return;
+    }
     final hasImages = _attachedImages.isNotEmpty;
     if (text.isEmpty && !hasImages) return;
     final svc = context.read<AgentService>();
@@ -353,6 +364,8 @@ class _ChatScreenState extends State<ChatScreen> {
     String text,
     List<PendingImage> pendingImgs,
   ) {
+    final isSteering = s.pendingSteering.contains(text);
+
     showModalBottomSheet<void>(
       context: context,
       builder: (ctx) => SafeArea(
@@ -365,6 +378,14 @@ class _ChatScreenState extends State<ChatScreen> {
               subtitle: const Text('Remove from queue and copy back to editor'),
               onTap: () {
                 Navigator.of(ctx).pop();
+                if (!svc.isMessageQueued(s.id, text)) {
+                  showAppToast(
+                    context,
+                    "Can't edit: message already processed",
+                    isError: true,
+                  );
+                  return;
+                }
                 svc.deleteQueuedMessage(s, text);
                 _pendingImagesByText.remove(text);
                 setState(() {
@@ -375,7 +396,94 @@ class _ChatScreenState extends State<ChatScreen> {
                 });
                 showAppToast(
                   context,
-                  'Message copied back to editor',
+                  'Message removed from queue and copied to editor',
+                  duration: const Duration(seconds: 2),
+                );
+              },
+            ),
+            if (isSteering)
+              ListTile(
+                leading: const Icon(Icons.schedule, color: Colors.indigoAccent),
+                title: const Text('Change to Queued'),
+                subtitle: const Text('Run after agent finishes current turn'),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  if (!svc.isMessageQueued(s.id, text)) {
+                    showAppToast(
+                      context,
+                      "Can't change: message already processed",
+                      isError: true,
+                    );
+                    return;
+                  }
+                  svc.deleteQueuedMessage(s, text);
+                  svc.sendMessage(
+                    s,
+                    text == '[image]' ? '' : text,
+                    images: pendingImgs,
+                    steer: false,
+                  );
+                  showAppToast(
+                    context,
+                    'Changed to Queued (will run after current turn)',
+                  );
+                },
+              )
+            else
+              ListTile(
+                leading: const Icon(Icons.alt_route, color: Colors.orangeAccent),
+                title: const Text('Change to Steered'),
+                subtitle: const Text('Deliver immediately to guide current turn'),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  if (!svc.isMessageQueued(s.id, text)) {
+                    showAppToast(
+                      context,
+                      "Can't change: message already processed",
+                      isError: true,
+                    );
+                    return;
+                  }
+                  svc.deleteQueuedMessage(s, text);
+                  svc.sendMessage(
+                    s,
+                    text == '[image]' ? '' : text,
+                    images: pendingImgs,
+                    steer: true,
+                  );
+                  showAppToast(
+                    context,
+                    'Changed to Steered (guiding current turn)',
+                  );
+                },
+              ),
+            ListTile(
+              leading: const Icon(Icons.bolt, color: Colors.amber),
+              title: const Text('Interrupt agent & send now'),
+              subtitle: const Text('Stop current response and run this message immediately'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                if (!svc.isMessageQueued(s.id, text)) {
+                  showAppToast(
+                    context,
+                    "Can't interrupt: message already processed",
+                    isError: true,
+                  );
+                  return;
+                }
+                svc.deleteQueuedMessage(s, text);
+                svc.cancel(s);
+                Future.delayed(const Duration(milliseconds: 80), () {
+                  svc.sendMessage(
+                    s,
+                    text == '[image]' ? '' : text,
+                    images: pendingImgs,
+                    steer: false,
+                  );
+                });
+                showAppToast(
+                  context,
+                  'Interrupted agent and running message now',
                   duration: const Duration(seconds: 2),
                 );
               },
@@ -389,6 +497,14 @@ class _ChatScreenState extends State<ChatScreen> {
               subtitle: const Text('Remove from queue without editing'),
               onTap: () {
                 Navigator.of(ctx).pop();
+                if (!svc.isMessageQueued(s.id, text)) {
+                  showAppToast(
+                    context,
+                    "Can't delete: message already processed",
+                    isError: true,
+                  );
+                  return;
+                }
                 svc.deleteQueuedMessage(s, text);
                 _pendingImagesByText.remove(text);
                 showAppToast(
@@ -518,7 +634,10 @@ class _ChatScreenState extends State<ChatScreen> {
     // so a message can get genuinely stuck in its steering/followUp queues;
     // the server-side queue_clear drains pi's own queue (the honest fix).
     for (final text in queued) {
-      final pendingImgs = _pendingImagesByText[text] ?? const <PendingImage>[];
+      final localImgs = _pendingImagesByText[text] ?? const <PendingImage>[];
+      final serverImgs =
+          s?.pendingImagesByText[text] ?? const <PendingImage>[];
+      final pendingImgs = localImgs.isNotEmpty ? localImgs : serverImgs;
       items.add(
         GestureDetector(
           onTap: (s == null)
@@ -1106,7 +1225,7 @@ class _ChatScreenState extends State<ChatScreen> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      builder: (_) => _ModelSheet(
+      builder: (_) => ModelSheet(
         models: models,
         onPick: (m) {
           svc.setModel(s, m.provider, m.id);
@@ -1416,84 +1535,6 @@ class _StreamingBubble extends StatelessWidget {
                   ),
                 ),
               ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _ModelSheet extends StatefulWidget {
-  final List<PinestModel> models;
-  final ValueChanged<PinestModel> onPick;
-  const _ModelSheet({required this.models, required this.onPick});
-
-  @override
-  State<_ModelSheet> createState() => _ModelSheetState();
-}
-
-class _ModelSheetState extends State<_ModelSheet> {
-  String _q = '';
-
-  @override
-  Widget build(BuildContext context) {
-    final q = _q.toLowerCase();
-    final filtered = widget.models.where((m) {
-      final hay = '${m.name} ${m.provider} ${m.id}'.toLowerCase();
-      return hay.contains(q);
-    }).toList();
-    return SafeArea(
-      child: SizedBox(
-        height: MediaQuery.of(context).size.height * 0.7,
-        child: Column(
-          children: [
-            const Padding(
-              padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  'Select model',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                ),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: TextField(
-                autofocus: true,
-                decoration: const InputDecoration(
-                  isDense: true,
-                  hintText: 'Search models…',
-                  prefixIcon: Icon(Icons.search),
-                  border: OutlineInputBorder(),
-                ),
-                onChanged: (v) => setState(() => _q = v),
-              ),
-            ),
-            const SizedBox(height: 8),
-            Expanded(
-              child: filtered.isEmpty
-                  ? const Center(
-                      child: Text(
-                        'No models match',
-                        style: TextStyle(color: Colors.grey),
-                      ),
-                    )
-                  : ListView.builder(
-                      itemCount: filtered.length,
-                      itemBuilder: (_, i) {
-                        final m = filtered[i];
-                        return ListTile(
-                          leading: const Icon(Icons.circle_outlined),
-                          title: Text(m.name),
-                          subtitle: Text(
-                            '${m.provider}${m.reasoning ? " · reasoning" : ""}${m.vision ? " · vision" : ""}',
-                          ),
-                          onTap: () => widget.onPick(m),
-                        );
-                      },
-                    ),
             ),
           ],
         ),
