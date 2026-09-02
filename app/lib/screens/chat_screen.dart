@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -12,6 +13,7 @@ import '../services/user_preferences.dart';
 import '../models/session.dart';
 import '../models/chat_item.dart';
 import '../models/tool_call_view.dart';
+import 'tool_call_card.dart';
 
 class ChatScreen extends StatefulWidget {
   final String sessionId;
@@ -43,6 +45,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _wasWorking = false;
   bool _steer = true; // send mid-turn messages as steer (vs follow-up)
   final List<PendingImage> _attachedImages = [];
+  final Map<String, List<PendingImage>> _pendingImagesByText = {};
   bool _atBottom = true; // track whether user is scrolled to bottom
   final Map<String, int> _prevHistoryLen = {};
 
@@ -100,34 +103,43 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _loadingOlder = false;
 
   void _loadOlderHistory() {
+    if (_loadingOlder) return;
     final svc = context.read<AgentService>();
     final s = _session(svc);
     if (s == null) return;
-    _loadingOlder = true;
+    setState(() => _loadingOlder = true);
     // Prepending shifts everything down — remember the viewport metrics so the
     // user stays on the message they were reading instead of jumping.
-    final pixelsBefore = _scroll.position.pixels;
-    final maxBefore = _scroll.position.maxScrollExtent;
+    final pixelsBefore = _scroll.hasClients ? _scroll.position.pixels : 0.0;
+    final maxBefore =
+        _scroll.hasClients ? _scroll.position.maxScrollExtent : 0.0;
     final cursor = svc.historyCursor(widget.sessionId);
     svc.getHistory(s, cursor: cursor);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _loadingOlder = false;
-      // History applies asynchronously (WS reply); keep correcting until the
-      // extent actually grew, then stop so normal scrolling is never fought.
-      void correct() {
-        if (!mounted || !_scroll.hasClients) return;
-        final grown = _scroll.position.maxScrollExtent > maxBefore + 1;
-        if (grown) {
-          _scroll.jumpTo(
-            pixelsBefore + (_scroll.position.maxScrollExtent - maxBefore),
-          );
-        } else {
-          WidgetsBinding.instance.addPostFrameCallback((_) => correct());
-        }
-      }
 
-      correct();
+    // Safety timeout in case server response is lost
+    Timer(const Duration(seconds: 5), () {
+      if (mounted && _loadingOlder) {
+        setState(() => _loadingOlder = false);
+      }
     });
+
+    void check(int attempts) {
+      if (!mounted || !_scroll.hasClients || attempts <= 0) {
+        if (mounted && _loadingOlder) setState(() => _loadingOlder = false);
+        return;
+      }
+      final delta = _scroll.position.maxScrollExtent - maxBefore;
+      if (delta > 1) {
+        _scroll.jumpTo(pixelsBefore + delta);
+        if (mounted) setState(() => _loadingOlder = false);
+      } else {
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => check(attempts - 1),
+        );
+      }
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) => check(10));
   }
 
   void _jumpToBottom() {
@@ -247,6 +259,11 @@ class _ChatScreenState extends State<ChatScreen> {
     if (text.isEmpty && !hasImages) return;
     final svc = context.read<AgentService>();
     final s = _session(svc);
+    final displayText = text.isEmpty ? '[image]' : text;
+    if (hasImages) {
+      _pendingImagesByText[displayText] =
+          List<PendingImage>.from(_attachedImages);
+    }
     if (s != null) {
       svc.sendMessage(
         s,
@@ -333,6 +350,66 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  void _showQueuedMessageOptions(
+    BuildContext context,
+    AgentService svc,
+    Session s,
+    String text,
+    List<PendingImage> pendingImgs,
+  ) {
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.edit_outlined),
+              title: const Text('Edit message'),
+              subtitle: const Text('Remove from queue and copy back to editor'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                svc.deleteQueuedMessage(s, text);
+                _pendingImagesByText.remove(text);
+                setState(() {
+                  _input.text = text == '[image]' ? '' : text;
+                  if (pendingImgs.isNotEmpty) {
+                    _attachedImages.addAll(pendingImgs);
+                  }
+                });
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Message copied back to editor'),
+                    duration: Duration(seconds: 2),
+                  ),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline, color: Colors.red),
+              title: const Text(
+                'Delete message',
+                style: TextStyle(color: Colors.red),
+              ),
+              subtitle: const Text('Remove from queue without editing'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                svc.deleteQueuedMessage(s, text);
+                _pendingImagesByText.remove(text);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Message deleted from queue'),
+                    duration: Duration(seconds: 2),
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _messageList(
     List<Map<String, dynamic>> history,
     String? streaming,
@@ -343,6 +420,50 @@ class _ChatScreenState extends State<ChatScreen> {
     // Server-authoritative queue — the client is a terminal, not the keeper.
     final queued = s?.pendingMessages ?? const <String>[];
     final items = <Widget>[];
+
+    final hasMore = svc.historyHasMore(widget.sessionId);
+    if (_loadingOlder) {
+      items.add(
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          child: Center(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  'Loading older messages…',
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    } else if (hasMore) {
+      items.add(
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Center(
+            child: TextButton.icon(
+              onPressed: _loadingOlder ? null : _loadOlderHistory,
+              icon: const Icon(Icons.arrow_upward, size: 14),
+              label: const Text('Load older messages'),
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                textStyle: const TextStyle(fontSize: 12),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
     for (final msg in history) {
       final role = msg['role'] as String? ?? '';
       final text = msg['text'] as String? ?? '';
@@ -403,25 +524,34 @@ class _ChatScreenState extends State<ChatScreen> {
     // so a message can get genuinely stuck in its steering/followUp queues;
     // the server-side queue_clear drains pi's own queue (the honest fix).
     for (final text in queued) {
+      final pendingImgs = _pendingImagesByText[text] ?? const <PendingImage>[];
       items.add(
         GestureDetector(
-          onLongPress: s == null
+          onTap: (s == null)
               ? null
-              : () {
-                  svc.clearQueue(s);
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Queue cleared'),
-                      duration: Duration(seconds: 2),
-                    ),
-                  );
-                },
+              : () => _showQueuedMessageOptions(
+                    context,
+                    svc,
+                    s,
+                    text,
+                    pendingImgs,
+                  ),
+          onLongPress: (s == null)
+              ? null
+              : () => _showQueuedMessageOptions(
+                    context,
+                    svc,
+                    s,
+                    text,
+                    pendingImgs,
+                  ),
           child: _bubble(
             text,
             Alignment.centerRight,
             Colors.orange.withAlpha(40),
             queued: true,
             steering: s?.pendingSteering.contains(text) ?? false,
+            images: pendingImgs,
           ),
         ),
       );
@@ -433,7 +563,7 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _toolCallCard(ToolCallView tool) => _ToolCallCard(
+  Widget _toolCallCard(ToolCallView tool) => ToolCallCard(
     name: tool.name,
     args: tool.args,
     result: tool.result,
@@ -1250,222 +1380,6 @@ class _ToolButton extends StatelessWidget {
         ),
       ),
     );
-  }
-}
-
-class _ToolCallCard extends StatefulWidget {
-  final String name;
-  final dynamic args;
-  final String? result;
-  final List<Map<String, dynamic>> images;
-
-  /// Images the server left out of this history payload. Shown as a count —
-  /// an image that is not there must say so rather than just be absent.
-  final int imagesOmitted;
-  final bool isError;
-  final bool running;
-  const _ToolCallCard({
-    required this.name,
-    required this.args,
-    required this.result,
-    required this.images,
-    required this.isError,
-    required this.running,
-    this.imagesOmitted = 0,
-  });
-
-  @override
-  State<_ToolCallCard> createState() => _ToolCallCardState();
-}
-
-class _ToolCallCardState extends State<_ToolCallCard> {
-  bool _expanded = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final icon = widget.running
-        ? const SizedBox(
-            width: 12,
-            height: 12,
-            child: CircularProgressIndicator(strokeWidth: 1.5),
-          )
-        : Icon(
-            widget.isError ? Icons.error_outline : Icons.check,
-            size: 14,
-            color: widget.isError ? Colors.red : Colors.green,
-          );
-    final argStr = widget.args != null
-        ? const JsonEncoder.withIndent('  ').convert(widget.args)
-        : '';
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 2),
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.85,
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            InkWell(
-              onTap: () => setState(() => _expanded = !_expanded),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      icon,
-                      const SizedBox(width: 6),
-                      Text(
-                        widget.name,
-                        style: const TextStyle(
-                          fontSize: 12,
-                          fontFamily: 'monospace',
-                          color: Colors.grey,
-                        ),
-                      ),
-                      const SizedBox(width: 4),
-                      Icon(
-                        _expanded ? Icons.expand_less : Icons.expand_more,
-                        size: 16,
-                        color: Colors.grey,
-                      ),
-                    ],
-                  ),
-                  // The summary gets its OWN line with the full card width:
-                  // one line, ellipsized, character-capped. Squeezing it into
-                  // a Flexible next to the name starved it to nothing (cards
-                  // that "just say bash") or wrapped into tall blocks.
-                  if (argStr.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(left: 20),
-                      child: Text(
-                        _argSummary(widget.name, widget.args),
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontFamily: 'monospace',
-                          color: Colors.grey.shade600,
-                        ),
-                        maxLines: 1,
-                        softWrap: false,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                ],
-              ),
-            ),
-            // Images a tool RETURNED (an image `read`) collapse WITH the card:
-            // expanded shows them, collapsed shows the file summary line only.
-            // Tap to open full size.
-            if (_expanded)
-              for (final img in widget.images)
-                Padding(
-                  padding: const EdgeInsets.only(left: 20, top: 4),
-                  child: InkWell(
-                    onTap: () => _showImage(context, img['data'] as String),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(6),
-                      child: Image.memory(
-                        base64Decode(img['data'] as String),
-                        width: 240,
-                        fit: BoxFit.contain,
-                      ),
-                    ),
-                  ),
-                ),
-            if (widget.imagesOmitted > 0)
-              Padding(
-                padding: const EdgeInsets.only(left: 20, top: 4),
-                child: Text(
-                  '${widget.imagesOmitted} image(s) not shown — older history',
-                  style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
-                ),
-              ),
-            if (_expanded) ...[
-              if (argStr.isNotEmpty)
-                Container(
-                  margin: const EdgeInsets.only(top: 4),
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: Colors.grey.shade100,
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: SelectableText(
-                    argStr,
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontFamily: 'monospace',
-                      color: Colors.grey.shade700,
-                    ),
-                  ),
-                ),
-              if (widget.result != null)
-                Container(
-                  margin: const EdgeInsets.only(top: 4),
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: widget.isError
-                        ? Colors.red.shade50
-                        : Colors.grey.shade100,
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  constraints: BoxConstraints(maxHeight: 300),
-                  child: SingleChildScrollView(
-                    child: SelectableText(
-                      widget.result!,
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontFamily: 'monospace',
-                        color: widget.isError
-                            ? Colors.red.shade700
-                            : Colors.grey.shade700,
-                      ),
-                    ),
-                  ),
-                ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// Full-size view of a tool-returned image (tap the thumbnail).
-  void _showImage(BuildContext context, String b64) =>
-      showImageDialog(context, b64);
-
-  static const _summaryMaxChars = 160;
-
-  String _argSummary(String toolName, dynamic args) {
-    if (args == null) return '';
-    String? summary;
-    if (args is Map) {
-      // Show the most relevant field
-      for (final key in [
-        'command',
-        'path',
-        'file',
-        'url',
-        'query',
-        'pattern',
-      ]) {
-        if (args[key] != null) {
-          // Bash commands keep their newlines visible as separators.
-          summary = key == 'command'
-              ? (args[key] as String).replaceAll('\n', ' ; ').trim()
-              : '${args[key]}';
-          break;
-        }
-      }
-      summary ??= args.length == 1 ? '${args.values.first}' : null;
-    }
-    summary ??= '';
-    // Hard character cap: long terminal calls must fit one line, not wrap the
-    // card into a tall block. The full args stay in the expandable body.
-    if (summary.length > _summaryMaxChars) {
-      summary = '${summary.substring(0, _summaryMaxChars)}…';
-    }
-    return summary;
   }
 }
 

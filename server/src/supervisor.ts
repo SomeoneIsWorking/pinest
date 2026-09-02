@@ -382,6 +382,24 @@ export class Supervisor {
           this.syncQueue(cmd.sessionId, s);
           break;
         }
+        case "queue_delete": {
+          try {
+            if (typeof (s.session as any).clearQueue === "function") {
+              const { steering, followUp } = (s.session as any).clearQueue();
+              const target = cmd.text;
+              const remainingSteer = (steering ?? []).filter((t: string) => t !== target);
+              const remainingFollow = (followUp ?? []).filter((t: string) => t !== target);
+              for (const t of remainingSteer) {
+                s.session.prompt(t, { streamingBehavior: "steer" });
+              }
+              for (const t of remainingFollow) {
+                s.session.prompt(t, { streamingBehavior: "followUp" });
+              }
+            }
+          } catch { /* getter-absent session */ }
+          this.syncQueue(cmd.sessionId, s);
+          break;
+        }
       }
     } catch (e) {
       debug("[remote-code] session command error:", (e as Error).message);
@@ -458,15 +476,24 @@ export class Supervisor {
           s.status = "working";
           this.callbacks.upsertSession(id, { status: "working" });
         }
-      } else if (event.type === "message_end" && event.message?.role === "user") {
-        // message_end is when pi persists the message — push history then, so
-        // the delivered message never goes invisible. Queue pops are NOT our
-        // job: pi dequeues at message_start and says so via queue_update.
-        setTimeout(() => {
-          this.getHistory(s).then((h) =>
-            this.callbacks.broadcast({ type: "history", sessionId: id, ...pageHistory(h) }),
-          );
-        }, 100);
+      } else if (event.type === "message_end") {
+        if (event.message?.role === "assistant" && (event.message.stopReason === "error" || event.message.errorMessage)) {
+          this.callbacks.broadcast({
+            type: "error",
+            sessionId: id,
+            message: event.message.errorMessage || "Provider error",
+          });
+        }
+        if (event.message?.role === "user") {
+          // message_end is when pi persists the message — push history then, so
+          // the delivered message never goes invisible. Queue pops are NOT our
+          // job: pi dequeues at message_start and says so via queue_update.
+          setTimeout(() => {
+            this.getHistory(s).then((h) =>
+              this.callbacks.broadcast({ type: "history", sessionId: id, ...pageHistory(h) }),
+            );
+          }, 100);
+        }
       } else if (event.type === "message_update") {
         const ae = event.assistantMessageEvent;
         if (ae?.type === "text_delta" && s.currentTurnId) {
@@ -500,6 +527,16 @@ export class Supervisor {
         s.turnStarted = false;
         s.status = "idle";
         debug(`[remote-code] session ${id} status: working -> idle (agent_end)`);
+        if (Array.isArray(event.messages)) {
+          const last = event.messages[event.messages.length - 1];
+          if (last?.role === "assistant" && (last.stopReason === "error" || last.errorMessage)) {
+            this.callbacks.broadcast({
+              type: "error",
+              sessionId: id,
+              message: last.errorMessage || "Provider error",
+            });
+          }
+        }
         s.segmenter.reset();
         if (s.currentTurnId) s.currentTurnId = null;
         this.callbacks.upsertSession(id, { status: "idle", contextUsage: this.usageWithCompactAt(s) });

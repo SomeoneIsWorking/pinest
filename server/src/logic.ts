@@ -110,7 +110,8 @@ export function messagesToHistory(messages: unknown): HistoryItem[] {
       const text = extractText(m.content) ||
         // Image-only user messages (paste from the client) render as a
         // placeholder so the app's pending-message matching can clear them.
-        (isImageMessage ? "[image]" : "");
+        (isImageMessage ? "[image]" : "") ||
+        (m.role === "assistant" && m.errorMessage ? `Error: ${m.errorMessage}` : "");
       // USER images must survive refresh too — dropping them made a sent
       // screenshot vanish from the thread the moment history reloaded.
       const images = isImageMessage

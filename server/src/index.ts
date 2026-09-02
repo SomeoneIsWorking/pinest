@@ -30,7 +30,8 @@ import { StreamSegmenter } from "./stream.ts";
 import { loadConfig, saveConfig } from "./config.ts";
 import { PROVIDERS } from "./tunnel.ts";
 import { createAttachView } from "./attach-view.ts";
-import { SourceWatcher } from "./watch.ts";
+import { SourceWatcher, firstSyntaxError } from "./watch.ts";
+export { firstSyntaxError } from "./watch.ts";
 import { resolveThinkingLevel, reportThinkingLevel } from "./thinking.ts";
 import { Type } from "typebox";
 import type { SessionRow, SessionSnapshot, ClientCommand, ServerMessage } from "./protocol.ts";
@@ -291,35 +292,6 @@ export function pendingReloadState(): { count: number; files: string[]; watching
     files: [..._changedSources].slice(0, 20),
     watching: !!_watcher,
   };
-}
-
-/** Syntax-validate every .ts/.js/.mjs file under the watched extension dirs.
- * A broken file (e.g. a half-written edit) must NOT be reloaded — the running
- * instance keeps serving and the caller is told which file to fix. Returns the
- * first broken path, or null when everything parses. */
-export function firstSyntaxError(dirs: string[], files: string[]): string | null {
-  const checkable = new Set<string>();
-  const exts = [".ts", ".mts", ".cts", ".js", ".mjs", ".cjs"];
-  const walk = (p: string, depth: number): void => {
-    if (depth > 8) return;
-    let st: import("node:fs").Stats;
-    try { st = statSync(p); } catch { return; }
-    if (st.isDirectory()) {
-      if (["node_modules", ".git", "build", "dist", "scratch"].includes(basename(p))) return;
-      try { for (const c of readdirSync(p)) walk(join(p, c), depth + 1); } catch { /* unreadable dir: skip */ }
-    } else if (exts.some((e) => p.endsWith(e))) {
-      checkable.add(p);
-    }
-  };
-  for (const d of dirs) walk(d, 0);
-  for (const f of files) {
-    if (exts.some((e) => f.endsWith(e))) checkable.add(f);
-  }
-  for (const f of checkable) {
-    const r = spawnSync(process.execPath, ["--check", f], { timeout: 10_000 });
-    if (r.status !== 0) return f;
-  }
-  return null;
 }
 
 /** Queue the explicit reload. Returns a human/agent-readable outcome — every
@@ -769,6 +741,14 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
       _pendingSteering = [];
       upsertSession(_sessionId, { pendingMessages: [], pendingSteering: [] });
       break;
+    case "queue_delete":
+      _pendingMessages = popPending(_pendingMessages, cmd.text);
+      _pendingSteering = popPending(_pendingSteering, cmd.text);
+      upsertSession(_sessionId, {
+        pendingMessages: [..._pendingMessages],
+        pendingSteering: [..._pendingSteering],
+      });
+      break;
     case "list_paths": {
       // Resolve ~ and relative prefixes against the spawn dialog's starting dir.
       const paths = listPaths(cmd.prefix || "");
@@ -891,12 +871,18 @@ function bridge(pi: ExtensionAPI): void {
             ...images.map((img) => ({ type: "image" as const, mimeType: img.mimeType, data: img.data })),
           ]
         : text;
-      _pi?.sendUserMessage?.(content as never, { deliverAs });
+      const target: any = _ctx && typeof (_ctx as any).sendUserMessage === "function" ? _ctx : _pi;
+      if (typeof target?.sendUserMessage === "function") {
+        target.sendUserMessage(content as never, { deliverAs });
+      } else {
+        debug("[remote-code] neither _ctx nor _pi has sendUserMessage");
+      }
     },
     isTurnStarted: () => _turnStarted,
   });
 
-  pi.on("message_start", (event: any) => {
+  pi.on("message_start", (event: any, ctx?: ExtensionContext) => {
+    if (ctx) _ctx = ctx;
     _turnStarted = true;
     if (event?.message?.role === "user") {
       segmenter.reset();
@@ -932,7 +918,12 @@ function bridge(pi: ExtensionAPI): void {
   // message_start is too early (buildSessionContext won't contain it yet, so
   // a history broadcast there can be stale). The queue pop happens at
   // message_start above, mirroring pi's own dequeue.
-  pi.on("message_end", (event: any) => {
+  pi.on("message_end", (event: any, ctx?: ExtensionContext) => {
+    if (ctx) _ctx = ctx;
+    if (event?.message?.role === "assistant" && (event.message.stopReason === "error" || event.message.errorMessage)) {
+      const err = event.message.errorMessage || "Provider error";
+      broadcast({ type: "error", sessionId: _sessionId, message: err });
+    }
     if (event?.message?.role !== "user") return;
     setTimeout(() => {
       getInteractiveHistory().then((h) =>
@@ -977,12 +968,19 @@ function bridge(pi: ExtensionAPI): void {
     }});
   });
 
-  pi.on("agent_end", () => {
+  pi.on("agent_end", (event: any, ctx?: ExtensionContext) => {
+    if (ctx) _ctx = ctx;
     _turnStarted = false;
     if (_currentTurnId) _currentTurnId = null;
     segmenter.reset();
     _status = "idle";
     debug(`[remote-code] host status: working -> idle (agent_end)`);
+    if (Array.isArray(event?.messages)) {
+      const last = event.messages[event.messages.length - 1];
+      if (last?.role === "assistant" && (last.stopReason === "error" || last.errorMessage)) {
+        broadcast({ type: "error", sessionId: _sessionId, message: last.errorMessage || "Provider error" });
+      }
+    }
     upsertSession(_sessionId, { streamingText: null, status: "idle", contextUsage: hostContext.contextUsage() });
     hostContext.maybeAutoCompact();
     // Send updated history so the completed message sticks

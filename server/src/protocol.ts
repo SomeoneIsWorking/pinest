@@ -144,6 +144,7 @@ export type ClientCommand =
        * page BEFORE it (scroll-back pagination). */
       cursor?: number }
   | { type: "queue_clear"; sessionId?: string }
+  | { type: "queue_delete"; sessionId?: string; text: string }
   | { type: "list_paths"; sessionId?: string; prefix?: string; id?: string }
   | { type: "path_check"; path: string; id?: string }
   | { type: "folder_create"; path: string; id?: string }
