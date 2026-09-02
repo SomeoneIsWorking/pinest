@@ -234,7 +234,7 @@ class _MainShellState extends State<MainShell> {
       context: context,
       builder: (_) => SpawnDialog(
         initialCwd: active == null ? null : svc.displayPath(active.cwd),
-        initialModel: preferences.lastModel,
+        initialModel: active?.model ?? preferences.lastModel,
       ),
     );
     if (result == null || (result['cwd'] as String?)?.isEmpty != false) return;
@@ -260,6 +260,9 @@ class _MainShellState extends State<MainShell> {
     final lastThinking = preferences.lastThinking;
     if (created != null && lastThinking != null) {
       svc.setThinking(created, lastThinking);
+    }
+    if (created != null) {
+      _selectSession(svc, newId);
     }
     if (mounted) setState(() => _spawning = false);
   }
