@@ -1,9 +1,8 @@
-# AGENTS.md — remote-code
+# AGENTS.md — pinest
 
 Remote control for [pi](https://github.com/earendil-works/pi) coding agents: a pi
 extension that serves a persistent, resumable session registry over an
-authenticated WebSocket (Firebase Google auth), plus a Flutter phone/web client
-(forked from the author's earlier PiNest project).
+authenticated WebSocket (Firebase Google auth), plus a Flutter phone/web client.
 
 Read `docs/project-goals.md` before designing anything. `docs/project-state.md`
 is the factual capability ledger. `docs/issues/` holds atomic work. This file

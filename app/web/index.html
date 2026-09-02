@@ -47,13 +47,16 @@
 </head>
 <body>
   <!--
-    You can customize the "flutter_bootstrap.js" script.
-    This is useful to provide a custom configuration to the Flutter loader
-    or to give the user feedback during the initialization process.
-
-    For more details:
-    * https://docs.flutter.dev/platform-integration/web/initialization
+    Dynamically inject flutter_bootstrap.js with a cache-busting query parameter
+    so new deployments are picked up immediately by browsers.
   -->
-  <script src="flutter_bootstrap.js" async></script>
+  <script>
+    (function () {
+      var s = document.createElement('script');
+      s.src = 'flutter_bootstrap.js?v=' + Date.now();
+      s.async = true;
+      document.body.appendChild(s);
+    })();
+  </script>
 </body>
 </html>

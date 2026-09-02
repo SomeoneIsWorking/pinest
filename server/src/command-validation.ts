@@ -90,10 +90,20 @@ function requiredString(
 function optionalString(
   command: Record<string, unknown>,
   field: string,
-  options: { maxCharacters: number; allowEmpty?: boolean; trim?: boolean; allowNull?: boolean },
+  options: {
+    maxCharacters: number;
+    allowEmpty?: boolean;
+    trim?: boolean;
+    allowNull?: boolean;
+    emptyAsUndefined?: boolean;
+  },
 ): string | undefined {
   const raw = command[field];
   if (raw === undefined || (options.allowNull && raw === null)) return undefined;
+  if (options.emptyAsUndefined && typeof raw === "string") {
+    const trimmed = options.trim ? raw.trim() : raw;
+    if (trimmed.length === 0) return undefined;
+  }
   return requiredString(command, field, options);
 }
 
@@ -126,6 +136,7 @@ function optionalModelField(command: Record<string, unknown>, field: string): st
     maxCharacters: COMMAND_LIMITS.modelFieldCharacters,
     trim: true,
     allowNull: true,
+    emptyAsUndefined: true,
   });
 }
 
@@ -289,6 +300,7 @@ export function parseClientCommand(input: unknown): ClientCommand {
           maxCharacters: COMMAND_LIMITS.nameCharacters,
           trim: true,
           allowNull: true,
+          emptyAsUndefined: true,
         }),
         model: optionalModelField(command, "model"),
       };

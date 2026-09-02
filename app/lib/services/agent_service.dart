@@ -458,12 +458,14 @@ class AgentService extends ChangeNotifier {
     String? model,
   }) async {
     final id = DateTime.now().millisecondsSinceEpoch.toString();
+    final trimmedName = name?.trim();
+    final trimmedModel = model?.trim();
     _send({
       'type': 'session_spawn',
       'sessionId': id,
       'cwd': cwd,
-      'name': name,
-      'model': model,
+      if (trimmedName != null && trimmedName.isNotEmpty) 'name': trimmedName,
+      if (trimmedModel != null && trimmedModel.isNotEmpty) 'model': trimmedModel,
     });
     return id;
   }
