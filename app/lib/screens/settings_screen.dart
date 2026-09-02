@@ -189,8 +189,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: ListTile(
               leading: const Icon(Icons.android),
               title: const Text('Android app (APK)'),
-              subtitle: const Text(
-                  'Download the latest CI build and install it. '
+              subtitle: Text(
+                  'Download $apkVersionedName (latest CI build). '
                   'Allow "install from this source" when asked.'),
               trailing: const Icon(Icons.download),
               onTap: () => openExternalUrl(apkDownloadUrl),
@@ -201,12 +201,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const Text('About',
               style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
           const SizedBox(height: 8),
-          const Card(
+          Card(
             child: Padding(
-              padding: EdgeInsets.all(16),
-              child: Text(
-                  'PiNest controls Pi coding agents via Firebase. Each agent runs '
-                  'the PiNest extension. Same Google account = auto-paired.'),
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                      'PiNest controls Pi coding agents via Firebase. Each agent runs '
+                      'the PiNest extension. Same Google account = auto-paired.'),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      const Icon(Icons.info_outline, size: 16, color: Colors.grey),
+                      const SizedBox(width: 8),
+                      Text(
+                        'PiNest $appVersionDisplay',
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
           const SizedBox(height: 24),
