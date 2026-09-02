@@ -264,15 +264,11 @@ export async function readNgrokApiUrl(
 function isLoopbackTarget(candidate: unknown, port: number): boolean {
   if (typeof candidate !== "string") return false;
   try {
-    const target = new URL(candidate);
+    const raw = candidate.includes("://") ? candidate : `http://${candidate}`;
+    const target = new URL(raw);
     return target.protocol === "http:"
       && ["localhost", "127.0.0.1", "[::1]"].includes(target.hostname.toLowerCase())
-      && target.port === String(port)
-      && target.username === ""
-      && target.password === ""
-      && target.pathname === "/"
-      && target.search === ""
-      && target.hash === "";
+      && target.port === String(port);
   } catch {
     return false;
   }
