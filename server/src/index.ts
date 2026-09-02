@@ -18,7 +18,7 @@ import { randomUUID } from "node:crypto";
 import { hostname, homedir } from "node:os";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { UserImage } from "./protocol.ts";
-import { popPending, pushPending, extractUserText } from "./logic.ts";
+import { popPending, pushPending, extractUserText, extractText } from "./logic.ts";
 import { createMessageSubmitter, type MessageSubmitter } from "./submit.ts";
 import { createFirebase } from "./auth.ts";
 import type { FirebaseAuth } from "./auth.ts";
@@ -951,6 +951,21 @@ function bridge(pi: ExtensionAPI): void {
     isTurnStarted: () => _turnStarted,
   });
 
+  (pi as any).on?.("queue_update", (event: any) => {
+    _pendingMessages = [...(event?.steering ?? []), ...(event?.followUp ?? [])];
+    _pendingSteering = [...(event?.steering ?? [])];
+    for (const k of Object.keys(_pendingImagesByText)) {
+      if (!_pendingMessages.includes(k)) {
+        delete _pendingImagesByText[k];
+      }
+    }
+    upsertSession(_sessionId, {
+      pendingMessages: [..._pendingMessages],
+      pendingSteering: [..._pendingSteering],
+      pendingImagesByText: { ..._pendingImagesByText },
+    });
+  });
+
   pi.on("message_start", (event: any, ctx?: ExtensionContext) => {
     if (ctx) _ctx = ctx;
     _turnStarted = true;
@@ -958,13 +973,9 @@ function bridge(pi: ExtensionAPI): void {
       segmenter.reset();
       _status = "working";
       upsertSession(_sessionId, { streamingText: "", status: "working" });
-      // pi dequeues the user message from its OWN steering/followUp queue at
-      // message_start (matching by message text) — mirror exactly that here.
-      // The old pop-at-message_end drifted: an image-only message delivers
-      // with an empty text part, never matched, and stayed queued forever.
-      // Mirroring pi's own dequeue point cannot drift from it.
-      const delivered = extractUserText(event.message);
-      if (delivered && _pendingMessages.includes(delivered)) {
+      const rawText = extractText(event.message).trim();
+      const delivered = rawText || "[image]";
+      if (_pendingMessages.includes(delivered)) {
         _pendingMessages = popPending(_pendingMessages, delivered);
         _pendingSteering = popPending(_pendingSteering, delivered);
         delete _pendingImagesByText[delivered];

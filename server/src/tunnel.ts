@@ -169,6 +169,25 @@ function resolveCloudflaredBin(): string | null {
   return resolveRunnableSystemExecutable("cloudflared");
 }
 
+function makeProcKill(proc: ReturnType<typeof spawn>): () => void {
+  let cleaned = false;
+  const kill = () => {
+    if (cleaned) return;
+    cleaned = true;
+    try { process.removeListener("exit", kill); } catch { /* */ }
+    try { proc.kill("SIGTERM"); } catch { /* */ }
+    setTimeout(() => {
+      try { proc.kill("SIGKILL"); } catch { /* */ }
+    }, 500).unref?.();
+  };
+  process.once("exit", kill);
+  proc.once("exit", () => {
+    cleaned = true;
+    try { process.removeListener("exit", kill); } catch { /* */ }
+  });
+  return kill;
+}
+
 const cloudflaredProvider: TunnelProvider = {
   name: "cloudflared",
   label: "cloudflared",
@@ -189,6 +208,7 @@ const cloudflaredProvider: TunnelProvider = {
       const proc = spawn(bin, cloudflaredArgs(port), {
         stdio: ["ignore", "pipe", "pipe"],
       });
+      const killProc = makeProcKill(proc);
       timer = setTimeout(
         () => done(reject)(new Error("cloudflared timeout (no URL after 30s)") as unknown as void), 30000);
       // MUST handle 'error' — a missing binary emits an unhandled 'error'
@@ -200,7 +220,7 @@ const cloudflaredProvider: TunnelProvider = {
           debug(`[remote-code] cloudflared tunnel: ${endpoint}`);
           const handle: TunnelHandle = {
             url: endpoint,
-            stop: () => { stopped = true; try { proc.kill(); } catch { /* */ } },
+            stop: () => { stopped = true; killProc(); },
           };
           // Quick tunnels die eventually — surface it so the server can
           // restart automatically instead of publishing a dead URL forever.
@@ -281,8 +301,9 @@ const ngrokProvider: TunnelProvider = {
       };
       let stopped = false;
       const proc = spawn(bin, ngrokArgs(port), { stdio: ["ignore", "pipe", "pipe"] });
+      const killProc = makeProcKill(proc);
       const fail = (error: Error): void => {
-        try { proc.kill(); } catch { /* already exited */ }
+        killProc();
         done(reject)(error as unknown as void);
       };
       timer = setTimeout(
@@ -292,7 +313,7 @@ const ngrokProvider: TunnelProvider = {
         debug(`[remote-code] ngrok tunnel: ${url}`);
         const handle: TunnelHandle = {
           url,
-          stop: () => { stopped = true; try { proc.kill(); } catch { /* */ } },
+          stop: () => { stopped = true; killProc(); },
         };
         proc.once("exit", () => {
           if (!stopped) handle.onDead?.();
