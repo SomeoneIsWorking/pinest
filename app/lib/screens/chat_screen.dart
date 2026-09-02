@@ -13,6 +13,7 @@ import '../services/user_preferences.dart';
 import '../models/session.dart';
 import '../models/chat_item.dart';
 import '../models/tool_call_view.dart';
+import 'app_toast.dart';
 import 'tool_call_card.dart';
 
 class ChatScreen extends StatefulWidget {
@@ -184,11 +185,10 @@ class _ChatScreenState extends State<ChatScreen> {
   /// attachment strip looks identical to "the listener never fired".
   void _onPasteWithoutImage(String detail) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Paste: $detail'),
-        duration: const Duration(seconds: 4),
-      ),
+    showAppToast(
+      context,
+      'Paste: $detail',
+      duration: const Duration(seconds: 4),
     );
   }
 
@@ -210,9 +210,11 @@ class _ChatScreenState extends State<ChatScreen> {
       );
     } on StateError catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
+      showAppToast(
         context,
-      ).showSnackBar(SnackBar(content: Text(error.message.toString())));
+        error.message.toString(),
+        isError: true,
+      );
     }
   }
 
@@ -221,13 +223,9 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _pasteClipboardImage() async {
     final files = await readClipboardAttachmentImages();
     if (files.isEmpty && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'No image read from clipboard. On Firefox/Zen use ⌘V in the '
-            'message field instead.',
-          ),
-        ),
+      showAppToast(
+        context,
+        'No image read from clipboard. On Firefox/Zen use ⌘V in the message field instead.',
       );
       return;
     }
@@ -247,9 +245,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _input.text = selection.messageText;
     });
     for (final notice in selection.notices) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(notice)));
+      showAppToast(context, notice);
     }
   }
 
@@ -377,11 +373,10 @@ class _ChatScreenState extends State<ChatScreen> {
                     _attachedImages.addAll(pendingImgs);
                   }
                 });
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Message copied back to editor'),
-                    duration: Duration(seconds: 2),
-                  ),
+                showAppToast(
+                  context,
+                  'Message copied back to editor',
+                  duration: const Duration(seconds: 2),
                 );
               },
             ),
@@ -396,11 +391,10 @@ class _ChatScreenState extends State<ChatScreen> {
                 Navigator.of(ctx).pop();
                 svc.deleteQueuedMessage(s, text);
                 _pendingImagesByText.remove(text);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Message deleted from queue'),
-                    duration: Duration(seconds: 2),
-                  ),
+                showAppToast(
+                  context,
+                  'Message deleted from queue',
+                  duration: const Duration(seconds: 2),
                 );
               },
             ),
