@@ -19,6 +19,7 @@ dependencies:
   flutter_markdown: ^0.7.6+1
   file_selector: ^1.1.0
   web: ^1.1.1
+  google_sign_in: ^6.2.2
 dev_dependencies:
   crypto: ^3.0.7
   flutter_test:
