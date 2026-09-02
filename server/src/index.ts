@@ -1131,7 +1131,13 @@ function bridge(pi: ExtensionAPI): void {
   // fresh (ws server, tunnel, registry reload). Spawned sessions were parked
   // idle in the registry by teardownRemote → resumable from the app.
   pi.on("session_shutdown", (event: any) => {
-    if (event?.reason === "reload") void teardownRemote("reload");
+    if (event?.reason === "reload") {
+      try {
+        const wired = (globalThis as any)[Symbol.for("remote-code.extension.wired")];
+        wired?.delete(pi);
+      } catch { /* */ }
+      void teardownRemote("reload");
+    }
   });
 }
 
