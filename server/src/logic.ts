@@ -204,7 +204,8 @@ export function pageHistory(
 
 /** Derive a session display name: explicit name, else cwd basename, else 'session'. */
 export function deriveSessionName(cwd: string | undefined, name?: string): string {
-  if (name) return name;
+  const trimmed = name?.trim();
+  if (trimmed) return trimmed;
   if (cwd) {
     const base = cwd.replace(/\/+$/, "").split("/").pop();
     return base || "session";

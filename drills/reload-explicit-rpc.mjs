@@ -16,7 +16,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const EXT = resolve(HERE, "../server/src/index.ts");
 const OUT = resolve(HERE, "../scratch/logs/reload-explicit.log");
 
-const proc = spawn("pi", ["-e", EXT, "--mode", "rpc"], {
+const proc = spawn("pi", ["-ne", "-e", EXT, "--mode", "rpc"], {
   stdio: ["pipe", "pipe", "pipe"],
   env: { ...process.env, RC_DEBUG: "1" },
 });

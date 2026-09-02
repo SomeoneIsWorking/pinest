@@ -80,6 +80,32 @@ test("every ClientCommand discriminant has a validated route shape", () => {
   }
 });
 
+test("session_spawn treats empty or whitespace name and model as undefined", () => {
+  const parsedEmpty = parseClientCommand({
+    type: "session_spawn",
+    cwd: "/tmp",
+    name: "",
+    model: "",
+  });
+  assert.equal(parsedEmpty.type, "session_spawn");
+  if (parsedEmpty.type === "session_spawn") {
+    assert.equal(parsedEmpty.name, undefined);
+    assert.equal(parsedEmpty.model, undefined);
+  }
+
+  const parsedWhitespace = parseClientCommand({
+    type: "session_spawn",
+    cwd: "/tmp",
+    name: "   ",
+    model: "   ",
+  });
+  assert.equal(parsedWhitespace.type, "session_spawn");
+  if (parsedWhitespace.type === "session_spawn") {
+    assert.equal(parsedWhitespace.name, undefined);
+    assert.equal(parsedWhitespace.model, undefined);
+  }
+});
+
 test("non-objects, unknown commands, and unknown fields are rejected", () => {
   for (const input of [null, [], "user_message", 42]) {
     rejects(input, /command must be an object/);

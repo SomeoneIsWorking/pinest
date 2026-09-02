@@ -19,7 +19,6 @@ class SpawnDialog extends StatefulWidget {
 class _SpawnDialogState extends State<SpawnDialog> {
   final _formKey = GlobalKey<FormState>();
   final _cwdController = TextEditingController();
-  final _nameController = TextEditingController();
   late final TextEditingController _modelController;
   List<String> _suggestions = [];
   bool _loading = false;
@@ -44,7 +43,6 @@ class _SpawnDialogState extends State<SpawnDialog> {
   @override
   void dispose() {
     _cwdController.dispose();
-    _nameController.dispose();
     _modelController.dispose();
     super.dispose();
   }
@@ -208,14 +206,6 @@ class _SpawnDialogState extends State<SpawnDialog> {
                   ),
                 const SizedBox(height: 12),
                 TextFormField(
-                  controller: _nameController,
-                  decoration: const InputDecoration(
-                    labelText: 'Name (optional — defaults to folder name)',
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                TextFormField(
                   controller: _modelController,
                   decoration: const InputDecoration(
                     labelText: 'Model',
@@ -235,10 +225,10 @@ class _SpawnDialogState extends State<SpawnDialog> {
         FilledButton(
           onPressed: () {
             if (_formKey.currentState!.validate()) {
+              final model = _modelController.text.trim();
               Navigator.pop(context, {
                 'cwd': _cwdController.text.trim(),
-                'name': _nameController.text.trim(),
-                'model': _modelController.text.trim(),
+                'model': model.isEmpty ? null : model,
               });
             }
           },
