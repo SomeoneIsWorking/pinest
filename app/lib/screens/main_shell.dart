@@ -14,6 +14,8 @@ import 'spawn_dialog.dart';
 import 'settings_screen.dart';
 import 'app_toast.dart';
 import 'tree_dialog.dart';
+import 'update_dialog.dart';
+import '../services/update_service.dart';
 
 /// Responsive shell: tabbed on wide screens (web/desktop), drawer on mobile.
 class MainShell extends StatefulWidget {
@@ -43,6 +45,27 @@ class _MainShellState extends State<MainShell> {
         duration: Duration(seconds: n.isError ? 5 : 3),
       );
     });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkUpdateOnAndroid();
+    });
+  }
+
+  Future<void> _checkUpdateOnAndroid() async {
+    // Check GitHub releases on Android client startup
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    try {
+      final shouldCheck = await UpdateService.shouldCheckAutomatically();
+      if (!shouldCheck) return;
+      await UpdateService.recordCheckTime();
+
+      final release = await UpdateService.fetchLatestRelease();
+      if (!mounted || release == null || !release.isNewer) return;
+
+      final dismissed = await UpdateService.isVersionDismissed(release.version);
+      if (dismissed || !mounted) return;
+
+      showUpdateDialog(context, release);
+    } catch (_) {}
   }
 
   @override

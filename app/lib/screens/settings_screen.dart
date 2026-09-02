@@ -5,8 +5,10 @@ import '../services/auth_service.dart';
 import '../services/agent_service.dart';
 import '../services/apk_release.dart';
 import '../services/link_bridge.dart';
+import '../services/update_service.dart';
 import '../services/user_preferences.dart';
 import 'app_toast.dart';
+import 'update_dialog.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -18,6 +20,31 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   final _threshold = TextEditingController();
   bool _steerByDefault = false;
+  bool _checkingForUpdate = false;
+
+  Future<void> _checkForUpdate() async {
+    if (_checkingForUpdate) return;
+    setState(() => _checkingForUpdate = true);
+    try {
+      final release = await UpdateService.fetchLatestRelease();
+      if (!mounted) return;
+      if (release == null) {
+        showAppToast(context, 'Could not reach GitHub for updates', isError: true);
+      } else if (release.isNewer) {
+        showUpdateDialog(context, release);
+      } else {
+        showAppToast(
+          context,
+          'PiNest is up to date ($appVersionDisplay)',
+          icon: Icons.check_circle_outline,
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _checkingForUpdate = false);
+      }
+    }
+  }
 
   @override
   void initState() {
@@ -206,30 +233,48 @@ class _SettingsScreenState extends State<SettingsScreen> {
               style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
           const SizedBox(height: 8),
           Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                      'PiNest controls Pi coding agents via Firebase. Each agent runs '
-                      'the PiNest extension. Same Google account = auto-paired.'),
-                  const SizedBox(height: 12),
-                  Row(
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Icon(Icons.info_outline, size: 16, color: Colors.grey),
-                      const SizedBox(width: 8),
-                      Text(
-                        'PiNest $appVersionDisplay',
-                        style: const TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w500,
-                        ),
+                      const Text(
+                          'PiNest controls Pi coding agents via Firebase. Each agent runs '
+                          'the PiNest extension. Same Google account = auto-paired.'),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          const Icon(Icons.info_outline, size: 16, color: Colors.grey),
+                          const SizedBox(width: 8),
+                          Text(
+                            'PiNest $appVersionDisplay (build $appBuildNumber)',
+                            style: const TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),
-                ],
-              ),
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.system_update_alt),
+                  title: const Text('Check for updates'),
+                  subtitle: const Text('Check GitHub releases for the latest version'),
+                  trailing: _checkingForUpdate
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.chevron_right),
+                  onTap: _checkingForUpdate ? null : _checkForUpdate,
+                ),
+              ],
             ),
           ),
           const SizedBox(height: 24),
