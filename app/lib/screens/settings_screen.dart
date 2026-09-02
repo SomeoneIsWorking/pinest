@@ -6,6 +6,7 @@ import '../services/agent_service.dart';
 import '../services/apk_release.dart';
 import '../services/link_bridge.dart';
 import '../services/user_preferences.dart';
+import 'app_toast.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -80,9 +81,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       tooltip: 'Copy tunnel URL',
                       onPressed: () {
                         Clipboard.setData(ClipboardData(text: svc.tunnelUrl!));
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Tunnel URL copied')),
-                        );
+                        showAppToast(context, 'Tunnel URL copied');
                       },
                     ),
             ),
@@ -125,20 +124,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         onPressed: () {
                           final v = int.tryParse(_threshold.text.trim());
                           if (v == null || v < 1000) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('Enter a value >= 1000 tokens')),
+                            showAppToast(
+                              context,
+                              'Enter a value >= 1000 tokens',
+                              isError: true,
                             );
                             return;
                           }
                           if (!svc.anyMachineOnline) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('No machine online')),
+                            showAppToast(
+                              context,
+                              'No machine online',
+                              isError: true,
                             );
                             return;
                           }
                           svc.setCompactThreshold(v);
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text('Auto-compact set to ${v.toString()} tokens')),
+                          showAppToast(
+                            context,
+                            'Auto-compact set to ${v.toString()} tokens',
                           );
                         },
                         child: const Text('Save'),

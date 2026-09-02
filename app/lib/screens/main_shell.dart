@@ -12,6 +12,7 @@ import '../models/session.dart';
 import 'chat_screen.dart';
 import 'spawn_dialog.dart';
 import 'settings_screen.dart';
+import 'app_toast.dart';
 
 /// Responsive shell: tabbed on wide screens (web/desktop), drawer on mobile.
 class MainShell extends StatefulWidget {
@@ -34,11 +35,12 @@ class _MainShellState extends State<MainShell> {
     // refused /compact (or any server-side failure) was completely silent.
     _noticeSub = context.read<AgentService>().notices.listen((n) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(n.message),
-        backgroundColor: n.isError ? Colors.red.shade700 : null,
-        duration: Duration(seconds: n.isError ? 6 : 3),
-      ));
+      showAppToast(
+        context,
+        n.message,
+        isError: n.isError,
+        duration: Duration(seconds: n.isError ? 5 : 3),
+      );
     });
   }
 
@@ -227,12 +229,10 @@ class _MainShellState extends State<MainShell> {
 
   Future<void> _spawn(BuildContext context, AgentService svc) async {
     if (!svc.anyMachineOnline) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'No online machine. Run pi with PiNest on your machine.',
-          ),
-        ),
+      showAppToast(
+        context,
+        'No online machine. Run pi with PiNest on your machine.',
+        isError: true,
       );
       return;
     }
@@ -589,8 +589,9 @@ class SessionHistorySheet extends StatelessWidget {
                 onTap: () {
                   svc.resumeSession(s.id);
                   Navigator.pop(context);
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Resuming ${s.name}…')),
+                  showAppToast(
+                    context,
+                    'Resuming ${s.name}…',
                   );
                 },
               ),
