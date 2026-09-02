@@ -855,21 +855,6 @@ function embedImages(text: string): string {
 // ── Bridge Pi events → WebSocket ────────────────────────────────────────────
 function bridge(pi: ExtensionAPI): void {
   _pi = pi;
-  try {
-    (pi as any).registerProvider?.("antigravity", {
-      name: "Antigravity",
-      models: [
-        { id: "gemini-3.8-flash", name: "Gemini 3.8 Flash (Antigravity)", reasoning: true, input: ["text", "image"], contextWindow: 1048576, maxTokens: 65536 },
-        { id: "gemini-3.7-flash", name: "Gemini 3.7 Flash (Antigravity)", reasoning: true, input: ["text", "image"], contextWindow: 1048576, maxTokens: 65536 },
-        { id: "gemini-3.6-flash", name: "Gemini 3.6 Flash (Antigravity)", reasoning: true, input: ["text", "image"], contextWindow: 1048576, maxTokens: 65536 },
-        { id: "claude-opus-4-6", name: "Claude Opus 4.6 (Antigravity)", reasoning: true, input: ["text", "image"], contextWindow: 250000, maxTokens: 64000 },
-        { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6 (Antigravity)", reasoning: true, input: ["text", "image"], contextWindow: 200000, maxTokens: 64000 },
-        { id: "gemini-3.1-pro", name: "Gemini 3.1 Pro (Antigravity)", reasoning: true, input: ["text", "image"], contextWindow: 1048576, maxTokens: 65535 },
-        { id: "gemini-3.5-flash", name: "Gemini 3.5 Flash (Antigravity)", reasoning: true, input: ["text", "image"], contextWindow: 1048576, maxTokens: 65536 },
-        { id: "gpt-oss-120b", name: "GPT-OSS 120B (Antigravity)", reasoning: true, input: ["text", "image"], contextWindow: 131072, maxTokens: 8192 },
-      ],
-    });
-  } catch { /* ignore if already registered */ }
   _submitter = createMessageSubmitter({
     send: (text, images, deliverAs) => {
       const content = images?.length
