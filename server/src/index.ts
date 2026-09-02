@@ -31,7 +31,18 @@ import { loadConfig, saveConfig } from "./config.ts";
 import { PROVIDERS } from "./tunnel.ts";
 import { createAttachView } from "./attach-view.ts";
 import { registerHostCommands } from "./host-commands.ts";
-import { SourceWatcher, firstSyntaxError } from "./watch.ts";
+import {
+  startWatcher,
+  stopWatcher,
+  noteChangedSources,
+  pendingReloadState,
+  queueReload,
+  changedSources,
+} from "./reload-manager.ts";
+export {
+  noteChangedSources,
+  pendingReloadState,
+} from "./reload-manager.ts";
 export { firstSyntaxError } from "./watch.ts";
 import { resolveThinkingLevel, reportThinkingLevel } from "./thinking.ts";
 import { Type } from "typebox";
@@ -81,10 +92,6 @@ let _status: "idle" | "working" = "idle";
 const segmenter = new StreamSegmenter();
 let _ctx: ExtensionContext | null = null;
 let _heartbeat: NodeJS.Timeout | null = null;
-let _watcher: SourceWatcher | null = null;
-// Harness sources changed since this instance started; applied only on an
-// explicit reload. Dies with the instance (a reload starts from a clean slate).
-const _changedSources = new Set<string>();
 
 // True between a run's first message_start and its agent_end. Used by the
 // submission queue to know a submission actually started a run.
@@ -226,116 +233,6 @@ function mergedRegistryRows(): SessionRow[] {
 }
 
 // ── Self-modification: reload of extension code / settings ─────────────────
-// pi re-imports extensions, skills, prompts and settings from disk on /reload
-// (jiti moduleCache: false).
-//
-// A reload is ALWAYS EXPLICIT — the agent's `reload_runtime` tool, the
-// `/pinest-reload` command, or the app's reload command. Nothing reloads on a
-// file change: a reload tears this extension instance down, so auto-firing it
-// on every write meant an agent editing its own source killed itself mid-edit.
-// The watcher only RECORDS what changed (`_changedSources`), which the state
-// broadcast surfaces to the app and `reload_runtime` reports back.
-//
-// Teardown on reload (session_shutdown reason=reload): stop the WS
-// server/tunnel and park live sessions for the re-imported instance to adopt.
-
-function watcherTargets(): { dirs: string[]; files: string[] } {
-  const cwd = _ctx?.cwd ?? process.cwd();
-  const agentDir = join(homedir(), ".pi", "agent");
-  const extra = (process.env.RC_WATCH_DIRS || "")
-    .split(":").map((s) => s.trim()).filter(Boolean);
-  return {
-    dirs: [
-      join(agentDir, "extensions"),
-      join(cwd, ".pi", "extensions"),
-      dirnamePath(import.meta.filename), // this extension's own source (server/src)
-      ...extra,
-    ],
-    files: [
-      join(agentDir, "settings.json"),
-      join(cwd, ".pi", "settings.json"),
-    ],
-  };
-}
-
-function stopWatcher(): void {
-  _watcher?.stop();
-  _watcher = null;
-}
-
-function startWatcher(): void {
-  if (process.env.RC_NO_WATCH) return;
-  stopWatcher();
-  const t = watcherTargets();
-  _watcher = new SourceWatcher({
-    dirs: t.dirs,
-    files: t.files,
-    onChange: noteChangedSources,
-  });
-  _watcher.start();
-  debug(`[remote-code] watching ${t.dirs.length} dirs + ${t.files.length} files (change notice only — reload stays explicit)`);
-}
-
-/** Record changed harness sources. This NEVER reloads — it only makes the
- * pending change visible (app state + `reload_runtime`) so the reload happens
- * when the agent or the user asks for it. */
-export function noteChangedSources(paths: string[]): void {
-  for (const p of paths) _changedSources.add(p);
-  debug(`[remote-code] harness sources changed (${_changedSources.size} pending, reload NOT triggered): ${paths.join(", ")}`);
-  broadcastState();
-}
-
-/** Pending self-modification, reported to the agent by `reload_runtime`.
- * Always answers — `count: 0` means "watched and saw nothing", not "never
- * looked"; `watching: false` means it was never watched at all. */
-export function pendingReloadState(): { count: number; files: string[]; watching: boolean } {
-  return {
-    count: _changedSources.size,
-    files: [..._changedSources].slice(0, 20),
-    watching: !!_watcher,
-  };
-}
-
-/** Queue the explicit reload. Returns a human/agent-readable outcome — every
- * refusal names its reason, so a reload that did not happen never looks like
- * one that did. */
-function queueReload(): { ok: boolean; message: string } {
-  if (!_pi) return { ok: false, message: "reload unavailable: extension not wired to a pi host" };
-  try {
-    // Gate: refuse to reload while any watched source is unparseable (a
-    // half-written edit) — the running instance would tear down and the
-    // re-import would fail, leaving no host at all. Name the broken file.
-    const t = watcherTargets();
-    const broken = firstSyntaxError(t.dirs, t.files);
-    if (broken) {
-      const msg = `reload REFUSED — syntax error in ${broken}; fix it and reload again (nothing was torn down)`;
-      debug(`[remote-code] ${msg}`);
-      return { ok: false, message: msg };
-    }
-    // expandPromptTemplates: true is REQUIRED — sendUserMessage defaults it to
-    // false, which skips pi's extension-command dispatch; "/pinest-reload" would
-    // then reach the LLM as literal text instead of executing.
-    _pi.sendUserMessage("/pinest-reload", { deliverAs: "followUp", expandPromptTemplates: true });
-    const p = pendingReloadState();
-    return {
-      ok: true,
-      message: `queued /pinest-reload as a follow-up command; it applies when the current turn settles (${p.count} changed file(s) pending)`,
-    };
-  } catch (e) {
-    const msg = `reload failed to queue: ${(e as Error).message}`;
-    debug(`[remote-code] ${msg}`);
-    return { ok: false, message: msg };
-  }
-}
-
-/** Adopt sessions parked by the previous instance during a hot reload. Only
- * non-empty after an actual reload — a fresh host start adopts nothing.
- *
- * Called SYNCHRONOUSLY as soon as the supervisor exists, before any awaited
- * bootstrap step: parked sessions are still running, and every await between
- * park and adopt is time they run unwired. The supervisor's own deadline
- * aborts them if this never happens at all.
- */
 function adoptReloadedSessions(): number {
   const adopted = _supervisor?.adoptStashedSessions() ?? 0;
   debug(`[remote-code] reload: adopted ${adopted} parked session(s)` + (adopted ? " — runs never stopped" : " (fresh start, nothing parked)"));
@@ -563,7 +460,7 @@ async function handleCommand(input: unknown): Promise<void> {
       resume: resumeSession, rename: renameSession, select: selectSession, delete: deleteSession,
       pathCheck: checkPath, folderCreate: createFolder, compactThreshold: setCompactThreshold,
       reload: () => {
-        const r = queueReload();
+        const r = queueReload(_pi, _ctx);
         if (!r.ok) broadcast({ type: "error", message: `[remote-code] ${r.message}` });
       },
     });
@@ -958,6 +855,21 @@ function embedImages(text: string): string {
 // ── Bridge Pi events → WebSocket ────────────────────────────────────────────
 function bridge(pi: ExtensionAPI): void {
   _pi = pi;
+  try {
+    (pi as any).registerProvider?.("antigravity", {
+      name: "Antigravity",
+      models: [
+        { id: "gemini-3.8-flash", name: "Gemini 3.8 Flash (Antigravity)", reasoning: true, input: ["text", "image"], contextWindow: 1048576, maxTokens: 65536 },
+        { id: "gemini-3.7-flash", name: "Gemini 3.7 Flash (Antigravity)", reasoning: true, input: ["text", "image"], contextWindow: 1048576, maxTokens: 65536 },
+        { id: "gemini-3.6-flash", name: "Gemini 3.6 Flash (Antigravity)", reasoning: true, input: ["text", "image"], contextWindow: 1048576, maxTokens: 65536 },
+        { id: "claude-opus-4-6", name: "Claude Opus 4.6 (Antigravity)", reasoning: true, input: ["text", "image"], contextWindow: 250000, maxTokens: 64000 },
+        { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6 (Antigravity)", reasoning: true, input: ["text", "image"], contextWindow: 200000, maxTokens: 64000 },
+        { id: "gemini-3.1-pro", name: "Gemini 3.1 Pro (Antigravity)", reasoning: true, input: ["text", "image"], contextWindow: 1048576, maxTokens: 65535 },
+        { id: "gemini-3.5-flash", name: "Gemini 3.5 Flash (Antigravity)", reasoning: true, input: ["text", "image"], contextWindow: 1048576, maxTokens: 65536 },
+        { id: "gpt-oss-120b", name: "GPT-OSS 120B (Antigravity)", reasoning: true, input: ["text", "image"], contextWindow: 131072, maxTokens: 8192 },
+      ],
+    });
+  } catch { /* ignore if already registered */ }
   _submitter = createMessageSubmitter({
     send: (text, images, deliverAs) => {
       const content = images?.length
@@ -1109,7 +1021,7 @@ function bridge(pi: ExtensionAPI): void {
     // The watcher must not depend on Firebase: harness self-modification
     // (edit extension code / settings → applies live) works even when the
     // remote-control bootstrap fails (e.g. no service account key).
-    startWatcher();
+    startWatcher(_ctx, (paths) => noteChangedSources(paths, broadcastState));
     // Make the extension VISIBLE: silence reads as "not installed".
     const notify = (msg: string, level?: any): void => {
       try { (ctx?.ui as any)?.notify?.(msg, level); } catch { /* */ }
@@ -1192,7 +1104,7 @@ const remoteCode = (pi: ExtensionAPI): void => {
     parameters: Type.Object({}),
     async execute() {
       const pending = pendingReloadState();
-      const { message } = queueReload();
+      const { message } = queueReload(_pi, _ctx);
       return {
         content: [{ type: "text", text: message }],
         details: { pending },
