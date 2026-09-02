@@ -42,4 +42,56 @@ void main() {
 
     expect(merged, [item('older'), item('recent')]);
   });
+
+  test(
+    'replace with overlapping recent messages preserves full loaded prefix',
+    () {
+      final existing = [
+        item('msg-0'),
+        item('msg-1'),
+        item('msg-2'),
+        item('msg-3'),
+        item('msg-4'),
+      ];
+      final page = [
+        item('msg-2'),
+        item('msg-3'),
+        item('msg-4'),
+        item('msg-5'),
+      ];
+      final merged = mergeHistoryPage(
+        existing: existing,
+        page: page,
+        mode: 'replace',
+        cursor: 2,
+        reset: false,
+      );
+
+      expect(merged, [
+        item('msg-0'),
+        item('msg-1'),
+        item('msg-2'),
+        item('msg-3'),
+        item('msg-4'),
+        item('msg-5'),
+      ]);
+    },
+  );
+
+  test('older history page with overlap deduplicates boundary items', () {
+    final merged = mergeHistoryPage(
+      existing: [item('msg-2'), item('msg-3')],
+      page: [item('msg-0'), item('msg-1'), item('msg-2')],
+      mode: 'older',
+      cursor: 0,
+      reset: false,
+    );
+
+    expect(merged, [
+      item('msg-0'),
+      item('msg-1'),
+      item('msg-2'),
+      item('msg-3'),
+    ]);
+  });
 }

@@ -61,18 +61,9 @@ class DefaultFirebaseOptions {
     storageBucket: 'pinest-app.appspot.com',
   );
 
-  static const String _effectiveAndroidApiKey =
-      _webApiKey != '' ? _webApiKey : _androidApiKey;
-
   // The real ANDROID app in pinest-app (package com.barishamil.pinest).
-  // Note on apiKey: Firebase Auth on Android uses browser-based OAuth
-  // (signInWithProvider via Chrome Custom Tabs) which talks to identitytoolkit
-  // from a web context. If the Android-restricted API key is used here,
-  // Google's API gateway rejects the web request with API_KEY_ANDROID_APP_BLOCKED
-  // (androidPackage: "<empty>"). The web API key is unrestricted for web auth
-  // flows, allowing identitytoolkit requests from the auth handler tab to succeed.
   static const FirebaseOptions android = FirebaseOptions(
-    apiKey: _effectiveAndroidApiKey,
+    apiKey: _androidApiKey,
     appId: '1:271491621267:android:e30a5fa653b8872b7b8866',
     messagingSenderId: '271491621267',
     projectId: 'pinest-app',

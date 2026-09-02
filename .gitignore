@@ -10,3 +10,4 @@ __pycache__/
 # Firebase config carrying the Android API key — CI writes it from the
 # GOOGLE_SERVICES_JSON_BASE64 secret. See docs/firebase-config.md.
 app/android/app/google-services.json
+app/test/failures/

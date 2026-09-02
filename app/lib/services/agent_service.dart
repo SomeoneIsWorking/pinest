@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:math' show min, max;
 import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -9,6 +8,21 @@ import 'correlated_request_broker.dart';
 import 'session_cache.dart';
 import '../models/session.dart';
 import '../models/chat_item.dart';
+
+bool _itemsMatch(Map<String, dynamic> a, Map<String, dynamic> b) {
+  if (a['role'] != b['role']) return false;
+  if (a['text'] != b['text']) return false;
+  final aTools = a['tools'] as List?;
+  final bTools = b['tools'] as List?;
+  if ((aTools?.length ?? 0) != (bTools?.length ?? 0)) return false;
+  if (aTools != null && bTools != null && aTools.isNotEmpty) {
+    final at0 = aTools[0] as Map?;
+    final bt0 = bTools[0] as Map?;
+    if (at0?['id'] != bt0?['id']) return false;
+    if (at0?['name'] != bt0?['name']) return false;
+  }
+  return true;
+}
 
 /// Apply one server history page to the pages already loaded by the client.
 /// Ordinary replace-pages preserve a previously fetched prefix; compact and
@@ -23,13 +37,50 @@ List<Map<String, dynamic>> mergeHistoryPage({
   final decoded = page
       .map((item) => Map<String, dynamic>.from(item as Map))
       .toList();
-  if (reset) return decoded;
-  if (mode == 'older') return [...decoded, ...existing];
+  if (reset || existing.isEmpty) return decoded;
+  if (decoded.isEmpty) return existing;
 
-  // History normally only appends at the end, so the prefix before the
-  // loaded cursor remains valid. Clamp it when the newest page shrinks.
-  final keep = min(cursor, max(0, existing.length - decoded.length));
-  return [...existing.take(keep), ...decoded];
+  if (mode == 'older') {
+    // Search for overlap where the suffix of decoded matches the prefix of existing.
+    for (var i = 0; i < decoded.length; i++) {
+      final overlapLen = decoded.length - i;
+      if (overlapLen > existing.length) continue;
+      var match = true;
+      for (var j = 0; j < overlapLen; j++) {
+        if (!_itemsMatch(decoded[i + j], existing[j])) {
+          match = false;
+          break;
+        }
+      }
+      if (match) {
+        return [...decoded.take(i), ...existing];
+      }
+    }
+    return [...decoded, ...existing];
+  }
+
+  // mode == 'replace':
+  // Search for overlap where the suffix of existing matches the prefix of decoded.
+  for (var i = 0; i < existing.length; i++) {
+    final overlapLen = existing.length - i;
+    if (overlapLen > decoded.length) continue;
+    var match = true;
+    for (var j = 0; j < overlapLen; j++) {
+      if (!_itemsMatch(existing[i + j], decoded[j])) {
+        match = false;
+        break;
+      }
+    }
+    if (match) {
+      return [...existing.take(i), ...decoded];
+    }
+  }
+
+  // Fallback if no direct overlap was detected:
+  if (cursor > 0 && cursor <= existing.length) {
+    return [...existing.take(cursor), ...decoded];
+  }
+  return decoded;
 }
 
 /// Convert a discovery document URL into the only socket endpoint we trust.
@@ -362,9 +413,13 @@ class AgentService extends ChangeNotifier {
           cursor: cursor,
           reset: reset,
         );
-        // History carries the tool calls inline — keep the live-tool list
-        // from duplicating them out of place at the bottom of the thread.
-        _cache.toolCalls.remove(sid);
+        // History carries the tool calls inline — only clear live tool calls
+        // when the session is idle and we received a replacement page. Loading
+        // older history or receiving updates during a live run must never wipe
+        // live tool calls.
+        if (mode != 'older' && statusFor(sid) != 'working') {
+          _cache.toolCalls.remove(sid);
+        }
         // A cleared session (empty replace page at cursor 0) has no thread at
         // all: a leftover streaming bubble would be the only thing on screen.
         if (mode != 'older' && page.isEmpty && cursor == 0) {
@@ -518,6 +573,10 @@ class AgentService extends ChangeNotifier {
   /// Drop everything pi still has queued for this session (steers + follow-ups).
   void clearQueue(Session s) =>
       _send({'type': 'queue_clear', 'sessionId': s.id});
+
+  /// Remove one specific queued/steering message from the session.
+  void deleteQueuedMessage(Session s, String text) =>
+      _send({'type': 'queue_delete', 'sessionId': s.id, 'text': text});
 
   /// Set the auto-compact threshold (context tokens) on the host.
   void setCompactThreshold(int tokens) =>

@@ -38,6 +38,7 @@ test("every ClientCommand discriminant has a validated route shape", () => {
     { type: "list_models", sessionId: "child-1" },
     { type: "get_history", sessionId: "child-1", limit: 50, cursor: 0 },
     { type: "queue_clear", sessionId: "child-1" },
+    { type: "queue_delete", sessionId: "child-1", text: "cancel this steer" },
     // Compatibility with the current app: spawn_dialog is correlation context,
     // not a session selector for this global command.
     { type: "list_paths", sessionId: "spawn_dialog", prefix: "~/repo", id: "request-1" },
@@ -65,6 +66,7 @@ test("every ClientCommand discriminant has a validated route shape", () => {
     "list_models",
     "get_history",
     "queue_clear",
+    "queue_delete",
     "list_paths",
     "path_check",
     "folder_create",

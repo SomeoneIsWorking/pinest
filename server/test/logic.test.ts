@@ -169,6 +169,17 @@ test("listPaths: injected home via prefix uses ~", () => {
 // ── Server-authoritative pending queue ──
 import { pushPending, popPending } from "../src/logic.ts";
 
+test("messagesToHistory: preserves assistant error messages", () => {
+  const msgs = [
+    { role: "user", content: "hello" },
+    { role: "assistant", content: [], stopReason: "error", errorMessage: "429 Rate limit exceeded" },
+  ];
+  const history = messagesToHistory(msgs);
+  assert.equal(history.length, 2);
+  assert.equal(history[1].role, "assistant");
+  assert.equal(history[1].text, "Error: 429 Rate limit exceeded");
+});
+
 test("pending queue: push appends, delivery pops the first occurrence", () => {
   let q = pushPending(pushPending([], "a"), "b");
   assert.deepEqual(q, ["a", "b"]);
