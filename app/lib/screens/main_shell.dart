@@ -175,6 +175,14 @@ class _MainShellState extends State<MainShell> {
               onPressed: () => openExternalUrl(apkDownloadUrl),
             ),
           IconButton(
+            icon: const Icon(Icons.settings),
+            tooltip: 'Settings',
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const SettingsScreen()),
+            ),
+          ),
+          IconButton(
             icon: _spawning
                 ? const SizedBox(
                     width: 18,
@@ -400,8 +408,22 @@ class _SessionList extends StatelessWidget {
   Widget build(BuildContext context) {
     return ListView(
       children: [
-        const DrawerHeader(
-          child: Text('PiNest', style: TextStyle(fontSize: 24)),
+        DrawerHeader(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              const Text(
+                'PiNest',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Version $appVersionDisplay',
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade400),
+              ),
+            ],
+          ),
         ),
         ...sessions.map((s) {
           final dot = s.isWorking
@@ -441,19 +463,48 @@ class _SessionList extends StatelessWidget {
             onTap: () => onTap(s.id),
           );
         }),
-        if (kIsWeb) ...[
-          const Divider(),
+        const Divider(),
+        ListTile(
+          leading: const Icon(Icons.history),
+          title: const Text('Session history'),
+          onTap: () {
+            Navigator.pop(context);
+            showModalBottomSheet(
+              context: context,
+              builder: (_) => const SessionHistorySheet(),
+            );
+          },
+        ),
+        ListTile(
+          leading: const Icon(Icons.settings),
+          title: const Text('Settings'),
+          onTap: () {
+            Navigator.pop(context);
+            Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const SettingsScreen()),
+            );
+          },
+        ),
+        if (kIsWeb)
           ListTile(
             leading: const Icon(Icons.android),
             title: const Text('Download Android APK'),
-            subtitle: const Text('Install mobile app'),
+            subtitle: const Text(apkVersionedName),
             trailing: const Icon(Icons.download),
             onTap: () {
               Navigator.pop(context);
               openExternalUrl(apkDownloadUrl);
             },
           ),
-        ],
+        ListTile(
+          leading: const Icon(Icons.logout, color: Colors.red),
+          title: const Text('Sign out', style: TextStyle(color: Colors.red)),
+          onTap: () {
+            Navigator.pop(context);
+            context.read<AuthService>().signOut();
+          },
+        ),
       ],
     );
   }
