@@ -1,9 +1,12 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/auth_service.dart';
 import '../services/agent_service.dart';
+import '../services/apk_release.dart';
+import '../services/link_bridge.dart';
 import '../services/user_preferences.dart';
 import '../models/session.dart';
 import 'chat_screen.dart';
@@ -81,6 +84,12 @@ class _MainShellState extends State<MainShell> {
           title: const Text('PiNest'),
           actions: [
             _presenceDot(svc),
+            if (kIsWeb)
+              IconButton(
+                icon: const Icon(Icons.android),
+                tooltip: 'Download Android APK',
+                onPressed: () => openExternalUrl(apkDownloadUrl),
+              ),
             IconButton(
               icon: _spawning
                   ? const SizedBox(
@@ -159,6 +168,12 @@ class _MainShellState extends State<MainShell> {
         title: Text(selected?.name ?? 'PiNest'),
         actions: [
           _presenceDot(svc),
+          if (kIsWeb)
+            IconButton(
+              icon: const Icon(Icons.android),
+              tooltip: 'Download Android APK',
+              onPressed: () => openExternalUrl(apkDownloadUrl),
+            ),
           IconButton(
             icon: _spawning
                 ? const SizedBox(
@@ -233,7 +248,6 @@ class _MainShellState extends State<MainShell> {
     final newId = await svc.spawnSession(
       '',
       cwd: cwd,
-      name: result['name'] as String?,
       model: model,
     );
     // Wait for the new session to appear in the state doc (up to 15s).
@@ -424,6 +438,19 @@ class _SessionList extends StatelessWidget {
             onTap: () => onTap(s.id),
           );
         }),
+        if (kIsWeb) ...[
+          const Divider(),
+          ListTile(
+            leading: const Icon(Icons.android),
+            title: const Text('Download Android APK'),
+            subtitle: const Text('Install mobile app'),
+            trailing: const Icon(Icons.download),
+            onTap: () {
+              Navigator.pop(context);
+              openExternalUrl(apkDownloadUrl);
+            },
+          ),
+        ],
       ],
     );
   }

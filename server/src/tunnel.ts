@@ -82,7 +82,7 @@ export type TunnelEndpointProvider = "cloudflared" | "ngrok" | "tailscale";
 
 const PROVIDER_HOST_SUFFIXES: Record<TunnelEndpointProvider, readonly string[]> = {
   cloudflared: [".trycloudflare.com"],
-  ngrok: [".ngrok-free.app", ".ngrok.app", ".ngrok.io"],
+  ngrok: [".ngrok-free.app", ".ngrok-free.dev", ".ngrok.app", ".ngrok.dev", ".ngrok.io"],
   tailscale: [".ts.net"],
 };
 

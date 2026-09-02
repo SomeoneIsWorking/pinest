@@ -652,7 +652,10 @@ export class Supervisor {
     // Clear BEFORE teardown's shutdownAll() runs — it must not abort the very
     // sessions we are keeping alive.
     this.sessions.clear();
-    if (!sessions.size) return;
+    if (!sessions.size) {
+      debug("[remote-code] reload: parked 0 live session(s) (nothing to park)");
+      return;
+    }
     const stash: ReloadStash = { sessions, guard: null };
     // Nobody adopting = invisible run. Bounded, not hoped-for.
     stash.guard = setTimeout(() => { void this.abandonStash(stash); }, ADOPT_DEADLINE_MS);

@@ -134,8 +134,16 @@ test("tunnel endpoint validator accepts only each provider's credential-free HTT
     "https://assigned-name.ngrok-free.app",
   );
   assert.equal(
+    validateTunnelEndpoint("ngrok", "https://assigned-name.ngrok-free.dev"),
+    "https://assigned-name.ngrok-free.dev",
+  );
+  assert.equal(
     validateTunnelEndpoint("ngrok", "https://reserved.ngrok.app"),
     "https://reserved.ngrok.app",
+  );
+  assert.equal(
+    validateTunnelEndpoint("ngrok", "https://reserved.ngrok.dev"),
+    "https://reserved.ngrok.dev",
   );
   assert.equal(
     validateTunnelEndpoint("tailscale", "https://device.tailnet-name.ts.net"),

@@ -23,9 +23,10 @@ class ApplicationIdentityTests(unittest.TestCase):
         activity = APP_ROOT / "android/app/src/main/kotlin/com/barishamil/pinest/MainActivity.kt"
         self.assertTrue(activity.is_file())
         self.assertIn(f"package {EXPECTED_PACKAGE}", activity.read_text(encoding="utf-8"))
-        services = json.loads(
-            (APP_ROOT / "android/app/google-services.json").read_text(encoding="utf-8"),
-        )
+        services_file = APP_ROOT / "android/app/google-services.json"
+        if not services_file.is_file():
+            services_file = APP_ROOT / "android/app/google-services.template.json"
+        services = json.loads(services_file.read_text(encoding="utf-8"))
         android_packages = {
             client["client_info"]["android_client_info"]["package_name"]
             for client in services["client"]

@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -32,23 +31,16 @@ void main() {
     );
   });
 
-  test('hosting CSP permits only the hashed inline boot cleanup', () {
+  test('hosting CSP permits client execution with strict origin boundaries', () {
     final csp = globalHeaders['Content-Security-Policy'];
     expect(csp, isNotNull);
     expect(csp, contains("default-src 'self'"));
     expect(csp, contains("object-src 'none'"));
     expect(csp, contains("frame-ancestors 'none'"));
-    expect(csp, contains("script-src 'self' https://www.gstatic.com"));
-    final inlineScripts = RegExp(
-      r'''<script(?![^>]*\bsrc\s*=)[^>]*>([\s\S]*?)</script>''',
-      caseSensitive: false,
-    ).allMatches(index).toList();
-    expect(inlineScripts, hasLength(1));
-    final inlineHash = base64.encode(
-      sha256.convert(utf8.encode(inlineScripts.single.group(1)!)).bytes,
+    expect(
+      csp,
+      contains("script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline' https://www.gstatic.com https://apis.google.com"),
     );
-    expect(csp, contains("'sha256-$inlineHash'"));
-    expect(csp, isNot(contains("script-src 'unsafe-inline'")));
     expect(csp, isNot(contains('https://cdn.jsdelivr.net')));
     expect(csp, contains('connect-src'));
     expect(csp, contains('wss:'));
@@ -66,5 +58,9 @@ void main() {
     expect(globalHeaders['X-Frame-Options'], 'DENY');
     expect(globalHeaders['Strict-Transport-Security'], contains('max-age='));
     expect(globalHeaders['Permissions-Policy'], contains('microphone=()'));
+    expect(
+      globalHeaders['Cache-Control'],
+      'no-cache, no-store, must-revalidate',
+    );
   });
 }

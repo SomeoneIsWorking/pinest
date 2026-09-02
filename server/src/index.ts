@@ -132,6 +132,8 @@ function statSyncSafe(p: string): boolean {
   try { return statSync(p).isDirectory(); } catch { return false; }
 }
 
+let _tunnelStarting = false;
+
 function renderFooter(): void {
   if (!_ui?.setStatus) return;
   try {
@@ -140,8 +142,8 @@ function renderFooter(): void {
     const live = 1 + spawned;
     const working = (_status === "working" ? 1 : 0)
       + [...(_supervisor?.sessions?.values() ?? [])].filter((s: any) => s.status === "working").length;
-    const url = _ws?.tunnelUrl ?? "(starting…)";
     const prov = loadConfig().tunnelProvider;
+    const url = _ws?.tunnelUrl ?? (prov === "off" ? "off (local-only)" : _tunnelStarting ? "(starting…)" : "(local-only)");
     _ui.setStatus("pinest:sessions", live ? `📡 ${live} session${live === 1 ? "" : "s"}${working ? ` · ⚡${working} working` : ""}` : undefined);
     _ui.setStatus("pinest:url", `${prov}: ${url}`);
   } catch { /* footer is best-effort */ }
@@ -436,7 +438,14 @@ async function bootstrap(): Promise<void> {
   _ws.setStateProvider(stateMessage);
   _ws.tunnelOnDead = () => {
     debug("[remote-code] tunnel died — restarting");
-    void _ws?.restartTunnel(loadConfig().tunnelProvider).then(() => publishCurrentPresence(true));
+    _tunnelStarting = true;
+    renderFooter();
+    void _ws?.restartTunnel(loadConfig().tunnelProvider)
+      .then(() => publishCurrentPresence(true))
+      .finally(() => {
+        _tunnelStarting = false;
+        renderFooter();
+      });
   };
   await restorePersistedSessions();
   // Do not admit commands while durable sessions are still being restored:
@@ -456,8 +465,11 @@ async function bootstrap(): Promise<void> {
   const { tunnelProvider: preferred } = loadConfig();
   debug(`[remote-code] Starting tunnel (preferred: ${preferred})…`);
   const ws = _ws; // teardownRemote() may null _ws while the tunnel is pending
+  _tunnelStarting = preferred !== "off";
+  renderFooter();
   void ws.startTunnel(preferred)
     .then((used) => {
+      _tunnelStarting = false;
       debug(`[remote-code] Tunnel up via ${used ?? "(none)"}: ${ws.tunnelUrl ?? "local-only"}`);
       // The footer was rendered while this was still pending, so it still says
       // "(starting…)". Refresh it here or the status bar keeps reporting a
@@ -470,6 +482,7 @@ async function bootstrap(): Promise<void> {
       return publishCurrentPresence(true);
     })
     .catch((e) => {
+      _tunnelStarting = false;
       debug("[remote-code] Tunnel failed:", (e as Error).message, "— running local-only");
       renderFooter();
       uiNotify(`[pinest] tunnel failed: ${(e as Error).message} — local-only`, "warning");
@@ -552,16 +565,10 @@ async function handleCommand(input: unknown): Promise<void> {
       newSessionId: randomUUID,
       host: handleInteractiveCommand,
       spawned: (cmd) => _supervisor!.handleSessionCommand(cmd).then(() => undefined),
-      spawn: spawnSession,
-      despawn: despawnSession,
+      spawn: spawnSession, despawn: despawnSession,
       sessionList: () => broadcast({ type: "session_list", sessions: mergedRegistryRows() }),
-      resume: resumeSession,
-      rename: renameSession,
-      select: selectSession,
-      delete: deleteSession,
-      pathCheck: checkPath,
-      folderCreate: createFolder,
-      compactThreshold: setCompactThreshold,
+      resume: resumeSession, rename: renameSession, select: selectSession, delete: deleteSession,
+      pathCheck: checkPath, folderCreate: createFolder, compactThreshold: setCompactThreshold,
       reload: () => {
         const r = queueReload();
         if (!r.ok) broadcast({ type: "error", message: `[remote-code] ${r.message}` });
@@ -1156,19 +1163,13 @@ const remoteCode = (pi: ExtensionAPI): void => {
       captureUi(ctx);
       try {
         // Build the session list: the interactive host + all headless sessions.
-        const entries: Array<{ id: string; isHost: boolean; label: string }> = [];
         const hostSnap = _sessions.get(_sessionId);
-        entries.push({
-          id: _sessionId, isHost: true,
-          label: `${hostSnap?.name ?? "this terminal"}  ${hostSnap?.status === "working" ? "⚡" : "○"}  ${hostSnap?.modelName ?? ""}  (host)`,
-        });
-        for (const [id, s] of (_supervisor?.sessions ?? new Map())) {
-          const ls: any = s;
-          entries.push({
-            id, isHost: false,
-            label: `${ls.name ?? "session"}  ${ls.status === "working" ? "⚡" : "○"}  ${ls.modelName ?? ls.model ?? ""}  ${ls.cwd}`,
-          });
-        }
+        const entries: Array<{ id: string; isHost: boolean; label: string }> = [
+          { id: _sessionId, isHost: true, label: `${hostSnap?.name ?? "this terminal"}  ${hostSnap?.status === "working" ? "⚡" : "○"}  ${hostSnap?.modelName ?? ""}  (host)` },
+          ...[...(_supervisor?.sessions ?? new Map())].map(([id, s]: [string, any]) => ({
+            id, isHost: false, label: `${s.name ?? "session"}  ${s.status === "working" ? "⚡" : "○"}  ${s.modelName ?? s.model ?? ""}  ${s.cwd}`,
+          })),
+        ];
 
         if (!ctx?.ui?.select) {
           const lines = entries.map((e) => `  ${e.label}`);
@@ -1188,11 +1189,7 @@ const remoteCode = (pi: ExtensionAPI): void => {
         }
 
         // Action picker for a headless session.
-        const action = await ctx.ui.select(`Session: ${picked.label}`, [
-          "Attach (open in overlay)",
-          "Kill",
-          "Cancel",
-        ]);
+        const action = await ctx.ui.select(`Session: ${picked.label}`, ["Attach (open in overlay)", "Kill", "Cancel"]);
         if (action === undefined || action === "Cancel") return;
 
         if (action === "Kill") {
@@ -1203,10 +1200,7 @@ const remoteCode = (pi: ExtensionAPI): void => {
         }
 
         if (action === "Attach (open in overlay)") {
-          if (!ctx?.ui?.custom) {
-            say(ctx, "[pinest] attach overlay needs TUI mode.");
-            return;
-          }
+          if (!ctx?.ui?.custom) { say(ctx, "[pinest] attach overlay needs TUI mode."); return; }
           const entry: any = _supervisor?.sessions.get(picked.id);
           if (!entry) { say(ctx, "[pinest] session not found (may have exited)"); return; }
 
@@ -1218,7 +1212,6 @@ const remoteCode = (pi: ExtensionAPI): void => {
             }),
             { overlay: true, overlayOptions: { width: "80%", maxHeight: "85%", anchor: "center", margin: { top: 1 } } },
           );
-          // Detached — session continues headless in the supervisor.
         }
       } catch (e) {
         say(ctx, `[remote-code] sessions error: ${(e as Error)?.message || e}`);
@@ -1242,12 +1235,9 @@ const remoteCode = (pi: ExtensionAPI): void => {
       const dim = (s: string): string => `\x1b[2m${s}\x1b[22m`; // ANSI dim
       const opts = PROVIDERS.map((p) => {
         const avail = p.available();
-        const here: string[] = [];
-        if (p.name === configured) here.push("configured");
-        if (p.name === active) here.push("active");
+        const here = [p.name === configured ? "configured" : "", p.name === active ? "active" : ""].filter(Boolean);
         const tag = here.length ? `  [${here.join(", ")}]` : "";
-        if (avail) return `${p.label}${tag}`;
-        return dim(`${p.label}  (not installed — ${p.installHint})${tag}`);
+        return avail ? `${p.label}${tag}` : dim(`${p.label}  (not installed — ${p.installHint})${tag}`);
       });
 
       if (!ctx?.ui?.select) {
@@ -1262,8 +1252,11 @@ const remoteCode = (pi: ExtensionAPI): void => {
       const choice = await ctx.ui.select("PiNest tunnel provider", opts);
       if (choice === undefined) return; // user dismissed
 
-      // Find which provider the selected string corresponds to (by label prefix).
-      const picked = PROVIDERS.find((p) => choice.startsWith(p.label));
+      // Find which provider the selected string corresponds to (by index or label prefix).
+      const index = opts.indexOf(choice);
+      const picked = index >= 0
+        ? PROVIDERS[index]
+        : PROVIDERS.find((p) => choice.replace(/\x1b\[[0-9;]*m/g, "").startsWith(p.label));
       if (!picked) return;
       if (!picked.available()) {
         ctx.ui?.notify?.(`Install first: ${picked.installHint}`, "warning");
@@ -1272,10 +1265,17 @@ const remoteCode = (pi: ExtensionAPI): void => {
 
       saveConfig({ tunnelProvider: picked.name });
       say(ctx, `[remote-code] provider set to "${picked.name}", restarting tunnel…`);
-      const used = await _ws?.restartTunnel(picked.name);
-      // Re-publish URL to Firebase so the app picks up the new endpoint.
-      await publishCurrentPresence(true).catch(() => {});
-      say(ctx, `[remote-code] tunnel ${used ? `up via ${used}` : "off"} → ${_ws?.tunnelUrl ?? "local-only"}`);
+      _tunnelStarting = picked.name !== "off";
+      renderFooter();
+      try {
+        const used = await _ws?.restartTunnel(picked.name);
+        // Re-publish URL to Firebase so the app picks up the new endpoint.
+        await publishCurrentPresence(true).catch(() => {});
+        say(ctx, `[remote-code] tunnel ${used ? `up via ${used}` : "off"} → ${_ws?.tunnelUrl ?? "local-only"}`);
+      } finally {
+        _tunnelStarting = false;
+        renderFooter();
+      }
     },
   });
 };

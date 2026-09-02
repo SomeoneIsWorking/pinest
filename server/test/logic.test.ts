@@ -38,6 +38,11 @@ test("deriveSessionName: empty cwd → 'session'", () => {
   assert.equal(deriveSessionName("", undefined), "session");
 });
 
+test("deriveSessionName: empty or whitespace name falls back to cwd basename", () => {
+  assert.equal(deriveSessionName("projects/my-project", ""), "my-project");
+  assert.equal(deriveSessionName("projects/my-project", "   "), "my-project");
+});
+
 // ── extractText: pull plain text from pi message content ─────────────────────
 test("extractText: string content returns as-is", () => {
   assert.equal(extractText("hello"), "hello");
