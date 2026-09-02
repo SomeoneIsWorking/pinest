@@ -11,9 +11,10 @@
  * N rapid changes within the debounce window → exactly one report, carrying
  * every changed path seen in that window.
  */
-import { watch, existsSync } from "node:fs";
+import { watch, existsSync, statSync, readdirSync } from "node:fs";
 import type { FSWatcher } from "node:fs";
-import { join } from "node:path";
+import { join, basename } from "node:path";
+import { spawnSync } from "node:child_process";
 
 export interface SourceWatcherOptions {
   dirs?: string[];
@@ -94,4 +95,33 @@ export class SourceWatcher {
   get firedCount(): number {
     return this.fired;
   }
+}
+
+/** Syntax-validate every .ts/.js/.mjs file under the watched extension dirs.
+ * A broken file (e.g. a half-written edit) must NOT be reloaded — the running
+ * instance keeps serving and the caller is told which file to fix. Returns the
+ * first broken path, or null when everything parses. */
+export function firstSyntaxError(dirs: string[], files: string[]): string | null {
+  const checkable = new Set<string>();
+  const exts = [".ts", ".mts", ".cts", ".js", ".mjs", ".cjs"];
+  const walk = (p: string, depth: number): void => {
+    if (depth > 8) return;
+    let st: import("node:fs").Stats;
+    try { st = statSync(p); } catch { return; }
+    if (st.isDirectory()) {
+      if (["node_modules", ".git", "build", "dist", "scratch"].includes(basename(p))) return;
+      try { for (const c of readdirSync(p)) walk(join(p, c), depth + 1); } catch { /* unreadable dir: skip */ }
+    } else if (exts.some((e) => p.endsWith(e))) {
+      checkable.add(p);
+    }
+  };
+  for (const d of dirs) walk(d, 0);
+  for (const f of files) {
+    if (exts.some((e) => f.endsWith(e))) checkable.add(f);
+  }
+  for (const f of checkable) {
+    const r = spawnSync(process.execPath, ["--check", f], { timeout: 10_000 });
+    if (r.status !== 0) return f;
+  }
+  return null;
 }

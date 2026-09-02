@@ -41,6 +41,7 @@ const SESSION_COMMAND_TYPES = new Set<ClientCommand["type"]>([
   "list_models",
   "get_history",
   "queue_clear",
+  "queue_delete",
 ]);
 
 export class CommandValidationError extends Error {}
@@ -276,6 +277,18 @@ export function parseClientCommand(input: unknown): ClientCommand {
       rejectUnknownFields(command, ["type", "sessionId"]);
       return { type: command.type, sessionId: sessionId(command, false) };
     }
+    case "queue_delete": {
+      rejectUnknownFields(command, ["type", "sessionId", "text"]);
+      const rawText = command.text;
+      if (typeof rawText !== "string" || rawText.length === 0) {
+        fail("command.text must be a non-empty string");
+      }
+      return {
+        type: "queue_delete",
+        sessionId: sessionId(command, false),
+        text: rawText,
+      };
+    }
     case "model_set":
       rejectUnknownFields(command, ["type", "sessionId", "provider", "modelId"]);
       return {
@@ -390,7 +403,8 @@ export type SessionCommand = Extract<ClientCommand, {
     | "session_new"
     | "list_models"
     | "get_history"
-    | "queue_clear";
+    | "queue_clear"
+    | "queue_delete";
 }>;
 
 export function isSessionCommand(command: ClientCommand): command is SessionCommand {
