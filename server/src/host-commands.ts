@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { loadConfig, saveConfig } from "./config.ts";
 import { PROVIDERS } from "./tunnel.ts";
 import { createAttachView } from "./attach-view.ts";
+import { createSessionsView, type SessionSummary } from "./sessions-view.ts";
 
 export interface HostCommandDeps {
   sessionId: string;
@@ -16,6 +17,129 @@ export interface HostCommandDeps {
   setTunnelStarting: (starting: boolean) => void;
 }
 
+export async function showAttachOverlay(
+  ctx: any,
+  entry: any,
+  onDoneCallback?: () => void,
+): Promise<void> {
+  if (!ctx?.ui?.custom) return;
+  await ctx.ui.custom(
+    (tui: any, theme: any, _kb: unknown, done: () => void) =>
+      createAttachView({
+        session: entry.session,
+        snapshot: {
+          name: entry.name,
+          cwd: entry.cwd,
+          status: entry.status,
+          model: entry.model,
+          modelName: entry.modelName,
+        },
+        theme,
+        tui,
+        onDone: () => {
+          done();
+          onDoneCallback?.();
+        },
+      }),
+    {
+      overlay: true,
+      overlayOptions: { width: "96%", maxHeight: "92%", anchor: "center", margin: 0 },
+    },
+  );
+}
+
+export async function showSessionsFlow(
+  ctx: any,
+  deps: () => HostCommandDeps,
+): Promise<void> {
+  const { sessionId, sessions, supervisor, say, broadcastState } = deps();
+  if (!ctx?.ui?.custom) return;
+
+  while (true) {
+    const hostSnap = sessions.get(sessionId);
+    const liveSessions = supervisor ? Array.from(supervisor.sessions.values()) : [];
+
+    const summaries: SessionSummary[] = [
+      {
+        id: sessionId,
+        name: hostSnap?.name ?? "this terminal",
+        cwd: hostSnap?.cwd ?? process.cwd(),
+        status: (hostSnap?.status as any) ?? "idle",
+        isHost: true,
+        model: hostSnap?.model,
+        modelName: hostSnap?.modelName,
+      },
+      ...liveSessions.map((s: any) => ({
+        id: s.id,
+        name: s.name ?? "session",
+        cwd: s.cwd,
+        status: (s.status as any) ?? "idle",
+        isHost: false,
+        model: s.model,
+        modelName: s.modelName,
+      })),
+    ];
+
+    let nextStep: { action: "attach"; entry: any } | null = null;
+    let loopBack = false;
+
+    await ctx.ui.custom(
+      (tui: any, theme: any, _kb: unknown, done: () => void) =>
+        createSessionsView({
+          sessions: summaries,
+          theme,
+          tui,
+          onSelect: (item) => {
+            if (item.isHost) {
+              done();
+              return;
+            }
+            const entry = supervisor?.sessions.get(item.id);
+            if (entry) {
+              nextStep = { action: "attach", entry };
+              loopBack = true;
+            }
+            done();
+          },
+          onKill: async (item) => {
+            if (!item.isHost && supervisor) {
+              await supervisor.despawn(item.id);
+              broadcastState();
+            }
+          },
+          onNew: async () => {
+            if (supervisor) {
+              try {
+                const newEntry = await supervisor.spawn({ cwd: process.cwd() });
+                broadcastState();
+                nextStep = { action: "attach", entry: newEntry };
+                loopBack = true;
+              } catch (e) {
+                say(ctx, `[pinest] failed to spawn session: ${(e as Error)?.message || e}`);
+              }
+            }
+            done();
+          },
+          onCancel: () => {
+            done();
+          },
+        }),
+      {
+        overlay: true,
+        overlayOptions: { width: "96%", maxHeight: "92%", anchor: "center", margin: 0 },
+      },
+    );
+
+    if (nextStep && (nextStep as any).action === "attach") {
+      await showAttachOverlay(ctx, (nextStep as any).entry);
+    }
+
+    if (!loopBack) {
+      break;
+    }
+  }
+}
+
 export function registerHostCommands(pi: ExtensionAPI, deps: () => HostCommandDeps): void {
   // ── /pinest-sessions — list, kill, or attach a session ─────────────────────
   pi.registerCommand("pinest-sessions", {
@@ -24,6 +148,11 @@ export function registerHostCommands(pi: ExtensionAPI, deps: () => HostCommandDe
       const { sessionId, sessions, supervisor, say, captureUi, broadcastState } = deps();
       captureUi(ctx);
       try {
+        if (typeof (ctx?.ui as any)?.custom === "function") {
+          await showSessionsFlow(ctx, deps);
+          return;
+        }
+
         const hostSnap = sessions.get(sessionId);
         const entries: Array<{ id: string; isHost: boolean; label: string }> = [
           {
@@ -65,33 +194,12 @@ export function registerHostCommands(pi: ExtensionAPI, deps: () => HostCommandDe
         }
 
         if (action === "Attach (open in overlay)") {
-          if (!ctx?.ui?.custom) {
-            say(ctx, "[pinest] attach overlay needs TUI mode.");
-            return;
-          }
           const entry: any = supervisor?.sessions.get(picked.id);
           if (!entry) {
             say(ctx, "[pinest] session not found (may have exited)");
             return;
           }
-
-          await (ctx.ui as any).custom(
-            (tui: any, theme: any, _kb: unknown, done: () => void) =>
-              createAttachView({
-                session: entry.session,
-                snapshot: {
-                  name: entry.name,
-                  cwd: entry.cwd,
-                  status: entry.status,
-                  model: entry.model,
-                  modelName: entry.modelName,
-                },
-                theme,
-                tui,
-                onDone: () => done(),
-              }),
-            { overlay: true, overlayOptions: { width: "80%", maxHeight: "85%", anchor: "center", margin: { top: 1 } } },
-          );
+          await showAttachOverlay(ctx, entry);
         }
       } catch (e) {
         say(ctx, `[remote-code] sessions error: ${(e as Error)?.message || e}`);

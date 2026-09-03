@@ -677,6 +677,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final serverImgs =
           s?.pendingImagesByText[text] ?? const <PendingImage>[];
       final pendingImgs = localImgs.isNotEmpty ? localImgs : serverImgs;
+      final isSteering = (s?.isWorking == true) && (s?.pendingSteering.any((st) => st.trim() == trimmedText) ?? false);
       items.add(
         GestureDetector(
           onTap: (s == null)
@@ -702,7 +703,7 @@ class _ChatScreenState extends State<ChatScreen> {
             Alignment.centerRight,
             Colors.orange.withAlpha(40),
             queued: true,
-            steering: s?.pendingSteering.contains(text) ?? false,
+            steering: isSteering,
             images: pendingImgs,
           ),
         ),
@@ -780,7 +781,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 onConfirm: () => svc.newSession(s),
               ),
       ),
-      if (!working && s != null && !s.isHost)
+      if (!working && s != null)
         BarAction(
           label: '/remove',
           icon: Icons.delete_outline,
@@ -796,6 +797,7 @@ class _ChatScreenState extends State<ChatScreen> {
             window: s.contextWindow,
             modelName: s.modelName ?? s.model,
             compactAt: s.contextCompactAt,
+            isCompacting: s.isCompacting,
           );
     return Material(
       color: Theme.of(
@@ -1362,12 +1364,14 @@ class _ContextBadge extends StatelessWidget {
   final int? window;
   final String? modelName;
   final int? compactAt;
+  final bool isCompacting;
   const _ContextBadge({
     required this.percent,
     this.tokens,
     this.window,
     this.modelName,
     this.compactAt,
+    this.isCompacting = false,
   });
 
   @override
@@ -1386,6 +1390,7 @@ class _ContextBadge extends StatelessWidget {
       ?modelName,
       if (compactAt != null)
         'compact @ ${(compactAt! / 1000).toStringAsFixed(0)}k',
+      if (isCompacting) 'compacting…',
     ].join(' · ');
     return Column(
       mainAxisSize: MainAxisSize.min,

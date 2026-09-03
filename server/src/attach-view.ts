@@ -13,11 +13,11 @@
  * AssistantMessageComponent etc. are not public API). We keep the last N
  * messages to fit the overlay height, rebuilding on each session.subscribe event.
  */
-import { Container, Text, Input } from "@earendil-works/pi-tui";
+import { Container, Text, Input, matchesKey } from "@earendil-works/pi-tui";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { extractText } from "./logic.ts";
 
-const MAX_TRANSCRIPT_LINES = 200;
+const MAX_TRANSCRIPT_LINES = 1000;
 
 interface AttachSnapshot {
   name?: string;
@@ -56,9 +56,23 @@ export function createAttachView(opts: {
   const { session, snapshot, onDone } = opts;
   const t = opts.theme ?? {};
   const tui = opts.tui;
-  // theme.fg(color, str) / theme.bold(str) per the SDK; fall back to identity.
-  const fg = (c: string, s: string): string => (typeof t.fg === "function" ? t.fg(c, s) : s);
-  const bold = (s: string): string => (typeof t.bold === "function" ? t.bold(s) : s);
+  // theme.fg(color, str) / theme.bold(str) per the SDK; safe fallback if color is unknown or throws.
+  const fg = (c: string, s: string): string => {
+    if (typeof t.fg !== "function") return s;
+    try {
+      return t.fg(c, s);
+    } catch {
+      return s;
+    }
+  };
+  const bold = (s: string): string => {
+    if (typeof t.bold !== "function") return s;
+    try {
+      return t.bold(s);
+    } catch {
+      return s;
+    }
+  };
 
   let disposed = false;
   let liveStatus = snapshot.status ?? "idle";
@@ -106,9 +120,9 @@ export function createAttachView(opts: {
     // Header
     const statusBadge = liveStatus === "working" ? "⚡ working" : "○ idle";
     container.addChild(new Text(
-      bold(fg("accent", `📍 ${snapshot.name ?? "session"}`)) +
+      bold(fg("accent", `● ${snapshot.name ?? "session"}`)) +
       `  ${statusBadge}  ${snapshot.modelName ?? snapshot.model ?? ""}` +
-      `  ${fg("muted", "Esc to detach")}`,
+      `  ${fg("muted", "Esc / ← to back")}`,
     ));
 
     // Transcript
@@ -135,9 +149,16 @@ export function createAttachView(opts: {
     render(width: number) { return container.render(width); },
     invalidate() { container.invalidate(); },
     handleInput(data: string) {
-      // Escape detaches regardless of focus. (Input also surfaces Esc via
-      // onEscape, but handle it here too in case focus routing differs.)
-      if (data === "\x1b" || data === "\x1b\x1b") { detach(); return; }
+      // Escape detaches regardless of focus.
+      if (data === "\x1b" || data === "\x1b\x1b" || matchesKey(data, "escape")) {
+        detach();
+        return;
+      }
+      // Left arrow on empty input prompt also detaches back (Claude Code style)
+      if (matchesKey(data, "left") && ((input as any).getValue?.() || "").length === 0) {
+        detach();
+        return;
+      }
       (input as any).handleInput?.(data);
       tui?.requestRender?.();
     },
@@ -158,22 +179,41 @@ function renderTranscript(
   for (const m of messages ?? []) {
     if (m.role === "user") {
       const text = extractText(m.content);
-      out.push(`${fg("cyan", "you")}: ${truncate(text, 500)}`);
+      out.push(...formatMessage(fg("accent", "you"), text, 500));
     } else if (m.role === "assistant") {
       const text = extractText(m.content);
-      if (text) out.push(`${fg("green", "assistant")}: ${truncate(text, 800)}`);
+      if (text) out.push(...formatMessage(fg("success", "assistant"), text, 1200));
       // tool calls / results are nested; surface briefly if present
-      const toolParts = (m.content ?? []).filter((p: any) => p?.type === "tool_use" || p?.type === "tool_result");
+      const toolParts = Array.isArray(m.content)
+        ? m.content.filter((p: any) => p?.type === "tool_use" || p?.type === "tool_result")
+        : [];
       for (const tp of toolParts.slice(-4)) {
-        const label = tp.type === "tool_use" ? `🔧 ${tp.name ?? "tool"}` : "↳ result";
+        const label = tp.type === "tool_use" ? `⚡ ${tp.name ?? "tool"}` : "↳ result";
         out.push(`  ${fg("muted", truncate(label, 120))}`);
       }
     }
   }
   if (pending) {
-    out.push(`${fg("green", "assistant")}: ${truncate(pending, 800)}`);
+    out.push(...formatMessage(fg("success", "assistant"), pending, 1200));
   }
   return out.length ? out : [fg("muted", "(no messages yet — type below to prompt this session)")];
+}
+
+function formatMessage(prefix: string, content: string | undefined, maxChars: number): string[] {
+  if (!content) return [];
+  const trimmed = content.trim();
+  if (!trimmed) return [];
+  const truncated = trimmed.length > maxChars ? trimmed.slice(0, maxChars) + "…" : trimmed;
+  const lines = truncated.split("\n");
+  const res: string[] = [];
+  res.push(`${prefix}: ${lines[0]}`);
+  for (let i = 1; i < Math.min(lines.length, 12); i++) {
+    res.push(`  ${lines[i]}`);
+  }
+  if (lines.length > 12) {
+    res.push(`  … (${lines.length - 12} more lines)`);
+  }
+  return res;
 }
 
 function truncate(s: string | undefined, n: number): string {

@@ -45,6 +45,12 @@ export function extractText(content: unknown): string {
 /** Extract the text of a user message for pending-queue matching. */
 export function extractUserText(m: unknown): string {
   if (typeof m === "string") return m;
+  if (Array.isArray(m)) {
+    return m
+      .filter((p: any) => p?.type === "text" && p.text)
+      .map((p: any) => p.text)
+      .join("\n");
+  }
   const c = (m as any)?.content;
   if (typeof c === "string") return c;
   if (Array.isArray(c)) {
@@ -67,13 +73,23 @@ export function pushPending(list: string[], text: string): string[] {
   return [...list, text];
 }
 
-/** Remove the FIRST occurrence matching `text` (exact, then trimmed); unknown text is a no-op. */
-export function popPending(list: string[], text: string): string[] {
-  const idx = list.indexOf(text);
-  if (idx !== -1) return [...list.slice(0, idx), ...list.slice(idx + 1)];
-  const trimmed = text.trim();
-  const tIdx = list.findIndex((x) => x.trim() === trimmed);
-  if (tIdx !== -1) return [...list.slice(0, tIdx), ...list.slice(tIdx + 1)];
+/** Remove the FIRST occurrence matching `text` (exact, then trimmed); unknown text falls back to oldest if requested. */
+export function popPending(
+  list: string[],
+  text?: string,
+  opts?: { fallbackOldest?: boolean },
+): string[] {
+  if (!list.length) return list;
+  if (text !== undefined) {
+    const idx = list.indexOf(text);
+    if (idx !== -1) return [...list.slice(0, idx), ...list.slice(idx + 1)];
+    const trimmed = text.trim();
+    const tIdx = list.findIndex((x) => x.trim() === trimmed);
+    if (tIdx !== -1) return [...list.slice(0, tIdx), ...list.slice(tIdx + 1)];
+  }
+  if (opts?.fallbackOldest && list.length > 0) {
+    return list.slice(1);
+  }
   return list;
 }
 
