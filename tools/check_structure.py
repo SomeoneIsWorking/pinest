@@ -16,7 +16,6 @@ from typing import Iterable, Sequence
 
 DEFAULT_LINE_LIMIT = 1_200
 LEGACY_LINE_LIMITS = {
-    Path("app/lib/screens/chat_screen.dart"): 1_595,
     Path("server/src/index.ts"): 1_290,
 }
 

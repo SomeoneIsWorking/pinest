@@ -6,12 +6,12 @@ void main() {
     expect(
       apkDownloadUrl,
       'https://github.com/SomeoneIsWorking/pinest/releases/latest/download/'
-      'pinest-v0.1.1.apk',
+      'pinest-v0.1.2.apk',
     );
     expect(
       apkReleasePageUrl,
       'https://github.com/SomeoneIsWorking/pinest/releases/latest',
     );
-    expect(appVersionDisplay, 'v0.1.1');
+    expect(appVersionDisplay, 'v0.1.2');
   });
 }

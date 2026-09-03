@@ -10,6 +10,7 @@ import '../services/link_bridge.dart';
 import '../services/user_preferences.dart';
 import '../models/session.dart';
 import 'chat_screen.dart';
+import 'session_actions.dart';
 import 'spawn_dialog.dart';
 import 'settings_screen.dart';
 import 'app_toast.dart';
@@ -199,30 +200,32 @@ class _MainShellState extends State<MainShell> {
             onPressed: () => Scaffold.of(ctx).openDrawer(),
           ),
         ),
-        title: Text(selected?.name ?? 'PiNest'),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              selected?.name ?? 'PiNest',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            if (selected?.contextPercent != null)
+              Text(
+                '${(selected!.contextTokens != null && selected.contextWindow != null) ? '${(selected.contextTokens! / 1000).toStringAsFixed(1)}/${(selected.contextWindow! / 1000).toStringAsFixed(0)}k' : '${selected.contextPercent!.round()}%'}${selected.modelName != null ? ' · ${selected.modelName}' : ''}',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontFamily: 'monospace',
+                  color: (selected.contextPercent! >= 90)
+                      ? Colors.red
+                      : (selected.contextPercent! >= 70)
+                          ? Colors.orange
+                          : Colors.green,
+                ),
+              ),
+          ],
+        ),
         actions: [
           _presenceDot(svc),
-          if (kIsWeb)
-            IconButton(
-              icon: const Icon(Icons.android),
-              tooltip: 'Download Android APK',
-              onPressed: () => openExternalUrl(apkDownloadUrl),
-            ),
-          IconButton(
-            icon: const Icon(Icons.account_tree_outlined),
-            tooltip: 'Session tree (/tree)',
-            onPressed: selected == null
-                ? null
-                : () => showTreeDialog(context, svc, selected),
-          ),
-          IconButton(
-            icon: const Icon(Icons.settings),
-            tooltip: 'Settings',
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const SettingsScreen()),
-            ),
-          ),
           IconButton(
             icon: _spawning
                 ? const SizedBox(
@@ -234,6 +237,26 @@ class _MainShellState extends State<MainShell> {
             tooltip: 'New session',
             onPressed: _spawning ? null : () => _spawn(context, svc),
           ),
+          if (selected != null)
+            Builder(
+              builder: (ctx) => IconButton(
+                key: const Key('toolbar-sidebar-button'),
+                icon: const Icon(Icons.tune),
+                tooltip: 'Session actions',
+                onPressed: () {
+                  final working = svc.statusFor(selected.id) == 'working';
+                  final models = svc.modelsFor(selected.id);
+                  final actions = buildSessionBarActions(
+                    context: ctx,
+                    svc: svc,
+                    session: selected,
+                    working: working,
+                    models: models,
+                  );
+                  showSessionActionSidebar(ctx, actions);
+                },
+              ),
+            ),
         ],
       ),
       drawer: Drawer(
