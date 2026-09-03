@@ -94,4 +94,40 @@ void main() {
       item('msg-3'),
     ]);
   });
+
+  test(
+    'assistant messages with matching tool calls are preserved across history pages',
+    () {
+      Map<String, dynamic> toolItem(String id, String name) => {
+            'role': 'assistant',
+            'text': '',
+            'tools': [
+              {'id': id, 'name': name},
+            ],
+          };
+      final existing = [
+        {'role': 'user', 'text': 'run bash'},
+        toolItem('call_1', 'bash'),
+        toolItem('call_2', 'bash'),
+      ];
+      final page = [
+        toolItem('call_1', 'bash'),
+        toolItem('call_2', 'bash'),
+        {'role': 'user', 'text': 'next command'},
+      ];
+      final merged = mergeHistoryPage(
+        existing: existing,
+        page: page,
+        mode: 'replace',
+        cursor: 1,
+        reset: false,
+      );
+
+      expect(merged.length, 4);
+      expect(merged[0]['text'], 'run bash');
+      expect((merged[1]['tools'] as List)[0]['id'], 'call_1');
+      expect((merged[2]['tools'] as List)[0]['id'], 'call_2');
+      expect(merged[3]['text'], 'next command');
+    },
+  );
 }

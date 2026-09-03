@@ -12,7 +12,7 @@ import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
-import { mapModel, deriveSessionName, messagesToHistory, pageHistory, historyWithEmbeds } from "./logic.ts";
+import { mapModel, deriveSessionName, messagesToHistory, pageHistory, historyWithEmbeds, extractUserText, extractText, popPending } from "./logic.ts";
 import { StreamSegmenter } from "./stream.ts";
 import { createMessageSubmitter, type MessageSubmitter } from "./submit.ts";
 import { resolveThinkingLevel, reportThinkingLevel } from "./thinking.ts";
@@ -313,6 +313,10 @@ export class Supervisor {
       switch (cmd.type) {
         case "user_message": {
           s.currentTurnId = cmd.id || randomUUID();
+          if (s.status !== "working") {
+            s.segmenter?.reset();
+            this.callbacks.broadcast({ type: "stream", sessionId: cmd.sessionId, text: "", segments: [], status: "working" });
+          }
           s.status = "working";
           const images = (cmd.images ?? []) as UserImage[];
           const text = cmd.text.trim().length === 0 ? "[image]" : cmd.text;
@@ -322,7 +326,6 @@ export class Supervisor {
           this.callbacks.upsertSession(cmd.sessionId, {
             status: "working",
           });
-          this.callbacks.broadcast({ type: "stream", sessionId: cmd.sessionId, text: "", segments: [], status: "working" });
           // prompt(streamingBehavior) covers BOTH cases: idle → new turn,
           // streaming → queued as steer/followUp. The bare prompt() this used
           // to call THREW "Agent is already processing" whenever the session
@@ -550,6 +553,31 @@ export class Supervisor {
       }
       if (event.type === "message_start") {
         s.turnStarted = true;
+        if (event.message?.role === "user") {
+          s.segmenter?.reset();
+          this.callbacks.broadcast({ type: "stream", sessionId: id, text: "", segments: [], status: "working" });
+          const rawText = (extractUserText(event.message) || extractText(event.message?.content)).trim();
+          const delivered = rawText || "[image]";
+          const nextPending = popPending(s.pending, delivered);
+          const nextSteering = popPending(s.pendingSteering, delivered);
+          if (nextPending.length < s.pending.length || nextSteering.length < s.pendingSteering.length) {
+            s.pending = nextPending;
+            s.pendingSteering = nextSteering;
+            if (s.pendingImagesByText) {
+              delete s.pendingImagesByText[delivered];
+              for (const k of Object.keys(s.pendingImagesByText)) {
+                if (!s.pending.includes(k) && !s.pending.some((m) => m.trim() === k.trim())) {
+                  delete s.pendingImagesByText[k];
+                }
+              }
+            }
+            this.callbacks.upsertSession(id, {
+              pendingMessages: [...s.pending],
+              pendingSteering: [...s.pendingSteering],
+              pendingImagesByText: { ...(s.pendingImagesByText ?? {}) },
+            });
+          }
+        }
         // Mark working here, not only in the user_message case: a run can
         // start WITHOUT a fresh user_message — e.g. a queued followUp whose
         // previous run already broadcast agent_end/idle. Without this the
@@ -608,6 +636,7 @@ export class Supervisor {
       } else if (event.type === "agent_end") {
         s.turnStarted = false;
         s.status = "idle";
+        s.pendingSteering = [];
         debug(`[remote-code] session ${id} status: working -> idle (agent_end)`);
         if (Array.isArray(event.messages)) {
           const last = event.messages[event.messages.length - 1];
@@ -619,9 +648,14 @@ export class Supervisor {
             });
           }
         }
-        s.segmenter.reset();
+        s.segmenter?.reset();
         if (s.currentTurnId) s.currentTurnId = null;
-        this.callbacks.upsertSession(id, { status: "idle", contextUsage: this.usageWithCompactAt(s) });
+        this.callbacks.broadcast({ type: "stream", sessionId: id, text: "", segments: [], status: "idle" });
+        this.callbacks.upsertSession(id, {
+          status: "idle",
+          contextUsage: this.usageWithCompactAt(s),
+          pendingSteering: [],
+        });
         this.persistRow(id, { status: "idle" });
         this.maybeAutoCompact(id, s);
         // Send updated history

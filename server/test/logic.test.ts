@@ -9,6 +9,7 @@ import {
   mapModel,
   deriveSessionName,
   extractText,
+  extractUserText,
   messagesToHistory,
   listPaths,
 } from "../src/logic.ts";
@@ -65,6 +66,17 @@ test("extractText: null/undefined → empty string", () => {
 
 test("extractText: object with .text property", () => {
   assert.equal(extractText({ text: "fallback" }), "fallback");
+});
+
+test("extractText: message object with content (string or parts array)", () => {
+  assert.equal(extractText({ role: "user", content: "steer text" }), "steer text");
+  assert.equal(extractText({ role: "user", content: [{ type: "text", text: "steer text" }] }), "steer text");
+});
+
+test("extractUserText: extracts text from message object, array, or string", () => {
+  assert.equal(extractUserText({ role: "user", content: "steer msg" }), "steer msg");
+  assert.equal(extractUserText({ role: "user", content: [{ type: "text", text: "part1" }, { type: "text", text: "part2" }] }), "part1\npart2");
+  assert.equal(extractUserText("direct text"), "direct text");
 });
 
 // ── messagesToHistory: convert pi messages → {role, text} pairs ────────────────
@@ -199,6 +211,13 @@ test("pending queue: popping unknown text is a no-op, not a silent drop", () => 
   const q = ["a"];
   assert.deepEqual(popPending(q, "never-submitted"), ["a"]);
   assert.deepEqual(popPending([], "x"), []);
+});
+
+test("pending queue: popPending matches trimmed text as fallback", () => {
+  const q = ["  hello world  "];
+  assert.deepEqual(popPending(q, "hello world"), []);
+  const q2 = ["hello world"];
+  assert.deepEqual(popPending(q2, "  hello world  "), []);
 });
 
 // ── Tool-result images survive a history refresh (I-023) ───────────────────

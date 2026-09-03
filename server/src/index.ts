@@ -600,7 +600,10 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
   switch (cmd.type) {
     case "user_message": {
       _currentTurnId = cmd.id || randomUUID();
-      segmenter.reset();
+      if (_status !== "working") {
+        segmenter.reset();
+        broadcast({ type: "stream", sessionId: _sessionId, text: "", segments: [], status: "working" });
+      }
       _status = "working";
       upsertSession(_sessionId, { status: "working", streamingText: "" });
       // deliverAs: "steer" queues behind the current assistant segment's tool
@@ -894,13 +897,21 @@ function bridge(pi: ExtensionAPI): void {
     if (event?.message?.role === "user") {
       segmenter.reset();
       _status = "working";
+      broadcast({ type: "stream", sessionId: _sessionId, text: "", segments: [], status: "working" });
       upsertSession(_sessionId, { streamingText: "", status: "working" });
-      const rawText = extractText(event.message).trim();
+      const rawText = (extractUserText(event.message) || extractText(event.message?.content)).trim();
       const delivered = rawText || "[image]";
-      if (_pendingMessages.includes(delivered)) {
-        _pendingMessages = popPending(_pendingMessages, delivered);
-        _pendingSteering = popPending(_pendingSteering, delivered);
+      const nextPending = popPending(_pendingMessages, delivered);
+      const nextSteering = popPending(_pendingSteering, delivered);
+      if (nextPending.length < _pendingMessages.length || nextSteering.length < _pendingSteering.length) {
+        _pendingMessages = nextPending;
+        _pendingSteering = nextSteering;
         delete _pendingImagesByText[delivered];
+        for (const k of Object.keys(_pendingImagesByText)) {
+          if (!_pendingMessages.includes(k) && !_pendingMessages.some((m) => m.trim() === k.trim())) {
+            delete _pendingImagesByText[k];
+          }
+        }
         upsertSession(_sessionId, {
           pendingMessages: [..._pendingMessages],
           pendingSteering: [..._pendingSteering],
@@ -980,13 +991,20 @@ function bridge(pi: ExtensionAPI): void {
     segmenter.reset();
     _status = "idle";
     debug(`[remote-code] host status: working -> idle (agent_end)`);
+    _pendingSteering = [];
+    broadcast({ type: "stream", sessionId: _sessionId, text: "", segments: [], status: "idle" });
     if (Array.isArray(event?.messages)) {
       const last = event.messages[event.messages.length - 1];
       if (last?.role === "assistant" && (last.stopReason === "error" || last.errorMessage)) {
         broadcast({ type: "error", sessionId: _sessionId, message: last.errorMessage || "Provider error" });
       }
     }
-    upsertSession(_sessionId, { streamingText: null, status: "idle", contextUsage: hostContext.contextUsage() });
+    upsertSession(_sessionId, {
+      streamingText: null,
+      status: "idle",
+      contextUsage: hostContext.contextUsage(),
+      pendingSteering: [],
+    });
     hostContext.maybeAutoCompact();
     // Send updated history so the completed message sticks
     getInteractiveHistory().then((h) => broadcast({ type: "history", sessionId: _sessionId, ...pageHistory(h) }));
