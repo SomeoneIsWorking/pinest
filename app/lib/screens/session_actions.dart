@@ -284,8 +284,8 @@ void showModelsSheet(
 
 void showThinkingSheet(BuildContext context, AgentService svc, Session s) {
   const levels = ['off', 'low', 'medium', 'high', 'max'];
-  final current = s.thinkingLevel ?? 'off';
-  final onDefault = s.thinkingLevel == null || s.thinkingLevel == 'default';
+  final current = s.thinkingLevel;
+  final onDefault = current == 'default' || current == 'off';
   showModalBottomSheet<void>(
     context: context,
     builder: (ctx) => SafeArea(

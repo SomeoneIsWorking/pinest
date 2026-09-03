@@ -10,7 +10,6 @@ import '../services/link_bridge.dart';
 import '../services/user_preferences.dart';
 import '../models/session.dart';
 import 'chat_screen.dart';
-import 'session_actions.dart';
 import 'spawn_dialog.dart';
 import 'settings_screen.dart';
 import 'app_toast.dart';
