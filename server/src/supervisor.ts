@@ -73,6 +73,7 @@ interface LiveSession {
    * run. */
   segmenter: StreamSegmenter;
   _compacting: boolean;
+  _lastFailedCompactTokens?: number;
   /** MIRROR of the agent's own queue, kept in lockstep by `queue_update`
    * events (AgentSession emits the FULL steering + followUp queues whenever
    * they change — including when pi dequeues at message_start). This is NOT
@@ -759,6 +760,7 @@ export class Supervisor {
    * transcript, and SAY it happened. Without this the app kept rendering the
    * pre-compaction thread and the command looked like a no-op. */
   private afterContextRewrite(id: string, s: LiveSession, notice: string): void {
+    s._lastFailedCompactTokens = undefined;
     const u = this.usageWithCompactAt(s);
     this.callbacks.upsertSession(id, { ...(u ? { contextUsage: u } : {}) });
     void this.getHistory(s).then((h) =>
@@ -774,12 +776,19 @@ export class Supervisor {
     if (!at) return;
     const usage = this.contextUsage(s) as any;
     if (!usage?.tokens || usage.tokens < at) return;
+    if (usage.contextWindow && usage.contextWindow <= at) return;
+    if (s._lastFailedCompactTokens && usage.tokens <= s._lastFailedCompactTokens) return;
+
     s._compacting = true;
     this.callbacks.upsertSession(id, { isCompacting: true });
     debug(`[remote-code] auto-compacting session ${id} (${usage.tokens} >= ${at} tokens)`);
     Promise.resolve((s.session as any).compact())
-      .then(() => this.afterContextRewrite(id, s, "Context auto-compacted"))
+      .then(() => {
+        s._lastFailedCompactTokens = undefined;
+        this.afterContextRewrite(id, s, "Context auto-compacted");
+      })
       .catch((e: unknown) => {
+        s._lastFailedCompactTokens = usage.tokens;
         debug("[remote-code] auto-compact failed:", (e as Error).message);
         this.callbacks.broadcast({
           type: "error", sessionId: id, message: `Auto-compaction failed: ${(e as Error).message}`,

@@ -4,12 +4,12 @@
 /// GitHub's `latest` download redirect keeps the download on the newest published build.
 library;
 
-const String appVersion = '0.1.1';
-const String appBuildNumber = '2';
+const String appVersion = '0.1.2';
+const String appBuildNumber = '3';
 String get appVersionDisplay => 'v$appVersion';
 
 const String apkRepoSlug = 'SomeoneIsWorking/pinest';
-const String apkVersionedName = 'pinest-v0.1.1.apk';
+const String apkVersionedName = 'pinest-v0.1.2.apk';
 const String apkLegacyName = 'pinest.apk';
 
 /// Authoritative direct download URL for the latest APK from GitHub releases.

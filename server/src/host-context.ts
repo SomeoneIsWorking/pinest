@@ -36,6 +36,7 @@ export interface HostContextControllerDeps {
 /** Owns host-session context rewrites and their client-visible aftermath. */
 export class HostContextController {
   private compacting = false;
+  private lastFailedCompactTokens?: number;
   private readonly deps: HostContextControllerDeps;
 
   constructor(deps: HostContextControllerDeps) {
@@ -99,6 +100,7 @@ export class HostContextController {
   }
 
   onCompacted(event: { trigger?: unknown } | undefined): Promise<void> {
+    this.lastFailedCompactTokens = undefined;
     const sessionId = this.deps.getSessionId();
     this.deps.upsertSession(sessionId, { contextUsage: this.contextUsage(), isCompacting: false });
     const historyPush = this.pushHistory(true);
@@ -113,6 +115,9 @@ export class HostContextController {
 
   onCompactFailed(event: { aborted?: unknown; error?: unknown } | undefined): void {
     const why = event?.aborted ? "cancelled" : (event?.error || "unknown error");
+    const usage = this.contextUsage();
+    const tokens = typeof usage?.tokens === "number" ? usage.tokens : 0;
+    if (tokens) this.lastFailedCompactTokens = tokens;
     this.deps.upsertSession(this.deps.getSessionId(), { isCompacting: false });
     this.deps.broadcast({
       type: "error",
@@ -128,12 +133,18 @@ export class HostContextController {
     const usage = this.contextUsage();
     const tokens = typeof usage?.tokens === "number" ? usage.tokens : 0;
     if (!tokens || tokens < threshold) return;
+    const window = typeof usage?.contextWindow === "number" ? usage.contextWindow : 0;
+    if (window && window <= threshold) return;
+    if (this.lastFailedCompactTokens && tokens <= this.lastFailedCompactTokens) return;
 
     this.compacting = true;
     debug(`[remote-code] auto-compacting host session (${tokens} >= ${threshold} tokens)`);
     this.deps.upsertSession(this.deps.getSessionId(), { isCompacting: true });
     Promise.resolve(this.deps.getContext()?.compact?.())
-      .catch((error: unknown) => debug("[remote-code] auto-compact failed:", (error as Error).message))
+      .catch((error: unknown) => {
+        this.lastFailedCompactTokens = tokens;
+        debug("[remote-code] auto-compact failed:", (error as Error).message);
+      })
       .finally(() => { this.compacting = false; });
   }
 }
