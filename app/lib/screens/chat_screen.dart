@@ -612,20 +612,40 @@ class _ChatScreenState extends State<ChatScreen> {
     // Live tool calls (not yet in history), interleaved with the speech
     // segments the assistant finished before each tool call — the streamed
     // text stays visible while tools run instead of vanishing.
-    final segments = svc.streamingSegmentsFor(widget.sessionId);
-    for (var i = 0; i < toolCalls.length || i < segments.length; i++) {
+    final historyToolIds = <String>{};
+    for (final msg in history) {
+      final tools = msg['tools'] as List?;
+      if (tools != null) {
+        for (final t in tools) {
+          if (t is Map) {
+            final id = t['id'] as String? ?? t['callId'] as String?;
+            if (id != null && id.isNotEmpty) historyToolIds.add(id);
+          }
+        }
+      }
+    }
+    final liveTools = toolCalls.where((t) {
+      final id = t['callId'] as String? ?? t['id'] as String?;
+      return id == null || id.isEmpty || !historyToolIds.contains(id);
+    }).toList();
+
+    final isWorking = svc.statusFor(widget.sessionId) == 'working';
+    final segments = isWorking
+        ? svc.streamingSegmentsFor(widget.sessionId)
+        : const <String>[];
+    for (var i = 0; i < liveTools.length || i < segments.length; i++) {
       if (i < segments.length) {
         items.add(_bubble(segments[i], Alignment.centerLeft, null));
       }
-      if (i < toolCalls.length) {
+      if (i < liveTools.length) {
         items.add(
           _toolCallCard(
-            ToolCallView.fromPayload(toolCalls[i], source: ToolCallSource.live),
+            ToolCallView.fromPayload(liveTools[i], source: ToolCallSource.live),
           ),
         );
       }
     }
-    if (streaming != null) {
+    if (streaming != null && isWorking) {
       items.add(_StreamingBubble(text: streaming));
     }
     // Queued messages at the very end — reported by the server, not tracked
@@ -633,7 +653,26 @@ class _ChatScreenState extends State<ChatScreen> {
     // LONG-PRESS clears the queue: pi dequeues by text-match at message_start,
     // so a message can get genuinely stuck in its steering/followUp queues;
     // the server-side queue_clear drains pi's own queue (the honest fix).
+    // If a message has already begun processing and landed as the latest
+    // user entry in history, skip showing it as a queued duplicate.
+    final latestHistoryUser = history.lastWhere(
+      (m) => m['role'] == 'user',
+      orElse: () => const {},
+    );
+    final latestHistoryUserText =
+        (latestHistoryUser['text'] as String? ?? '').trim();
+    var skippedLatestUser = false;
+
     for (final text in queued) {
+      final trimmedText = text.trim();
+      if (!skippedLatestUser &&
+          latestHistoryUserText.isNotEmpty &&
+          (trimmedText == latestHistoryUserText ||
+              (latestHistoryUserText == '[image]' &&
+                  (text.isEmpty || text == '[image]')))) {
+        skippedLatestUser = true;
+        continue;
+      }
       final localImgs = _pendingImagesByText[text] ?? const <PendingImage>[];
       final serverImgs =
           s?.pendingImagesByText[text] ?? const <PendingImage>[];

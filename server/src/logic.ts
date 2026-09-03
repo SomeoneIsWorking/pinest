@@ -22,21 +22,29 @@ export function mapModel(m: {
   };
 }
 
-/** Extract plain text from a pi message's content (array of parts or string). */
+/** Extract plain text from a pi message's content (array of parts or string), or a message object. */
 export function extractText(content: unknown): string {
   if (typeof content === "string") return content;
+  if (content && typeof content === "object") {
+    if ("content" in content && (content as any).content !== undefined) {
+      return extractText((content as any).content);
+    }
+    if ("text" in content && (content as any).text !== undefined) {
+      return String((content as any).text);
+    }
+  }
   if (Array.isArray(content)) {
     return content
       .filter((p: any) => p?.type === "text" && p.text)
       .map((p: any) => p.text)
       .join("");
   }
-  if ((content as any)?.text) return String((content as any).text);
   return "";
 }
 
 /** Extract the text of a user message for pending-queue matching. */
 export function extractUserText(m: unknown): string {
+  if (typeof m === "string") return m;
   const c = (m as any)?.content;
   if (typeof c === "string") return c;
   if (Array.isArray(c)) {
@@ -45,6 +53,7 @@ export function extractUserText(m: unknown): string {
       .map((p: any) => p.text)
       .join("\n");
   }
+  if ((m as any)?.text) return String((m as any).text);
   return "";
 }
 
@@ -58,11 +67,14 @@ export function pushPending(list: string[], text: string): string[] {
   return [...list, text];
 }
 
-/** Remove the FIRST occurrence matching `text`; unknown text is a no-op. */
+/** Remove the FIRST occurrence matching `text` (exact, then trimmed); unknown text is a no-op. */
 export function popPending(list: string[], text: string): string[] {
   const idx = list.indexOf(text);
-  if (idx === -1) return list;
-  return [...list.slice(0, idx), ...list.slice(idx + 1)];
+  if (idx !== -1) return [...list.slice(0, idx), ...list.slice(idx + 1)];
+  const trimmed = text.trim();
+  const tIdx = list.findIndex((x) => x.trim() === trimmed);
+  if (tIdx !== -1) return [...list.slice(0, tIdx), ...list.slice(tIdx + 1)];
+  return list;
 }
 
 /** Images a single tool result may contribute to history. */
