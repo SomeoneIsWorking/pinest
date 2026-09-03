@@ -781,7 +781,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 onConfirm: () => svc.newSession(s),
               ),
       ),
-      if (!working && s != null)
+      if (s != null && !s.isHost)
         BarAction(
           label: '/remove',
           icon: Icons.delete_outline,

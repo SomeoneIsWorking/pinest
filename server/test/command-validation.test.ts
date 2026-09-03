@@ -343,7 +343,7 @@ test("dispatcher blocks host lifecycle commands before their handlers", async ()
     despawn: () => { events.push("despawn"); },
     delete: () => { events.push("delete"); },
   });
-  for (const type of ["session_resume", "session_delete"] as const) {
+  for (const type of ["session_resume", "session_despawn", "session_delete"] as const) {
     await assert.rejects(
       () => dispatchClientCommand({ type, sessionId: "host" }, deps),
       /host session/,
@@ -353,8 +353,7 @@ test("dispatcher blocks host lifecycle commands before their handlers", async ()
     () => dispatchClientCommand({ type: "session_spawn", sessionId: "host" }, deps),
     /already in use/,
   );
-  await dispatchClientCommand({ type: "session_despawn", sessionId: "host" }, deps);
-  assert.deepEqual(events, ["despawn"]);
+  assert.deepEqual(events, []);
 });
 
 test("rename and select preserve stale-row support but reject unknown IDs", async () => {

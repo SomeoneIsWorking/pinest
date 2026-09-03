@@ -489,8 +489,8 @@ export function assertLifecycleTargetIsNotHost(
   operation: string,
 ): void {
   if (
-    operation !== "despawn"
-    && (sessionIdValue === options.hostSessionId || options.isRegisteredHost(sessionIdValue))
+    sessionIdValue === options.hostSessionId
+    || options.isRegisteredHost(sessionIdValue)
   ) {
     fail(`cannot ${operation} the host session`);
   }

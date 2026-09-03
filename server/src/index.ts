@@ -517,10 +517,6 @@ async function spawnSession(cmd: Extract<ClientCommand, { type: "session_spawn" 
 async function despawnSession(cmd: Extract<ClientCommand, { type: "session_despawn" }>): Promise<void> {
   if (_supervisor?.sessions.has(cmd.sessionId)) {
     await _supervisor.despawn(cmd.sessionId);
-  } else if (cmd.sessionId === _sessionId) {
-    _registry?.close(_sessionId);
-    removeSession(_sessionId);
-    broadcastState();
   } else {
     // Not live (e.g. after host restart) — just close the registry row.
     if (!_registry?.get(cmd.sessionId)) throw new Error(`unknown session ${cmd.sessionId}`);
