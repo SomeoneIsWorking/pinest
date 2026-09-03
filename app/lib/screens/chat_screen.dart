@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:math' as math;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -14,7 +13,6 @@ import '../models/session.dart';
 import '../models/chat_item.dart';
 import '../models/tool_call_view.dart';
 import 'app_toast.dart';
-import 'model_sheet.dart';
 import 'session_actions.dart';
 import 'tool_call_card.dart';
 
