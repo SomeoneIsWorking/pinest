@@ -336,6 +336,15 @@ export class Supervisor {
           break;
         }
         case "cancel":
+          try { (s.session as any).clearQueue?.(); } catch { /* */ }
+          s.pending = [];
+          s.pendingSteering = [];
+          s.pendingImagesByText = {};
+          this.callbacks.upsertSession(cmd.sessionId as string, {
+            pendingMessages: [],
+            pendingSteering: [],
+            pendingImagesByText: {},
+          });
           await s.session.abort();
           break;
         case "model_set":
@@ -353,7 +362,12 @@ export class Supervisor {
           if (typeof compact !== "function") {
             throw new Error("this session cannot compact (no compact() on the agent session)");
           }
-          await compact.call(s.session);
+          this.callbacks.upsertSession(cmd.sessionId as string, { isCompacting: true });
+          try {
+            await compact.call(s.session);
+          } finally {
+            this.callbacks.upsertSession(cmd.sessionId as string, { isCompacting: false });
+          }
           this.afterContextRewrite(cmd.sessionId as string, s, "Context compacted");
           break;
         }
@@ -558,8 +572,8 @@ export class Supervisor {
           this.callbacks.broadcast({ type: "stream", sessionId: id, text: "", segments: [], status: "working" });
           const rawText = (extractUserText(event.message) || extractText(event.message?.content)).trim();
           const delivered = rawText || "[image]";
-          const nextPending = popPending(s.pending, delivered);
-          const nextSteering = popPending(s.pendingSteering, delivered);
+          const nextPending = popPending(s.pending, delivered, { fallbackOldest: true });
+          const nextSteering = popPending(s.pendingSteering, delivered, { fallbackOldest: true });
           if (nextPending.length < s.pending.length || nextSteering.length < s.pendingSteering.length) {
             s.pending = nextPending;
             s.pendingSteering = nextSteering;
@@ -637,6 +651,16 @@ export class Supervisor {
         s.turnStarted = false;
         s.status = "idle";
         s.pendingSteering = [];
+        s.pending = [];
+        s.pendingImagesByText = {};
+        try {
+          if ((s.session as any)._steeringMessages?.length) {
+            (s.session as any)._steeringMessages = [];
+          }
+          if ((s.session as any)._followUpMessages?.length) {
+            (s.session as any)._followUpMessages = [];
+          }
+        } catch { /* */ }
         debug(`[remote-code] session ${id} status: working -> idle (agent_end)`);
         if (Array.isArray(event.messages)) {
           const last = event.messages[event.messages.length - 1];
@@ -654,7 +678,9 @@ export class Supervisor {
         this.callbacks.upsertSession(id, {
           status: "idle",
           contextUsage: this.usageWithCompactAt(s),
+          pendingMessages: [],
           pendingSteering: [],
+          pendingImagesByText: {},
         });
         this.persistRow(id, { status: "idle" });
         this.maybeAutoCompact(id, s);
@@ -749,6 +775,7 @@ export class Supervisor {
     const usage = this.contextUsage(s) as any;
     if (!usage?.tokens || usage.tokens < at) return;
     s._compacting = true;
+    this.callbacks.upsertSession(id, { isCompacting: true });
     debug(`[remote-code] auto-compacting session ${id} (${usage.tokens} >= ${at} tokens)`);
     Promise.resolve((s.session as any).compact())
       .then(() => this.afterContextRewrite(id, s, "Context auto-compacted"))
@@ -758,7 +785,7 @@ export class Supervisor {
           type: "error", sessionId: id, message: `Auto-compaction failed: ${(e as Error).message}`,
         });
       })
-      .finally(() => { s._compacting = false; });
+      .finally(() => { s._compacting = false; this.callbacks.upsertSession(id, { isCompacting: false }); });
   }
 
   private async models(s: LiveSession) {

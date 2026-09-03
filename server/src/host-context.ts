@@ -59,6 +59,7 @@ export class HostContextController {
       throw new Error("host session cannot compact (no compact() on the pi ExtensionContext)");
     }
     // ExtensionContext.compact() reports completion through session_compact.
+    this.deps.upsertSession(this.deps.getSessionId(), { isCompacting: true });
     compact.call(context);
   }
 
@@ -99,7 +100,7 @@ export class HostContextController {
 
   onCompacted(event: { trigger?: unknown } | undefined): Promise<void> {
     const sessionId = this.deps.getSessionId();
-    this.deps.upsertSession(sessionId, { contextUsage: this.contextUsage() });
+    this.deps.upsertSession(sessionId, { contextUsage: this.contextUsage(), isCompacting: false });
     const historyPush = this.pushHistory(true);
     const trigger = event?.trigger ? ` (${String(event.trigger)})` : "";
     this.deps.broadcast({
@@ -112,6 +113,7 @@ export class HostContextController {
 
   onCompactFailed(event: { aborted?: unknown; error?: unknown } | undefined): void {
     const why = event?.aborted ? "cancelled" : (event?.error || "unknown error");
+    this.deps.upsertSession(this.deps.getSessionId(), { isCompacting: false });
     this.deps.broadcast({
       type: "error",
       sessionId: this.deps.getSessionId(),
@@ -129,6 +131,7 @@ export class HostContextController {
 
     this.compacting = true;
     debug(`[remote-code] auto-compacting host session (${tokens} >= ${threshold} tokens)`);
+    this.deps.upsertSession(this.deps.getSessionId(), { isCompacting: true });
     Promise.resolve(this.deps.getContext()?.compact?.())
       .catch((error: unknown) => debug("[remote-code] auto-compact failed:", (error as Error).message))
       .finally(() => { this.compacting = false; });

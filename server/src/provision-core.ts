@@ -7,8 +7,8 @@
  * models.json entry for it — that would freeze a stale static model list.
  * Provisioning = settings defaults + verification.
  */
-import { DEFAULT_COMPACT_AT_TOKENS, DEFAULT_MODEL } from "./product-defaults.ts";
-export { DEFAULT_MODEL } from "./product-defaults.ts";
+import { DEFAULT_COMPACT_AT_TOKENS, DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_MODEL_ID } from "./product-defaults.ts";
+export { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_MODEL_ID } from "./product-defaults.ts";
 
 /**
  * pi's auto-compaction trigger is `contextTokens > contextWindow -
@@ -56,12 +56,19 @@ export function buildSettingsPatch(existing: Record<string, any> | null | undefi
   }
   patch.compaction = mergedCompaction;
 
-  // defaultModel
-  if (cur.defaultModel !== DEFAULT_MODEL) {
-    if (cur.defaultModel !== undefined) replaced.defaultModel = cur.defaultModel;
-    changes.push(`defaultModel → ${DEFAULT_MODEL}`);
+  // defaultProvider and defaultModel
+  // pi's SettingsManager requires defaultProvider and defaultModel as separate fields.
+  if (cur.defaultProvider !== DEFAULT_PROVIDER) {
+    if (cur.defaultProvider !== undefined) replaced.defaultProvider = cur.defaultProvider;
+    changes.push(`defaultProvider → ${DEFAULT_PROVIDER}`);
   }
-  patch.defaultModel = DEFAULT_MODEL;
+  patch.defaultProvider = DEFAULT_PROVIDER;
+
+  if (cur.defaultModel !== DEFAULT_MODEL_ID) {
+    if (cur.defaultModel !== undefined) replaced.defaultModel = cur.defaultModel;
+    changes.push(`defaultModel → ${DEFAULT_MODEL_ID}`);
+  }
+  patch.defaultModel = DEFAULT_MODEL_ID;
 
   return { patch, changes, replaced };
 }

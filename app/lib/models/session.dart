@@ -37,6 +37,9 @@ class Session {
 
   /// Auto-compact threshold (tokens) reported by the server for this session.
   final int? contextCompactAt;
+
+  /// True while the server is actively running compact() for this session.
+  final bool isCompacting;
   final String status; // idle | working | error
   final bool isInteractive;
   final bool isHost; // the interactive session hosting the server
@@ -68,6 +71,7 @@ class Session {
     this.contextWindow,
     this.contextPercent,
     this.contextCompactAt,
+    this.isCompacting = false,
     this.status = 'idle',
     this.isInteractive = false,
     this.isHost = false,
@@ -118,6 +122,7 @@ class Session {
       contextWindow: context?['contextWindow'] as int?,
       contextPercent: (context?['percent'] as num?)?.toDouble(),
       contextCompactAt: context?['compactAt'] as int?,
+      isCompacting: map['isCompacting'] == true,
       status: registry && rawStatus == 'running' ? 'idle' : rawStatus,
       isInteractive: map['isInteractive'] == true,
       isHost: map['isHost'] == true,
