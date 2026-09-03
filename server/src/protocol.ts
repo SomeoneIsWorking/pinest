@@ -93,6 +93,8 @@ export interface SessionSnapshot {
   pendingSteering?: string[];
   /** Attached images for pending queued/steering messages, preserved across client reloads. */
   pendingImagesByText?: Record<string, UserImage[]>;
+  /** True while a compact() is in flight for this session. */
+  isCompacting?: boolean;
 }
 
 export type ServerMessage =

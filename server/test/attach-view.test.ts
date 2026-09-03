@@ -176,3 +176,59 @@ test("dispose: after dispose, detach no longer fires onDone again", () => {
   view.handleInput("\x1b"); // Esc after dispose
   assert.equal(detached, 0, "onDone not called again after dispose");
 });
+
+test("theme.fg throwing on unknown color falls back safely without throwing", () => {
+  const session = mockSession({
+    messages: [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi there" },
+    ],
+  });
+  const throwingTheme = {
+    fg: (color: string, text: string) => {
+      if (color === "cyan" || color === "green") {
+        throw new Error(`Unknown theme color: ${color}`);
+      }
+      return `[${color}]${text}[/${color}]`;
+    },
+  };
+  assert.doesNotThrow(() => {
+    const view = createAttachView({
+      session: session as any,
+      snapshot: { id: "s1", name: "test", model: "m", status: "idle" },
+      theme: throwingTheme as any,
+      onDone: () => {},
+    });
+    const lines = view.render(80);
+    assert.ok(lines.length > 0);
+  });
+});
+
+test("handleInput: Left arrow when input is empty detaches", () => {
+  const session = mockSession();
+  let detached = 0;
+  const view = createAttachView({
+    session: session as any,
+    snapshot: { id: "s1", name: "test", model: "m", status: "idle" },
+    onDone: () => { detached++; },
+  });
+  // \x1b[D is standard left arrow key sequence
+  view.handleInput("\x1b[D");
+  assert.equal(detached, 1, "Left arrow on empty input detaches");
+});
+
+test("handleInput: Left arrow when input has text does not detach", () => {
+  const session = mockSession();
+  let detached = 0;
+  const view = createAttachView({
+    session: session as any,
+    snapshot: { id: "s1", name: "test", model: "m", status: "idle" },
+    onDone: () => { detached++; },
+  });
+  // Type some text first
+  view.handleInput("h");
+  view.handleInput("i");
+  view.handleInput("\x1b[D"); // Left arrow
+  assert.equal(detached, 0, "Left arrow with text does not detach");
+});
+

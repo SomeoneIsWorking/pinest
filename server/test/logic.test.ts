@@ -220,6 +220,21 @@ test("pending queue: popPending matches trimmed text as fallback", () => {
   assert.deepEqual(popPending(q2, "  hello world  "), []);
 });
 
+test("pending queue: popPending falls back to oldest entry when requested", () => {
+  const q = ["first", "second"];
+  assert.deepEqual(popPending(q, "unmatched", { fallbackOldest: true }), ["second"]);
+  assert.deepEqual(popPending([], "unmatched", { fallbackOldest: true }), []);
+});
+
+test("extractUserText: handles arrays of content parts directly", () => {
+  const parts = [
+    { type: "text", text: "line 1" },
+    { type: "image", mimeType: "image/png", data: "abc" },
+    { type: "text", text: "line 2" },
+  ];
+  assert.equal(extractUserText(parts), "line 1\nline 2");
+});
+
 // ── Tool-result images survive a history refresh (I-023) ───────────────────
 // An image `read` returns a text note PLUS an image part. History dropped the
 // image part, so the picture vanished the moment the app refreshed history.

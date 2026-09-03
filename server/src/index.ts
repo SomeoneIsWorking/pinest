@@ -30,7 +30,9 @@ import { StreamSegmenter } from "./stream.ts";
 import { loadConfig, saveConfig } from "./config.ts";
 import { PROVIDERS } from "./tunnel.ts";
 import { createAttachView } from "./attach-view.ts";
-import { registerHostCommands } from "./host-commands.ts";
+import { registerHostCommands, showSessionsFlow, type HostCommandDeps } from "./host-commands.ts";
+import { PinestCustomEditor } from "./editor.ts";
+import { DEFAULT_PROVIDER, DEFAULT_MODEL_ID } from "./product-defaults.ts";
 import {
   startWatcher,
   stopWatcher,
@@ -126,10 +128,44 @@ installCrashReporter();
 
 // ── Footer UI ───────────────────────────────────────────────────────────────
 let _ui: any = null;
+let _editorInstalled = false;
+let _hostCommandDeps: (() => HostCommandDeps) | null = null;
+
+function installCustomEditor(ctx: any): void {
+  const ui = ctx?.ui ?? ctx;
+  if (!ui || typeof ui.setEditorComponent !== "function" || _editorInstalled) return;
+  _editorInstalled = true;
+  try {
+    ui.setEditorComponent((tui: any, theme: any, keybindings: any) => {
+      return new PinestCustomEditor(tui, theme, keybindings, () => {
+        if (_hostCommandDeps) {
+          void showSessionsFlow({ ui }, _hostCommandDeps).catch(() => {});
+        }
+      });
+    });
+  } catch (err) {
+    debug("[pinest] setEditorComponent error:", err);
+  }
+}
+
+function ensureDefaultModelPersisted(ctx: any): void {
+  try {
+    const sm = ctx?.settingsManager ?? (_ctx as any)?.settingsManager;
+    if (!sm) return;
+    const currentProvider = sm.getDefaultProvider?.();
+    const currentModel = sm.getDefaultModel?.();
+    if (!currentProvider || currentModel?.includes("/")) {
+      sm.setDefaultModelAndProvider?.(DEFAULT_PROVIDER, DEFAULT_MODEL_ID);
+    }
+  } catch {
+    // best-effort
+  }
+}
 
 function captureUi(ctx: unknown): void {
   const ui = (ctx as any)?.ui;
   if (!_ui && ui?.setStatus) _ui = ui;
+  installCustomEditor(ctx);
 }
 
 /** Best-effort TUI notice from anywhere in the module (no ctx needed). */
@@ -481,6 +517,10 @@ async function spawnSession(cmd: Extract<ClientCommand, { type: "session_spawn" 
 async function despawnSession(cmd: Extract<ClientCommand, { type: "session_despawn" }>): Promise<void> {
   if (_supervisor?.sessions.has(cmd.sessionId)) {
     await _supervisor.despawn(cmd.sessionId);
+  } else if (cmd.sessionId === _sessionId) {
+    _registry?.close(_sessionId);
+    removeSession(_sessionId);
+    broadcastState();
   } else {
     // Not live (e.g. after host restart) — just close the registry row.
     if (!_registry?.get(cmd.sessionId)) throw new Error(`unknown session ${cmd.sessionId}`);
@@ -600,7 +640,8 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
   switch (cmd.type) {
     case "user_message": {
       _currentTurnId = cmd.id || randomUUID();
-      if (_status !== "working") {
+      const wasWorking = _status === "working";
+      if (!wasWorking) {
         segmenter.reset();
         broadcast({ type: "stream", sessionId: _sessionId, text: "", segments: [], status: "working" });
       }
@@ -615,7 +656,9 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
       // history (the client clears its "queued" badge by matching text).
       const text = cmd.text.trim().length === 0 ? "[image]" : cmd.text;
       _pendingMessages = pushPending(_pendingMessages, text);
-      if (deliverAs === "steer") _pendingSteering = pushPending(_pendingSteering, text);
+      if (wasWorking && deliverAs === "steer") {
+        _pendingSteering = pushPending(_pendingSteering, text);
+      }
       if (images.length > 0) _pendingImagesByText[text] = images;
       upsertSession(_sessionId, {
         pendingMessages: [..._pendingMessages],
@@ -626,6 +669,14 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
       break;
     }
     case "cancel":
+      _pendingSteering = [];
+      _pendingMessages = [];
+      _pendingImagesByText = {};
+      upsertSession(_sessionId, {
+        pendingMessages: [],
+        pendingSteering: [],
+        pendingImagesByText: {},
+      });
       // NOTE: ExtensionAPI has no abort(); it lives on ExtensionContext.
       // (pinest used _pi?.abort?.() — a silent no-op on the host.)
       (_ctx as any)?.abort?.();
@@ -816,6 +867,11 @@ async function setModel(cmd: Extract<ClientCommand, { type: "model_set" }>): Pro
   // that named GLM while the session stayed on kimi (262k window). Verify.
   const ok = await _pi?.setModel?.(m);
   if (ok === false) throw new Error(`host refused switch to ${cmd.provider}/${cmd.modelId}`);
+  try {
+    (_ctx as any)?.settingsManager?.setDefaultModelAndProvider?.(cmd.provider, cmd.modelId);
+  } catch {
+    // best-effort persistence
+  }
   upsertSession(_sessionId, {
     model: `${cmd.provider}/${cmd.modelId}`,
     modelName: m.name,
@@ -901,8 +957,8 @@ function bridge(pi: ExtensionAPI): void {
       upsertSession(_sessionId, { streamingText: "", status: "working" });
       const rawText = (extractUserText(event.message) || extractText(event.message?.content)).trim();
       const delivered = rawText || "[image]";
-      const nextPending = popPending(_pendingMessages, delivered);
-      const nextSteering = popPending(_pendingSteering, delivered);
+      const nextPending = popPending(_pendingMessages, delivered, { fallbackOldest: true });
+      const nextSteering = popPending(_pendingSteering, delivered, { fallbackOldest: true });
       if (nextPending.length < _pendingMessages.length || nextSteering.length < _pendingSteering.length) {
         _pendingMessages = nextPending;
         _pendingSteering = nextSteering;
@@ -992,6 +1048,8 @@ function bridge(pi: ExtensionAPI): void {
     _status = "idle";
     debug(`[remote-code] host status: working -> idle (agent_end)`);
     _pendingSteering = [];
+    _pendingMessages = [];
+    _pendingImagesByText = {};
     broadcast({ type: "stream", sessionId: _sessionId, text: "", segments: [], status: "idle" });
     if (Array.isArray(event?.messages)) {
       const last = event.messages[event.messages.length - 1];
@@ -1003,7 +1061,9 @@ function bridge(pi: ExtensionAPI): void {
       streamingText: null,
       status: "idle",
       contextUsage: hostContext.contextUsage(),
+      pendingMessages: [],
       pendingSteering: [],
+      pendingImagesByText: {},
     });
     hostContext.maybeAutoCompact();
     // Send updated history so the completed message sticks
@@ -1020,6 +1080,7 @@ function bridge(pi: ExtensionAPI): void {
 
   pi.on("session_start", (_event: unknown, ctx?: ExtensionContext) => {
     captureUi(ctx?.ui ? { ui: ctx.ui } : ctx);
+    ensureDefaultModelPersisted(ctx);
     _ctx = ctx ?? null;
     // The watcher must not depend on Firebase: harness self-modification
     // (edit extension code / settings → applies live) works even when the
@@ -1183,7 +1244,7 @@ const remoteCode = (pi: ExtensionAPI): void => {
     },
   });
 
-  registerHostCommands(pi, () => ({
+  _hostCommandDeps = () => ({
     sessionId: _sessionId,
     sessions: _sessions,
     supervisor: _supervisor,
@@ -1194,7 +1255,9 @@ const remoteCode = (pi: ExtensionAPI): void => {
     renderFooter,
     publishCurrentPresence: (online?: boolean) => publishCurrentPresence(online ?? true),
     setTunnelStarting: (starting: boolean) => { _tunnelStarting = starting; },
-  }));
+  });
+
+  registerHostCommands(pi, _hostCommandDeps);
 };
 
 export default remoteCode;
