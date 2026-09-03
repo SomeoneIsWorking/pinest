@@ -51,7 +51,6 @@ class StructureCheckTests(unittest.TestCase):
         self.assertEqual(
             check_structure.LEGACY_LINE_LIMITS,
             {
-                Path("app/lib/screens/chat_screen.dart"): 1_595,
                 Path("server/src/index.ts"): 1_290,
             },
         )

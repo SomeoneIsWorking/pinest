@@ -15,7 +15,10 @@ import '../models/chat_item.dart';
 import '../models/tool_call_view.dart';
 import 'app_toast.dart';
 import 'model_sheet.dart';
+import 'session_actions.dart';
 import 'tool_call_card.dart';
+
+export 'session_actions.dart';
 import 'tree_dialog.dart';
 
 class ChatScreen extends StatefulWidget {
@@ -340,7 +343,8 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
           ),
-        _toolbar(context, svc, s, working, models),
+        if (MediaQuery.of(context).size.width >= wideBarMinWidth)
+          _toolbar(context, svc, s, working, models),
         Expanded(child: _messageList(history, streaming, toolCalls, svc, s)),
         if (history.isEmpty && streaming == null)
           const Padding(
@@ -733,65 +737,24 @@ class _ChatScreenState extends State<ChatScreen> {
     bool working,
     List<PinestModel> models,
   ) {
-    // If models are empty, re-request once (in case the first request lost).
     if (s != null && models.isEmpty && !_modelsRequested) _requestModels();
-    // ONE definition of the actions, shared by the wide bar and the narrow
-    // sidebar — two copies would drift in what is enabled when.
-    final actions = <BarAction>[
-      BarAction(
-        label: '/model ${s?.modelName ?? s?.model ?? ""}'.trim(),
-        icon: Icons.memory,
-        onTap: (s == null) ? null : () => _showModels(context, svc, models),
-      ),
-      BarAction(
-        label: '/thinking ${s?.thinkingLevel ?? "off"}',
-        icon: Icons.psychology,
-        color: (s?.thinkingLevel ?? 'off') != 'off' ? Colors.purple : null,
-        onTap: (s == null) ? null : () => _showThinking(context, svc, s),
-      ),
-      BarAction(
-        label: '/compact',
-        icon: Icons.compress,
-        // Both of these rewrite the transcript irreversibly and are one tap
-        // away from /model in the same bar — confirm before firing.
-        onTap: (working || s == null)
-            ? null
-            : () => _confirmContextAction(
-                context,
-                title: 'Compact context?',
-                body:
-                    'The conversation so far is replaced by a summary. '
-                    'The full transcript is not recoverable from the app.',
-                action: 'Compact',
-                onConfirm: () => svc.compact(s),
-              ),
-      ),
-      BarAction(
-        label: '/clear',
-        icon: Icons.cleaning_services,
-        onTap: (working || s == null)
-            ? null
-            : () => _confirmContextAction(
-                context,
-                title: 'Clear session?',
-                body:
-                    'Starts a fresh session with an empty context. '
-                    'The current conversation is dropped from this session.',
-                action: 'Clear',
-                onConfirm: () => svc.newSession(s),
-              ),
-      ),
-      if (s != null && !s.isHost)
-        BarAction(
-          label: '/remove',
-          icon: Icons.delete_outline,
-          color: Colors.red,
-          onTap: _removing ? null : () => _confirmRemove(context, svc, s),
-        ),
-    ];
+    final actions = buildSessionBarActions(
+      context: context,
+      svc: svc,
+      session: s,
+      working: working,
+      models: models,
+      isRemoving: _removing,
+      onRemoving: () {
+        if (mounted) setState(() => _removing = true);
+      },
+      onRemoved: () {
+        if (mounted) setState(() => _removing = false);
+      },
+    );
     final badge = s?.contextPercent == null
         ? null
-        : _ContextBadge(
+        : ContextBadge(
             percent: s!.contextPercent!,
             tokens: s.contextTokens,
             window: s.contextWindow,
@@ -805,82 +768,12 @@ class _ChatScreenState extends State<ChatScreen> {
       ).colorScheme.surfaceContainerHighest.withAlpha(80),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        // The bar spans the FULL width and never scrolls sideways. Wide
-        // screens have room for every action inline; narrow ones cannot fit
-        // them at any font size, so they move into a slide-in sidebar behind
-        // one button instead of being scrolled off-screen where nobody looks.
         child: SessionToolbarRow(
           badge: badge,
           actions: actions,
           busy: _removing,
-          onOpenSidebar: () => _showActionSidebar(context, actions),
+          onOpenSidebar: () => showSessionActionSidebar(context, actions),
         ),
-      ),
-    );
-  }
-
-  /// Narrow-screen home for the toolbar actions: a panel that slides in from
-  /// the right edge, same actions, same enabled/disabled state.
-  Future<void> _showActionSidebar(
-    BuildContext context,
-    List<BarAction> actions,
-  ) {
-    return showGeneralDialog<void>(
-      context: context,
-      barrierDismissible: true,
-      barrierLabel: 'Session actions',
-      barrierColor: Colors.black54,
-      transitionDuration: const Duration(milliseconds: 180),
-      pageBuilder: (ctx, _, _) => Align(
-        alignment: Alignment.centerRight,
-        child: SizedBox(
-          width: math.min(300, MediaQuery.of(ctx).size.width * 0.8),
-          height: double.infinity,
-          child: Material(
-            color: Theme.of(ctx).colorScheme.surface,
-            child: SafeArea(
-              child: ListView(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                children: [
-                  for (final a in actions)
-                    ListTile(
-                      leading: Icon(
-                        a.icon,
-                        size: 20,
-                        color: a.onTap == null
-                            ? Colors.grey.withAlpha(80)
-                            : (a.color ?? Colors.blue),
-                      ),
-                      title: Text(
-                        a.label,
-                        style: TextStyle(
-                          fontFamily: 'monospace',
-                          fontSize: 13,
-                          color: a.onTap == null
-                              ? Colors.grey.withAlpha(120)
-                              : (a.color ?? Colors.blue),
-                        ),
-                      ),
-                      enabled: a.onTap != null,
-                      onTap: a.onTap == null
-                          ? null
-                          : () {
-                              Navigator.pop(ctx);
-                              a.onTap!();
-                            },
-                    ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-      transitionBuilder: (ctx, anim, _, child) => SlideTransition(
-        position: Tween<Offset>(
-          begin: const Offset(1, 0),
-          end: Offset.zero,
-        ).animate(CurvedAnimation(parent: anim, curve: Curves.easeOut)),
-        child: child,
       ),
     );
   }
@@ -1175,376 +1068,6 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  void _showThinking(BuildContext context, AgentService svc, Session s) {
-    const levels = ['off', 'low', 'medium', 'high', 'max'];
-    final current = s.thinkingLevel;
-    // "Default" = the model's own default: the server omits the reasoning
-    // override entirely (opencode semantics) and reports back 'default'.
-    final onDefault = current == 'default';
-    showModalBottomSheet(
-      context: context,
-      builder: (_) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Padding(
-              padding: EdgeInsets.all(16),
-              child: Text(
-                'Thinking level',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-              ),
-            ),
-            ListTile(
-              leading: Icon(
-                Icons.tune,
-                size: 20,
-                color: onDefault ? Colors.purple : null,
-              ),
-              title: const Text('Default'),
-              subtitle: const Text(
-                "The model's own default (no override)",
-                style: TextStyle(fontSize: 11),
-              ),
-              trailing: onDefault
-                  ? const Icon(Icons.check, color: Colors.purple, size: 18)
-                  : null,
-              onTap: () {
-                svc.setThinking(s, 'default');
-                context.read<UserPreferences>().saveThinking('default');
-                Navigator.pop(context);
-              },
-            ),
-            ...levels.map(
-              (l) => ListTile(
-                leading: Icon(
-                  _thinkingIcon(l),
-                  size: 20,
-                  color: l == current ? Colors.purple : null,
-                ),
-                title: Text(l[0].toUpperCase() + l.substring(1)),
-                trailing: l == current
-                    ? const Icon(Icons.check, color: Colors.purple, size: 18)
-                    : null,
-                onTap: () {
-                  svc.setThinking(s, l);
-                  context.read<UserPreferences>().saveThinking(l);
-                  Navigator.pop(context);
-                },
-              ),
-            ),
-            const SizedBox(height: 8),
-          ],
-        ),
-      ),
-    );
-  }
-
-  IconData _thinkingIcon(String level) {
-    switch (level) {
-      case 'off':
-        return Icons.block;
-      case 'low':
-        return Icons.psychology_outlined;
-      case 'medium':
-        return Icons.psychology;
-      case 'high':
-        return Icons.lightbulb_outline;
-      case 'max':
-        return Icons.auto_awesome;
-      default:
-        return Icons.psychology_outlined;
-    }
-  }
-
-  void _showModels(
-    BuildContext context,
-    AgentService svc,
-    List<PinestModel> models,
-  ) {
-    final s = _session(svc);
-    if (s == null) return;
-    svc.listModels(s);
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      builder: (_) => Consumer<AgentService>(
-        builder: (ctx, agentSvc, _) {
-          final liveModels = agentSvc.modelsFor(s.id);
-          final effectiveModels = liveModels.isNotEmpty ? liveModels : models;
-          return ModelSheet(
-            models: effectiveModels,
-            onPick: (m) {
-              agentSvc.setModel(s, m.provider, m.id);
-              ctx.read<UserPreferences>().saveModel('${m.provider}/${m.id}');
-              Navigator.pop(ctx);
-            },
-          );
-        },
-      ),
-    );
-  }
-
-  /// Shared confirm for the two destructive context actions (/compact, /clear).
-  /// The server answers with a `notice` once it really happened — the shell
-  /// snackbars it, so a confirmed action is never silent either way.
-  void _confirmContextAction(
-    BuildContext context, {
-    required String title,
-    required String body,
-    required String action,
-    required VoidCallback onConfirm,
-  }) {
-    showDialog<void>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: Text(title),
-        content: Text(body),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () {
-              Navigator.pop(dialogContext);
-              onConfirm();
-            },
-            child: Text(action),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _confirmRemove(BuildContext context, AgentService svc, Session s) {
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Remove session?'),
-        content: Text(
-          s.isInteractive
-              ? 'This removes the session from PiNest. Your terminal keeps running.'
-              : 'This stops and removes the agent session.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
-            onPressed: () {
-              Navigator.pop(context);
-              _doRemove(svc, s);
-            },
-            child: const Text('Remove'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _doRemove(AgentService svc, Session s) async {
-    setState(() => _removing = true);
-    svc.despawnSession(s);
-    // Wait for the session to disappear from the state doc (up to 10s).
-    final deadline = DateTime.now().add(const Duration(seconds: 10));
-    final sid = s.id;
-    while (DateTime.now().isBefore(deadline)) {
-      if (!svc.sessions.any((x) => x.id == sid)) break;
-      await Future.delayed(const Duration(milliseconds: 300));
-    }
-    if (mounted) setState(() => _removing = false);
-  }
-}
-
-class _ContextBadge extends StatelessWidget {
-  final double percent;
-  final int? tokens;
-  final int? window;
-  final String? modelName;
-  final int? compactAt;
-  final bool isCompacting;
-  const _ContextBadge({
-    required this.percent,
-    this.tokens,
-    this.window,
-    this.modelName,
-    this.compactAt,
-    this.isCompacting = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final pct = percent.round();
-    final color = pct >= 90
-        ? Colors.red
-        : pct >= 70
-        ? Colors.orange
-        : Colors.green;
-    final label = tokens != null && window != null
-        ? '${(tokens! / 1000).toStringAsFixed(1)}/${(window! / 1000).toStringAsFixed(0)}k'
-        : '$pct%';
-    // Model + auto-compact threshold, so the user can verify what is active.
-    final sub = [
-      ?modelName,
-      if (compactAt != null)
-        'compact @ ${(compactAt! / 1000).toStringAsFixed(0)}k',
-      if (isCompacting) 'compacting…',
-    ].join(' · ');
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 11,
-                color: color,
-                fontFamily: 'monospace',
-              ),
-            ),
-            const SizedBox(width: 4),
-            SizedBox(
-              width: 40,
-              child: LinearProgressIndicator(
-                value: (percent / 100).clamp(0, 1),
-                backgroundColor: Colors.grey.shade300,
-                color: color,
-                minHeight: 4,
-              ),
-            ),
-          ],
-        ),
-        if (sub.isNotEmpty)
-          Text(
-            sub,
-            style: TextStyle(fontSize: 9, color: Colors.grey.shade600),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-      ],
-    );
-  }
-}
-
-/// Below this width the action labels cannot all fit, so they move into the
-/// slide-in sidebar instead of being scrolled off the right edge.
-const double _wideBarMinWidth = 620;
-
-/// One toolbar action, rendered inline on wide screens and as a sidebar row on
-/// narrow ones. `onTap == null` means disabled in BOTH places.
-class BarAction {
-  final String label;
-  final IconData icon;
-  final Color? color;
-  final VoidCallback? onTap;
-  const BarAction({
-    required this.label,
-    required this.icon,
-    this.color,
-    this.onTap,
-  });
-}
-
-/// The session toolbar's layout, split out so its geometry can be tested.
-///
-/// Full width, never sideways-scrolling. Wide: the actions sit at the RIGHT
-/// edge with the context badge at the left. Narrow: the actions cannot fit at
-/// any font size, so one button opens them in a sidebar instead of scrolling
-/// them off-screen where nobody looks.
-class SessionToolbarRow extends StatelessWidget {
-  final Widget? badge;
-  final List<BarAction> actions;
-  final bool busy;
-  final VoidCallback onOpenSidebar;
-  const SessionToolbarRow({
-    super.key,
-    required this.badge,
-    required this.actions,
-    required this.onOpenSidebar,
-    this.busy = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, c) {
-        final wide = c.maxWidth >= _wideBarMinWidth;
-        return SizedBox(
-          width: double.infinity,
-          child: Row(
-            mainAxisSize: MainAxisSize.max,
-            children: [
-              // Expanded (not Flexible + Spacer): a Flexible badge and a
-              // Spacer share the free space 50/50, which parked the actions in
-              // the middle of the bar instead of at its right edge.
-              Expanded(
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: badge ?? const SizedBox.shrink(),
-                ),
-              ),
-              if (wide)
-                for (final a in actions)
-                  _ToolButton(label: a.label, color: a.color, onTap: a.onTap)
-              else ...[
-                if (busy)
-                  const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 10),
-                    child: SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
-                  ),
-                IconButton(
-                  key: const Key('toolbar-sidebar-button'),
-                  icon: const Icon(Icons.tune, size: 20),
-                  tooltip: 'Session actions',
-                  visualDensity: VisualDensity.compact,
-                  onPressed: onOpenSidebar,
-                ),
-              ],
-            ],
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _ToolButton extends StatelessWidget {
-  final String label;
-  final Color? color;
-  final VoidCallback? onTap;
-  const _ToolButton({required this.label, this.color, this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    final disabled = onTap == null;
-    final c = disabled ? Colors.grey.withAlpha(80) : (color ?? Colors.blue);
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(6),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-        child: Text(
-          label,
-          style: TextStyle(
-            fontFamily: 'monospace',
-            fontSize: 12,
-            color: c,
-            decoration: TextDecoration.underline,
-            decorationColor: c.withAlpha(120),
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 class _StreamingBubble extends StatelessWidget {

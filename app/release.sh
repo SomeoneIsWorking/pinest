@@ -3,7 +3,7 @@
 set -eu
 cd "$(dirname "$0")"
 
-VERSION="v0.1.1"
+VERSION="v0.1.2"
 APK_NAME="pinest-${VERSION}.apk"
 
 ./deploy.sh
