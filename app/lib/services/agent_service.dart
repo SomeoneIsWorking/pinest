@@ -419,8 +419,32 @@ class AgentService extends ChangeNotifier {
         // when the session is idle and we received a replacement page. Loading
         // older history or receiving updates during a live run must never wipe
         // live tool calls.
-        if (mode != 'older' && statusFor(sid) != 'working') {
-          _cache.toolCalls.remove(sid);
+        if (mode != 'older') {
+          if (statusFor(sid) != 'working') {
+            _cache.toolCalls.remove(sid);
+            _cache.streamingSegments.remove(sid);
+            _cache.streamingText.remove(sid);
+          } else {
+            // Prune tool calls that have already landed in history.
+            final historyCallIds = <String>{};
+            for (final item in _cache.history[sid] ?? const <Map<String, dynamic>>[]) {
+              final tools = item['tools'] as List?;
+              if (tools != null) {
+                for (final t in tools) {
+                  if (t is Map) {
+                    final id = t['id'] as String? ?? t['callId'] as String?;
+                    if (id != null && id.isNotEmpty) historyCallIds.add(id);
+                  }
+                }
+              }
+            }
+            if (historyCallIds.isNotEmpty && _cache.toolCalls.containsKey(sid)) {
+              _cache.toolCalls[sid]!.removeWhere((t) {
+                final id = t['callId'] as String? ?? t['id'] as String?;
+                return id != null && historyCallIds.contains(id);
+              });
+            }
+          }
         }
         // A cleared session (empty replace page at cursor 0) has no thread at
         // all: a leftover streaming bubble would be the only thing on screen.
@@ -432,14 +456,19 @@ class AgentService extends ChangeNotifier {
         break;
       case 'stream':
         final sid = msg['sessionId'] as String? ?? '';
-        _cache.streamingText[sid] = msg['text'] as String? ?? '';
-        _cache.streamingSegments[sid] = (msg['segments'] as List? ?? const [])
+        final text = msg['text'] as String? ?? '';
+        if (text.isNotEmpty) {
+          _cache.streamingText[sid] = text;
+        } else {
+          _cache.streamingText.remove(sid);
+        }
+        final segments = (msg['segments'] as List? ?? const [])
             .map((x) => x as String)
             .toList();
-        // Update session status
-        final idx = _sessions.indexWhere((s) => s.id == sid);
-        if (idx >= 0) {
-          // Can't modify session fields directly; rely on status from state broadcasts
+        if (segments.isNotEmpty) {
+          _cache.streamingSegments[sid] = segments;
+        } else {
+          _cache.streamingSegments.remove(sid);
         }
         break;
       case 'tool':
@@ -554,6 +583,11 @@ class AgentService extends ChangeNotifier {
     List<PendingImage> images = const [],
     bool steer = true,
   }) {
+    if (statusFor(s.id) != 'working') {
+      _cache.toolCalls.remove(s.id);
+      _cache.streamingSegments.remove(s.id);
+      _cache.streamingText.remove(s.id);
+    }
     // No client-side queue bookkeeping: the server tracks pending messages
     // and reports them in the session snapshot. This app is a terminal.
     _send({
