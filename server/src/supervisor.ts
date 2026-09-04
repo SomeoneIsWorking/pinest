@@ -143,22 +143,25 @@ export class Supervisor {
     for (const s of this.sessions.values()) {
       const sessionRuntime = (s.session as any)?.modelRuntime ?? (s.session as any)?._modelRuntime;
       if (sessionRuntime) {
-        const snap = sessionRuntime.getAvailableSnapshot();
+        let snap = sessionRuntime.getAvailableSnapshot();
         const slash = spec.indexOf("/");
-        if (slash !== -1) {
-          const provider = spec.slice(0, slash);
-          const id = spec.slice(slash + 1);
-          const exact = snap.find((m: any) => m.provider === provider && m.id === id);
-          if (exact) return exact;
+        const provider = slash !== -1 ? spec.slice(0, slash) : null;
+        const id = slash !== -1 ? spec.slice(slash + 1) : null;
+        let match = (provider && id)
+          ? snap.find((m: any) => m.provider === provider && m.id === id)
+          : snap.find((m: any) => m.id === spec || m.name?.toLowerCase() === spec.toLowerCase() || `${m.provider}/${m.id}` === spec);
+        if (!match) {
+          await sessionRuntime.getAvailable?.().catch(() => undefined);
+          snap = sessionRuntime.getAvailableSnapshot();
+          match = (provider && id)
+            ? snap.find((m: any) => m.provider === provider && m.id === id)
+            : snap.find((m: any) => m.id === spec || m.name?.toLowerCase() === spec.toLowerCase() || `${m.provider}/${m.id}` === spec);
         }
-        const match = snap.find(
-          (m: any) => m.id === spec || m.name?.toLowerCase() === spec.toLowerCase() || `${m.provider}/${m.id}` === spec,
-        );
         if (match) return match;
       }
     }
     const reg = await this.modelRegistry();
-    await reg.refresh().catch(() => undefined);
+    await ((reg as any).runtime?.getAvailable?.() ?? reg.refresh?.())?.catch(() => undefined);
     const slash = spec.indexOf("/");
     if (slash !== -1) {
       const provider = spec.slice(0, slash);
@@ -809,13 +812,23 @@ export class Supervisor {
   private async models(s: LiveSession) {
     const sessionRuntime = (s.session as any)?.modelRuntime ?? (s.session as any)?._modelRuntime;
     if (sessionRuntime) {
+      const avail = await sessionRuntime.getAvailable?.().catch(() => undefined);
+      if (Array.isArray(avail) && avail.length > 0) {
+        return avail.map(mapModel);
+      }
       const snap = sessionRuntime.getAvailableSnapshot();
       if (Array.isArray(snap) && snap.length > 0) {
         return snap.map(mapModel);
       }
     }
     const reg = await this.modelRegistry();
-    await reg.refresh().catch(() => undefined);
+    const runtime = (reg as any)?.runtime;
+    if (runtime) {
+      const avail = await runtime.getAvailable?.().catch(() => undefined);
+      if (Array.isArray(avail) && avail.length > 0) {
+        return avail.map(mapModel);
+      }
+    }
     return reg.getAvailable().map(mapModel);
   }
 
