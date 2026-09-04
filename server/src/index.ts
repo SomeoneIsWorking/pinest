@@ -320,6 +320,13 @@ async function bootstrap(): Promise<void> {
     broadcast: (msg) => broadcast(msg as ServerMessage),
     embedImages,
     compactAtTokens: (): number | undefined => loadConfig().compactAtTokens,
+    notifyHost: (message, type) => {
+      try {
+        _ctx?.ui?.notify?.(message, type);
+      } catch {
+        // quiet in non-interactive / test modes
+      }
+    },
   }, _registry);
 
   // Re-attach runs parked by the previous instance FIRST — before the WS
