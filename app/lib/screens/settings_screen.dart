@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -5,6 +6,7 @@ import '../services/auth_service.dart';
 import '../services/agent_service.dart';
 import '../services/apk_release.dart';
 import '../services/link_bridge.dart';
+import '../services/notification_bridge.dart';
 import '../services/update_service.dart';
 import '../services/user_preferences.dart';
 import 'app_toast.dart';
@@ -20,6 +22,9 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   final _threshold = TextEditingController();
   bool _steerByDefault = false;
+  bool _notifyOnFinish = true;
+  bool _notifyOnError = true;
+  bool _browserNotificationsGranted = false;
   bool _checkingForUpdate = false;
 
   Future<void> _checkForUpdate() async {
@@ -49,7 +54,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void initState() {
     super.initState();
-    _steerByDefault = context.read<UserPreferences>().steerByDefault;
+    final prefs = context.read<UserPreferences>();
+    _steerByDefault = prefs.steerByDefault;
+    _notifyOnFinish = prefs.notifyOnFinish;
+    _notifyOnError = prefs.notifyOnError;
+    if (kIsWeb) {
+      isNotificationPermissionGranted().then((granted) {
+        if (mounted) setState(() => _browserNotificationsGranted = granted);
+      });
+    }
+  }
+
+  Future<void> _enableBrowserNotifications() async {
+    final granted = await requestNotificationPermission();
+    if (mounted) {
+      setState(() => _browserNotificationsGranted = granted);
+      if (granted) {
+        showAppToast(context, 'Browser notifications enabled');
+      } else {
+        showAppToast(
+          context,
+          'Notification permission was denied or not supported',
+          isError: true,
+        );
+      }
+    }
   }
 
   @override
@@ -208,6 +237,64 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 setState(() => _steerByDefault = v);
                 context.read<UserPreferences>().saveSteerByDefault(v);
               },
+            ),
+          ),
+          const SizedBox(height: 24),
+
+          // ── Notifications ────────────────────────────────────────────────
+          const Text('Notifications',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 8),
+          Card(
+            child: Column(
+              children: [
+                SwitchListTile(
+                  secondary: const Icon(Icons.check_circle_outline),
+                  title: const Text('Agent finished work'),
+                  subtitle: const Text(
+                    'Show a notification when an agent completes a task.',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                  value: _notifyOnFinish,
+                  onChanged: (v) {
+                    setState(() => _notifyOnFinish = v);
+                    context.read<UserPreferences>().saveNotifyOnFinish(v);
+                  },
+                ),
+                const Divider(height: 1),
+                SwitchListTile(
+                  secondary: const Icon(Icons.error_outline),
+                  title: const Text('Errors'),
+                  subtitle: const Text(
+                    'Show a notification when an error or failure occurs.',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                  value: _notifyOnError,
+                  onChanged: (v) {
+                    setState(() => _notifyOnError = v);
+                    context.read<UserPreferences>().saveNotifyOnError(v);
+                  },
+                ),
+                if (kIsWeb) ...[
+                  const Divider(height: 1),
+                  ListTile(
+                    leading: const Icon(Icons.notifications_active_outlined),
+                    title: const Text('Browser notifications'),
+                    subtitle: Text(
+                      _browserNotificationsGranted
+                          ? 'Permission granted'
+                          : 'Receive alerts when PiNest is in the background or another tab.',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    trailing: _browserNotificationsGranted
+                        ? const Icon(Icons.check, color: Colors.green)
+                        : TextButton(
+                            onPressed: _enableBrowserNotifications,
+                            child: const Text('Enable'),
+                          ),
+                  ),
+                ],
+              ],
             ),
           ),
           const SizedBox(height: 24),

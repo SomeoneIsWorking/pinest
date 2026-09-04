@@ -57,6 +57,8 @@ export interface SupervisorCallbacks {
   embedImages?: (text: string) => string;
   /** Current auto-compact threshold (tokens); undefined disables the check. */
   compactAtTokens?: () => number | undefined;
+  /** Notify the host pi terminal UI (e.g. background task finished or error). */
+  notifyHost?: (message: string, type?: "info" | "warning" | "error") => void;
 }
 
 interface LiveSession {
@@ -666,12 +668,18 @@ export class Supervisor {
         if (Array.isArray(event.messages)) {
           const last = event.messages[event.messages.length - 1];
           if (last?.role === "assistant" && (last.stopReason === "error" || last.errorMessage)) {
+            const err = last.errorMessage || "Provider error";
             this.callbacks.broadcast({
               type: "error",
               sessionId: id,
-              message: last.errorMessage || "Provider error",
+              message: err,
             });
+            this.callbacks.notifyHost?.(`PiNest [${s.name || id}]: error: ${err}`, "error");
+          } else {
+            this.callbacks.notifyHost?.(`PiNest [${s.name || id}]: finished work`, "info");
           }
+        } else {
+          this.callbacks.notifyHost?.(`PiNest [${s.name || id}]: finished work`, "info");
         }
         s.segmenter?.reset();
         if (s.currentTurnId) s.currentTurnId = null;
@@ -793,6 +801,7 @@ export class Supervisor {
         this.callbacks.broadcast({
           type: "error", sessionId: id, message: `Auto-compaction failed: ${(e as Error).message}`,
         });
+        this.callbacks.notifyHost?.(`PiNest [${s.name || id}]: auto-compaction failed`, "warning");
       })
       .finally(() => { s._compacting = false; this.callbacks.upsertSession(id, { isCompacting: false }); });
   }

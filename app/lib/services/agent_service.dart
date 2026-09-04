@@ -5,7 +5,9 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'auth_service.dart';
 import 'correlated_request_broker.dart';
+import 'notification_bridge.dart';
 import 'session_cache.dart';
+import 'user_preferences.dart';
 import '../models/session.dart';
 export '../models/session.dart' show PendingImage;
 import '../models/chat_item.dart';
@@ -165,6 +167,14 @@ class AgentService extends ChangeNotifier {
   final StreamController<ServerNotice> _notices =
       StreamController<ServerNotice>.broadcast();
   Stream<ServerNotice> get notices => _notices.stream;
+
+  /// Tracks previous session status to detect working -> idle completions.
+  final Map<String, String> _sessionStatusHistory = {};
+  UserPreferences? _preferences;
+
+  void setPreferences(UserPreferences prefs) {
+    _preferences = prefs;
+  }
 
   List<Session> get sessions => List.unmodifiable(_sessions);
   List<Session> get registrySessions => List.unmodifiable(_registry);
@@ -378,6 +388,13 @@ class AgentService extends ChangeNotifier {
           if (session.id.isEmpty) continue;
           _sessions.add(session);
           final id = session.id;
+
+          final prevStatus = _sessionStatusHistory[id];
+          if (prevStatus == 'working' && session.status == 'idle') {
+            _notifySessionFinished(session);
+          }
+          _sessionStatusHistory[id] = session.status;
+
           final st = m['streamingText'] as String?;
           if (st != null && st.isNotEmpty) {
             _cache.streamingText[id] = st;
@@ -526,7 +543,25 @@ class AgentService extends ChangeNotifier {
       case 'error':
         _error = msg['message'] as String?;
         if (_error != null && _error!.isNotEmpty) {
-          _notices.add(ServerNotice(_error!, isError: true));
+          final sid = msg['sessionId'] as String?;
+          final sessionName = sid != null
+              ? _sessions.where((s) => s.id == sid).firstOrNull?.name
+              : null;
+          final prefix = sessionName != null && sessionName.isNotEmpty
+              ? '$sessionName: '
+              : '';
+          final text = '$prefix$_error';
+          _notices.add(ServerNotice(text, isError: true, sessionId: sid));
+          if (_preferences?.notifyOnError ?? true) {
+            showPlatformNotification(
+              title: sessionName != null && sessionName.isNotEmpty
+                  ? 'PiNest: $sessionName error'
+                  : 'PiNest error',
+              body: _error!,
+              isError: true,
+              onClick: sid != null ? () => selectSession(sid) : null,
+            );
+          }
         }
         break;
       case 'notice':
@@ -535,6 +570,18 @@ class AgentService extends ChangeNotifier {
         break;
     }
     notifyListeners();
+  }
+
+  void _notifySessionFinished(Session session) {
+    if (_preferences?.notifyOnFinish ?? true) {
+      final name = session.name.isNotEmpty ? session.name : 'Agent';
+      _notices.add(ServerNotice('$name finished work', sessionId: session.id));
+      showPlatformNotification(
+        title: 'PiNest: $name',
+        body: 'Agent finished work.',
+        onClick: () => selectSession(session.id),
+      );
+    }
   }
 
   /// user_message commands submitted while the socket is down. They are the
@@ -841,5 +888,6 @@ class WebSocketConnection {
 class ServerNotice {
   final String message;
   final bool isError;
-  const ServerNotice(this.message, {this.isError = false});
+  final String? sessionId;
+  const ServerNotice(this.message, {this.isError = false, this.sessionId});
 }
