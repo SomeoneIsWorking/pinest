@@ -48,7 +48,7 @@ export {
 export { firstSyntaxError } from "./watch.ts";
 import { resolveThinkingLevel, reportThinkingLevel } from "./thinking.ts";
 import { Type } from "typebox";
-import type { SessionRow, SessionSnapshot, ClientCommand, ServerMessage } from "./protocol.ts";
+import type { SessionRow, SessionSnapshot, ClientCommand, ServerMessage, ModelInfo } from "./protocol.ts";
 import { installCrashReporter } from "./crash.ts";
 import { DEFAULT_MODEL } from "./product-defaults.ts";
 import { HostContextController } from "./host-context.ts";
@@ -702,7 +702,7 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
       break;
     }
     case "list_models":
-      broadcast({ type: "models", sessionId: _sessionId, models: listModels() });
+      void listModels().then((models) => broadcast({ type: "models", sessionId: _sessionId, models }));
       break;
     case "get_history": {
       const paged = pageHistory(await getInteractiveHistory(), { limit: cmd.limit, cursor: cmd.cursor });
@@ -801,15 +801,20 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
   }
 }
 
-function listModels() {
+async function listModels(): Promise<ModelInfo[]> {
   try {
     const reg = (_ctx as any)?.modelRegistry;
-    if (reg) {
-      return (reg.getAvailable?.() ?? []).map(mapModel);
-    }
-    const runtime = (_ctx as any)?.session?.modelRuntime ?? (_ctx as any)?._modelRuntime;
+    const runtime = reg?.runtime ?? (_ctx as any)?.session?.modelRuntime ?? (_ctx as any)?._modelRuntime;
     if (runtime) {
+      const avail = await runtime.getAvailable?.().catch(() => undefined);
+      if (Array.isArray(avail) && avail.length > 0) {
+        return avail.map(mapModel);
+      }
       return (runtime.getAvailableSnapshot?.() ?? []).map(mapModel);
+    }
+    if (reg) {
+      await reg.refresh?.().catch(() => undefined);
+      return (reg.getAvailable?.() ?? []).map(mapModel);
     }
   } catch { return []; }
   return [];
@@ -862,7 +867,7 @@ const hostContext = new HostContextController({
 
 async function setModel(cmd: Extract<ClientCommand, { type: "model_set" }>): Promise<void> {
   const reg = (_ctx as any)?.modelRegistry;
-  await reg?.refresh?.()?.catch?.(() => undefined);
+  await (reg?.runtime?.getAvailable?.() ?? reg?.refresh?.())?.catch?.(() => undefined);
   const m = reg?.find?.(cmd.provider, cmd.modelId);
   if (!m) throw new Error(`model ${cmd.provider}/${cmd.modelId} not found`);
   // ExtensionAPI.setModel resolves boolean — false means the host did NOT
