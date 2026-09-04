@@ -314,6 +314,9 @@ class _MockAgentService extends ChangeNotifier implements AgentService {
   String displayPath(String path) => path.replaceFirst('/workspace', '~');
 
   @override
+  void setPreferences(UserPreferences prefs) {}
+
+  @override
   void getHistory(Session session, {int? cursor}) {}
 
   @override

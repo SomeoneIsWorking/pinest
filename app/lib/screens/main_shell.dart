@@ -33,15 +33,23 @@ class _MainShellState extends State<MainShell> {
   @override
   void initState() {
     super.initState();
+    final svc = context.read<AgentService>();
+    svc.setPreferences(context.read<UserPreferences>());
+
     // Server notices/errors are shown HERE, once, for every screen. The
     // service used to park the last error in a field nothing rendered, so a
     // refused /compact (or any server-side failure) was completely silent.
-    _noticeSub = context.read<AgentService>().notices.listen((n) {
+    _noticeSub = svc.notices.listen((n) {
       if (!mounted) return;
       showAppToast(
         context,
         n.message,
         isError: n.isError,
+        icon: n.isError
+            ? Icons.error_outline
+            : (n.message.contains('finished work')
+                ? Icons.check_circle_outline
+                : null),
         duration: Duration(seconds: n.isError ? 5 : 3),
       );
     });

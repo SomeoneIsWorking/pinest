@@ -5,6 +5,8 @@ class UserPreferences {
   static const _lastModelKey = 'last_model';
   static const _lastThinkingKey = 'last_thinking';
   static const _midTurnKey = 'mid_turn_mode';
+  static const _notifyOnFinishKey = 'notify_on_finish';
+  static const _notifyOnErrorKey = 'notify_on_error';
 
   final SharedPreferences _prefs;
 
@@ -32,5 +34,19 @@ class UserPreferences {
 
   Future<void> saveSteerByDefault(bool steer) async {
     await _prefs.setString(_midTurnKey, steer ? 'steer' : 'queue');
+  }
+
+  /// Whether to notify the user when an agent finishes work.
+  bool get notifyOnFinish => _prefs.getBool(_notifyOnFinishKey) ?? true;
+
+  Future<void> saveNotifyOnFinish(bool enabled) async {
+    await _prefs.setBool(_notifyOnFinishKey, enabled);
+  }
+
+  /// Whether to notify the user when an agent encounters an error.
+  bool get notifyOnError => _prefs.getBool(_notifyOnErrorKey) ?? true;
+
+  Future<void> saveNotifyOnError(bool enabled) async {
+    await _prefs.setBool(_notifyOnErrorKey, enabled);
   }
 }
