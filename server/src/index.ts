@@ -286,6 +286,8 @@ async function teardownRemote(reason: "reload" | "shutdown" = "shutdown"): Promi
   _supervisor = null;
   try { _ws?.stop(); } catch { /* */ }
   _ws = null;
+  _pi = null;
+  _ctx = null;
 }
 
 // ── Bootstrap ───────────────────────────────────────────────────────────────
@@ -851,6 +853,7 @@ async function getInteractiveHistory() {
 
 const hostContext = new HostContextController({
   getContext: () => _ctx as any,
+  setContext: (ctx) => { _ctx = ctx as unknown as ExtensionContext; },
   getSessionId: () => _sessionId,
   compactAtTokens: () => loadConfig().compactAtTokens,
   getHistory: getInteractiveHistory,
@@ -921,6 +924,10 @@ function embedImages(text: string): string {
 
 // ── Bridge Pi events → WebSocket ────────────────────────────────────────────
 function bridge(pi: ExtensionAPI): void {
+  if (_pi && _pi !== pi) {
+    debug("[remote-code] bridge already bound to host pi; ignoring secondary ExtensionAPI");
+    return;
+  }
   _pi = pi;
   _submitter = createMessageSubmitter({
     send: (text, images, deliverAs) => {
@@ -1134,11 +1141,16 @@ function bridge(pi: ExtensionAPI): void {
 // ── Slash commands / agent tool ─────────────────────────────────────────────
 /** @type {import("@earendil-works/pi-coding-agent").ExtensionFactory} */
 const remoteCode = (pi: ExtensionAPI): void => {
+  if (Supervisor.activeSpawning) return void debug("[remote-code] skipping child session");
   const wired = (globalThis as any)[Symbol.for("remote-code.extension.wired")] ??= new WeakSet();
   if (wired.has(pi)) return;
   wired.add(pi);
   debug("[remote-code] extension loaded");
-  try { bridge(pi); } catch (e) { debug("[remote-code] bridge failed:", e); }
+  if (!_pi || _pi === pi) {
+    try { bridge(pi); } catch (e) { debug("[remote-code] bridge failed:", e); }
+  } else {
+    debug("[remote-code] secondary ExtensionAPI ignored");
+  }
 
   const say = (ctx: unknown, content: string, details?: unknown): void => {
     try { _pi?.sendMessage?.({ customType: "pinest", content, details, display: true }); } catch { /* */ }
@@ -1156,7 +1168,10 @@ const remoteCode = (pi: ExtensionAPI): void => {
         await ctx.reload();
         // Terminal for this module instance — the re-imported instance takes over.
       } catch (e) {
-        say(ctx, `[remote-code] reload failed: ${(e as Error)?.message || e}`);
+        debug(`[remote-code] reload failed: ${(e as Error)?.message || e}`);
+        try {
+          _pi?.sendMessage?.({ customType: "pinest", content: `[pinest] reload failed: ${(e as Error)?.message || e}`, display: true });
+        } catch { /* ignore stale ctx/pi on reload failure */ }
       }
     },
   });
@@ -1174,9 +1189,10 @@ const remoteCode = (pi: ExtensionAPI): void => {
       "so call it when your edits are COMPLETE, not between them. If a watched file " +
       "has a syntax error the reload is refused and the file is named.",
     parameters: Type.Object({}),
-    async execute() {
+    async execute(_toolCallId: string, _params: unknown, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
+      if (ctx) _ctx = ctx;
       const pending = pendingReloadState();
-      const { message } = queueReload(_pi, _ctx);
+      const { message } = queueReload(_pi, ctx ?? _ctx);
       return {
         content: [{ type: "text", text: message }],
         details: { pending },

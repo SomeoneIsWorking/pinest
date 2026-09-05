@@ -15,7 +15,7 @@ interface HostSessionManager {
 
 export interface HostContext {
   compact?: () => unknown;
-  newSession?: () => unknown;
+  newSession?: (options?: { withSession?: (ctx: HostContext) => Promise<void> | void }) => Promise<unknown> | unknown;
   getContextUsage?: () => Record<string, unknown> | null;
   model?: HostModel | null;
   sessionManager?: HostSessionManager | null;
@@ -23,6 +23,7 @@ export interface HostContext {
 
 export interface HostContextControllerDeps {
   getContext: () => HostContext | null;
+  setContext?: (ctx: HostContext) => void;
   getSessionId: () => string;
   compactAtTokens: () => number | undefined;
   getHistory: () => Promise<HistoryItem[]>;
@@ -43,9 +44,9 @@ export class HostContextController {
     this.deps = deps;
   }
 
-  contextUsage(): Record<string, unknown> | undefined {
+  contextUsage(ctx?: HostContext | null): Record<string, unknown> | undefined {
     try {
-      const usage = this.deps.getContext()?.getContextUsage?.();
+      const usage = (ctx ?? this.deps.getContext())?.getContextUsage?.();
       if (!usage) return undefined;
       return { ...usage, compactAt: this.deps.compactAtTokens() };
     } catch {
@@ -72,15 +73,30 @@ export class HostContextController {
     }
 
     this.deps.clearPending();
-    await newSession.call(context);
 
+    let replacementCtx: HostContext | null = null;
+    await newSession.call(context, {
+      withSession: async (newCtx: HostContext) => {
+        replacementCtx = newCtx;
+        this.deps.setContext?.(newCtx);
+      },
+    });
+
+    const activeCtx = replacementCtx ?? this.deps.getContext() ?? context;
     const sessionId = this.deps.getSessionId();
-    const model = context.model;
-    const path = context.sessionManager?.getSessionFile?.()
-      ?? context.sessionManager?.sessionFile
-      ?? null;
+    let model: HostModel | null | undefined;
+    let path: string | null = null;
+    try {
+      model = activeCtx.model;
+      path = activeCtx.sessionManager?.getSessionFile?.()
+        ?? activeCtx.sessionManager?.sessionFile
+        ?? null;
+    } catch {
+      // In case activeCtx is still stale, safely ignore
+    }
+
     this.deps.upsertSession(sessionId, {
-      contextUsage: this.contextUsage(),
+      contextUsage: this.contextUsage(activeCtx),
       model: model ? `${model.provider}/${model.id}` : null,
       modelName: model?.name,
     });

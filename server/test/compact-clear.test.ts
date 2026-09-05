@@ -95,6 +95,46 @@ test("host clear resets queue, snapshot, path, and every loaded history page", a
     && message.patch.contextUsage.compactAt === 400_000));
 });
 
+test("host clear uses withSession and never accesses invalidated context", async () => {
+  const sent: any[] = [];
+  let isStale = false;
+  let updatedContext: HostContext | null = null;
+  const replacement: HostContext = {
+    getContextUsage: () => ({ tokens: 10, contextWindow: 500_000 }),
+    model: { provider: "opencode-go", id: "glm-5.3-flash", name: "GLM 5.3 Flash" },
+    sessionManager: { getSessionFile: () => "/session/fresh.jsonl" },
+  };
+  const staleContext: HostContext = {
+    newSession: async (opts) => {
+      isStale = true;
+      await opts?.withSession?.(replacement);
+    },
+    get getContextUsage() {
+      if (isStale) throw new Error("stale context access");
+      return () => ({ tokens: 0, contextWindow: 1_000_000 });
+    },
+    get model() {
+      if (isStale) throw new Error("stale context access");
+      return { provider: "opencode-go", id: "glm-5.3-flash", name: "GLM 5.3 Flash" };
+    },
+    get sessionManager() {
+      if (isStale) throw new Error("stale context access");
+      return { getSessionFile: () => "/session/old.jsonl" };
+    },
+  };
+
+  const { controller, calls } = makeHostController(staleContext, sent, {
+    setContext: (ctx) => { updatedContext = ctx; },
+  });
+
+  await controller.clear();
+
+  assert.equal(updatedContext, replacement);
+  assert.deepEqual(calls.paths, ["/session/fresh.jsonl"]);
+  assert.ok(sent.some((message) => message.type === "notice" && /Session cleared/i.test(message.message)));
+  assert.ok(sent.some((message) => message.type === "upsert" && message.patch.contextUsage?.tokens === 10));
+});
+
 test("host compaction completion resets history and refreshes usage", async () => {
   const sent: any[] = [];
   const { controller } = makeHostController({
