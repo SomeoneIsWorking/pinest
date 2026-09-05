@@ -25,13 +25,14 @@ import type { FirebaseAuth } from "./auth.ts";
 import { WSServer } from "./wsserver.ts";
 import { Supervisor } from "./supervisor.ts";
 import { SessionRegistry } from "./registry.ts";
-import { mapModel, deriveSessionName, historyWithEmbeds, listPaths, resolvePathInput, pageHistory } from "./logic.ts";
+import { mapModel, deriveSessionName, historyWithEmbeds, embedImages, listPaths, resolvePathInput, pageHistory } from "./logic.ts";
 import { StreamSegmenter } from "./stream.ts";
 import { loadConfig, saveConfig } from "./config.ts";
 import { PROVIDERS } from "./tunnel.ts";
 import { createAttachView } from "./attach-view.ts";
 import { registerHostCommands, showSessionsFlow, type HostCommandDeps } from "./host-commands.ts";
 import { PinestCustomEditor } from "./editor.ts";
+import { FooterManager } from "./footer.ts";
 import { DEFAULT_PROVIDER, DEFAULT_MODEL_ID } from "./product-defaults.ts";
 import {
   startWatcher,
@@ -94,6 +95,9 @@ let _status: "idle" | "working" = "idle";
 const segmenter = new StreamSegmenter();
 let _ctx: ExtensionContext | null = null;
 let _heartbeat: NodeJS.Timeout | null = null;
+let _footer: FooterManager | null = null;
+let _isTornDown = false;
+let _bootstrapPromise: Promise<void> | null = null;
 
 // True between a run's first message_start and its agent_end. Used by the
 // submission queue to know a submission actually started a run.
@@ -164,7 +168,10 @@ function ensureDefaultModelPersisted(ctx: any): void {
 
 function captureUi(ctx: unknown): void {
   const ui = (ctx as any)?.ui;
-  if (!_ui && ui?.setStatus) _ui = ui;
+  if (!_ui && ui?.setStatus) {
+    _ui = ui;
+    getFooter().setUi(ui);
+  }
   installCustomEditor(ctx);
 }
 
@@ -180,19 +187,28 @@ function statSyncSafe(p: string): boolean {
 
 let _tunnelStarting = false;
 
+function getFooter(): FooterManager {
+  if (!_footer) {
+    _footer = new FooterManager({
+      getOwnerEmail: () => _ownerEmail,
+      getLiveSessionCount: () => {
+        const spawned = _supervisor?.sessions?.size ?? 0;
+        const live = 1 + spawned;
+        const working = (_status === "working" ? 1 : 0)
+          + [...(_supervisor?.sessions?.values() ?? [])].filter((s: any) => s.status === "working").length;
+        return { live, working };
+      },
+      getTunnelUrl: () => _ws?.tunnelUrl ?? null,
+      isTunnelStarting: () => _tunnelStarting,
+    });
+    if (_ui) _footer.setUi(_ui);
+  }
+  return _footer;
+}
+
 function renderFooter(): void {
-  if (!_ui?.setStatus) return;
-  try {
-    _ui.setStatus("pinest:owner", _ownerEmail ? `🟣 ${_ownerEmail}` : undefined);
-    const spawned = _supervisor?.sessions?.size ?? 0;
-    const live = 1 + spawned;
-    const working = (_status === "working" ? 1 : 0)
-      + [...(_supervisor?.sessions?.values() ?? [])].filter((s: any) => s.status === "working").length;
-    const prov = loadConfig().tunnelProvider;
-    const url = _ws?.tunnelUrl ?? (prov === "off" ? "off (local-only)" : _tunnelStarting ? "(starting…)" : "(local-only)");
-    _ui.setStatus("pinest:sessions", live ? `📡 ${live} session${live === 1 ? "" : "s"}${working ? ` · ⚡${working} working` : ""}` : undefined);
-    _ui.setStatus("pinest:url", `${prov}: ${url}`);
-  } catch { /* footer is best-effort */ }
+  if (_isTornDown) return;
+  getFooter().render();
 }
 
 // ── Session snapshot helpers ────────────────────────────────────────────────
@@ -279,20 +295,31 @@ function adoptReloadedSessions(): number {
 /** Stop everything this instance owns. Used on host shutdown AND on reload
  * (the re-imported instance bootstraps fresh; sessions become resumable). */
 async function teardownRemote(reason: "reload" | "shutdown" = "shutdown"): Promise<void> {
-  if (reason === "reload" && _supervisor) _supervisor.stashForReload();
+  _isTornDown = true;
+  _bootstrapPromise = null;
+  if (_footer) {
+    _footer.dispose(reason === "shutdown");
+    _footer = null;
+  }
   stopWatcher();
   if (_heartbeat) { clearInterval(_heartbeat); _heartbeat = null; }
+  if (reason === "reload" && _supervisor) _supervisor.stashForReload();
   try { await _supervisor?.shutdownAll(); } catch { /* */ }
   _supervisor = null;
   try { _ws?.stop(); } catch { /* */ }
   _ws = null;
+  _tunnelStarting = false;
+  _ui = null;
   _pi = null;
   _ctx = null;
 }
 
 // ── Bootstrap ───────────────────────────────────────────────────────────────
 async function bootstrap(): Promise<void> {
-  if (_ws) return;
+  if (_ws || _isTornDown) return;
+  if (_bootstrapPromise) return _bootstrapPromise;
+  _isTornDown = false;
+  _bootstrapPromise = (async () => {
   const fb = await fbAsync();
   _fb = fb;
   // Browser login ONLY when a human is at the TUI. Headless runs (tests,
@@ -471,21 +498,23 @@ async function bootstrap(): Promise<void> {
   await publishCurrentPresence(true).catch((e) =>
     debug("[remote-code] initial presence publish failed:", (e as Error).message));
 
-  // Footer
-  const footerTimer = setInterval(renderFooter, 3000);
-  footerTimer.unref?.();
-  renderFooter();
+    // Footer
+    getFooter().startTimer(3000);
 
-  // Offline on exit
-  const shutdown = async (): Promise<void> => {
-    try {
-      await teardownRemote();
-      await publishCurrentPresence(false);
-    } catch { /* best effort */ }
-    process.exit(0);
-  };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+    // Offline on exit
+    const shutdown = async (): Promise<void> => {
+      try {
+        await teardownRemote("shutdown");
+        await publishCurrentPresence(false);
+      } catch { /* best effort */ }
+      process.exit(0);
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+  })().finally(() => {
+    _bootstrapPromise = null;
+  });
+  return _bootstrapPromise;
 }
 
 // ── Command handling ────────────────────────────────────────────────────────
@@ -899,29 +928,6 @@ function currentHostThinkingLevel(): string | undefined {
   }
 }
 
-// ── Image embedding ─────────────────────────────────────────────────────────
-function embedImages(text: string): string {
-  if (!text) return text;
-  try {
-    return text.replace(/!\[([^\]]*)\]\(([^)]+)(?:\s+"[^"]*")?\)/g, (match: string, alt: string, imgPath: string) => {
-      if (imgPath.startsWith("http") || imgPath.startsWith("data:")) return match;
-      const full = isAbsolute(imgPath) ? imgPath : resolvePath(process.cwd(), imgPath);
-      try {
-        if (!existsSync(full)) return match;
-        if (statSync(full).size > 500_000) return match;
-        const ext = full.split(".").pop()?.toLowerCase() ?? "";
-        const mime: Record<string, string> = {
-          png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
-          gif: "image/gif", webp: "image/webp", svg: "image/svg+xml",
-        };
-        const m = mime[ext];
-        if (!m) return match;
-        return `![${alt}](data:${m};base64,${readFileSync(full).toString("base64")})`;
-      } catch { return match; }
-    });
-  } catch { return text; }
-}
-
 // ── Bridge Pi events → WebSocket ────────────────────────────────────────────
 function bridge(pi: ExtensionAPI): void {
   if (_pi && _pi !== pi) {
@@ -1118,7 +1124,7 @@ function bridge(pi: ExtensionAPI): void {
           ? "run /pinest-auth to sign in, or configure the Firebase service account"
           : "run /pinest-auth to sign in";
         notify(`[pinest] OFFLINE: ${reason} — ${hint}`, "warning");
-        try { _ui?.setStatus?.("pinest:url", `offline — ${reason}`); } catch { /* */ }
+        try { getFooter().setOffline(reason); } catch { /* */ }
       });
   });
 
@@ -1128,13 +1134,11 @@ function bridge(pi: ExtensionAPI): void {
   // fresh (ws server, tunnel, registry reload). Spawned sessions were parked
   // idle in the registry by teardownRemote → resumable from the app.
   pi.on("session_shutdown", (event: any) => {
-    if (event?.reason === "reload") {
-      try {
-        const wired = (globalThis as any)[Symbol.for("remote-code.extension.wired")];
-        wired?.delete(pi);
-      } catch { /* */ }
-      void teardownRemote("reload");
-    }
+    try {
+      const wired = (globalThis as any)[Symbol.for("remote-code.extension.wired")];
+      wired?.delete(pi);
+    } catch { /* */ }
+    void teardownRemote(event?.reason === "quit" ? "shutdown" : "reload");
   });
 }
 
@@ -1155,26 +1159,6 @@ const remoteCode = (pi: ExtensionAPI): void => {
   const say = (ctx: unknown, content: string, details?: unknown): void => {
     try { _pi?.sendMessage?.({ customType: "pinest", content, details, display: true }); } catch { /* */ }
   };
-
-  // ── /pinest-reload — apply harness self-modification without a restart ────
-  // Queued by the file watcher, the reload_runtime tool, and the app.
-  pi.registerCommand("pinest-reload", {
-    description: "PiNest: reload extensions, skills, prompts, themes, and settings from disk",
-    handler: async (_args: string, ctx: ExtensionCommandContext) => {
-      captureUi(ctx);
-      try {
-        say(ctx, "[pinest] reloading extensions, skills, prompts, settings…");
-        await ctx.waitForIdle?.();
-        await ctx.reload();
-        // Terminal for this module instance — the re-imported instance takes over.
-      } catch (e) {
-        debug(`[remote-code] reload failed: ${(e as Error)?.message || e}`);
-        try {
-          _pi?.sendMessage?.({ customType: "pinest", content: `[pinest] reload failed: ${(e as Error)?.message || e}`, display: true });
-        } catch { /* ignore stale ctx/pi on reload failure */ }
-      }
-    },
-  });
 
   // ── reload_runtime — LLM-callable; lets the agent apply its own edits ──
   // Tools get ExtensionContext (no .reload()), so queue the command instead.
@@ -1200,74 +1184,6 @@ const remoteCode = (pi: ExtensionAPI): void => {
     },
   });
 
-  // ── /pinest-auth — open browser for Firebase sign-in ───────────────────────
-  pi.registerCommand("pinest-auth", {
-    description: "PiNest: open browser to re-authenticate with Firebase (Google sign-in)",
-    handler: async (_args: string, ctx: ExtensionCommandContext) => {
-      captureUi(ctx);
-      try {
-        ctx?.ui?.notify?.("[pinest] Opening browser for sign-in…", "info");
-        const fb = await fbAsync();
-        _fb = fb;
-        const { email } = await reauthenticateRemoteOwner({
-          currentUid: _ownerUid,
-          forceReLogin: (expectedUid) => fb.forceReLogin(expectedUid),
-          setOwner: (owner) => {
-            _ownerUid = owner.uid;
-            _ownerEmail = owner.email;
-          },
-          hasRemoteStack: () => !!_ws,
-          closeAuthenticatedClients: () => _ws?.closeAuthenticatedClients(),
-          publishPresence: () => publishCurrentPresence(true).catch((e) =>
-            debug("[remote-code] reauth presence publish failed:", (e as Error).message)),
-          bootstrap,
-        });
-        say(ctx, `[remote-code] signed in as ${email}`);
-      } catch (e) {
-        say(ctx, `[remote-code] auth failed: ${(e as Error)?.message || e}`);
-      }
-    },
-  });
-
-  // ── /pinest-spawn — start a headless session in a project dir ──────────────
-  pi.registerCommand("pinest-spawn", {
-    description: "PiNest: spawn a headless agent session. /pinest-spawn [dir] [model]",
-    handler: async (args: string, ctx: ExtensionCommandContext) => {
-      captureUi(ctx);
-      try {
-        const [dirArg, ...modelParts] = (args || "").trim().split(/\s+/);
-        let dir = dirArg;
-
-        // No arg → ask for a path via the SDK input dialog (or text fallback).
-        if (!dir) {
-          if (ctx?.ui?.input) {
-            dir = await ctx.ui.input("Project directory to spawn a session in", ctx?.cwd);
-            if (!dir) { ctx?.ui?.notify?.("[pinest] spawn cancelled", "info"); return; }
-          } else {
-            say(ctx, "[pinest] usage: /pinest-spawn <dir> [model]");
-            return;
-          }
-        }
-
-        // Resolve and validate.
-        const cwd = resolvePath(dir);
-        if (!existsSync(cwd) || !statSyncSafe(cwd)) {
-          ctx?.ui?.notify?.(`[pinest] not a directory: ${cwd}`, "error");
-          return;
-        }
-        const model = modelParts.join(" ") || DEFAULT_MODEL;
-
-        const id = randomUUID();
-        await _supervisor!.spawn({ sessionId: id, cwd, model });
-        broadcastState();
-        const name = deriveSessionName(cwd);
-        say(ctx, `[remote-code] spawned "${name}" in ${cwd}`);
-      } catch (e) {
-        say(ctx, `[remote-code] spawn failed: ${(e as Error)?.message || e}`);
-      }
-    },
-  });
-
   _hostCommandDeps = () => ({
     sessionId: _sessionId,
     sessions: _sessions,
@@ -1279,6 +1195,13 @@ const remoteCode = (pi: ExtensionAPI): void => {
     renderFooter,
     publishCurrentPresence: (online?: boolean) => publishCurrentPresence(online ?? true),
     setTunnelStarting: (starting: boolean) => { _tunnelStarting = starting; },
+    fbAsync,
+    getOwnerUid: () => _ownerUid,
+    setOwner: (owner: { uid: string; email: string }) => {
+      _ownerUid = owner.uid;
+      _ownerEmail = owner.email;
+    },
+    bootstrap,
   });
 
   registerHostCommands(pi, _hostCommandDeps);

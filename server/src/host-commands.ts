@@ -1,8 +1,18 @@
+import { randomUUID } from "node:crypto";
+import { existsSync, statSync } from "node:fs";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { loadConfig, saveConfig } from "./config.ts";
 import { PROVIDERS } from "./tunnel.ts";
 import { createAttachView } from "./attach-view.ts";
 import { createSessionsView, type SessionSummary } from "./sessions-view.ts";
+import { resolvePathInput, deriveSessionName } from "./logic.ts";
+import { DEFAULT_MODEL } from "./product-defaults.ts";
+import { reauthenticateRemoteOwner } from "./owner-runtime.ts";
+import debug from "./log.ts";
+
+function statSyncSafe(p: string): boolean {
+  try { return statSync(p).isDirectory(); } catch { return false; }
+}
 
 export interface HostCommandDeps {
   sessionId: string;
@@ -15,6 +25,10 @@ export interface HostCommandDeps {
   renderFooter: () => void;
   publishCurrentPresence: (online?: boolean) => Promise<void>;
   setTunnelStarting: (starting: boolean) => void;
+  fbAsync: () => Promise<any>;
+  getOwnerUid: () => string | null;
+  setOwner: (owner: { uid: string; email: string }) => void;
+  bootstrap: () => Promise<void>;
 }
 
 export async function showAttachOverlay(
@@ -261,6 +275,91 @@ export function registerHostCommands(pi: ExtensionAPI, deps: () => HostCommandDe
       } finally {
         setTunnelStarting(false);
         renderFooter();
+      }
+    },
+  });
+
+  // ── /pinest-reload — apply harness self-modification without a restart ────
+  pi.registerCommand("pinest-reload", {
+    description: "PiNest: reload extensions, skills, prompts, themes, and settings from disk",
+    handler: async (_args: string, ctx: ExtensionCommandContext) => {
+      const { say, captureUi } = deps();
+      captureUi(ctx);
+      try {
+        say(ctx, "[pinest] reloading extensions, skills, prompts, settings…");
+        await ctx.waitForIdle?.();
+        await ctx.reload();
+      } catch (e) {
+        const msg = `[pinest] reload failed: ${(e as Error)?.message || e}`;
+        debug(`[remote-code] ${msg}`);
+        say(ctx, msg);
+      }
+    },
+  });
+
+  // ── /pinest-auth — open browser for Firebase sign-in ───────────────────────
+  pi.registerCommand("pinest-auth", {
+    description: "PiNest: open browser to re-authenticate with Firebase (Google sign-in)",
+    handler: async (_args: string, ctx: ExtensionCommandContext) => {
+      const { captureUi, say, fbAsync, getOwnerUid, setOwner, ws, publishCurrentPresence, bootstrap } = deps();
+      captureUi(ctx);
+      try {
+        ctx?.ui?.notify?.("[pinest] Opening browser for sign-in…", "info");
+        const fb = await fbAsync();
+        const { email } = await reauthenticateRemoteOwner({
+          currentUid: getOwnerUid(),
+          forceReLogin: (expectedUid) => fb.forceReLogin(expectedUid),
+          setOwner,
+          hasRemoteStack: () => !!ws,
+          closeAuthenticatedClients: () => ws?.closeAuthenticatedClients(),
+          publishPresence: () => publishCurrentPresence(true).catch((e) =>
+            debug("[remote-code] reauth presence publish failed:", (e as Error).message)),
+          bootstrap,
+        });
+        say(ctx, `[remote-code] signed in as ${email}`);
+      } catch (e) {
+        say(ctx, `[remote-code] auth failed: ${(e as Error)?.message || e}`);
+      }
+    },
+  });
+
+  // ── /pinest-spawn — start a headless session in a project dir ──────────────
+  pi.registerCommand("pinest-spawn", {
+    description: "PiNest: spawn a headless agent session. /pinest-spawn [dir] [model]",
+    handler: async (args: string, ctx: ExtensionCommandContext) => {
+      const { supervisor, captureUi, broadcastState, say } = deps();
+      captureUi(ctx);
+      try {
+        const [dirArg, ...modelParts] = (args || "").trim().split(/\s+/);
+        let dir = dirArg;
+
+        if (!dir) {
+          if (ctx?.ui?.input) {
+            dir = await ctx.ui.input("Project directory to spawn a session in", ctx?.cwd);
+            if (!dir) {
+              ctx?.ui?.notify?.("[pinest] spawn cancelled", "info");
+              return;
+            }
+          } else {
+            say(ctx, "[pinest] usage: /pinest-spawn <dir> [model]");
+            return;
+          }
+        }
+
+        const cwd = resolvePathInput(dir);
+        if (!existsSync(cwd) || !statSyncSafe(cwd)) {
+          ctx?.ui?.notify?.(`[pinest] not a directory: ${cwd}`, "error");
+          return;
+        }
+        const model = modelParts.join(" ") || DEFAULT_MODEL;
+
+        const id = randomUUID();
+        await supervisor!.spawn({ sessionId: id, cwd, model });
+        broadcastState();
+        const name = deriveSessionName(cwd);
+        say(ctx, `[pinest] spawned "${name}" in ${cwd}`);
+      } catch (e) {
+        say(ctx, `[pinest] spawn failed: ${(e as Error)?.message || e}`);
       }
     },
   });
