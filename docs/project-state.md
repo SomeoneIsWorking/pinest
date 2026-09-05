@@ -177,6 +177,11 @@ every edit the agent made to its own source fired a reload, tearing down the
 instance mid-edit, and a half-written file left no working host to come back
 to. See I-021.
 
+Footer interval leak across reloads resolved (2026-09-05): `FooterManager`
+(`server/src/footer.ts`) now owns interval lifecycle, stops timers on
+teardown/session replacement, and intercepts stale `pinest:*` status calls to
+prevent rapid URL/local-only status flapping. See I-041.
+
 Evidence: unit tests (`watch.test.ts` — single report per burst naming the
 changed path, a recorded change queues NO `/pinest-reload`, zero fires
 without change, stop cancels, arm delay, missing dirs tolerated) PLUS a real

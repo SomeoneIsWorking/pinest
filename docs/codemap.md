@@ -8,6 +8,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Responsibility | Owner | Location |
 |---|---|---|
 | Extension bootstrap, concrete command-handler wiring, host-session bridging, TUI slash commands, reload wiring | `server` | `server/src/index.ts` |
+| TUI footer lifecycle, status rendering, interval management, and stale caller suppression | `server` | `server/src/footer.ts` (`FooterManager`) |
 | WS protocol contract (message/command unions) — keep in sync with the app fork | `server` | `server/src/protocol.ts` |
 | Untrusted client-command parsing, limits, target authorization, exhaustive dispatch, lifecycle-ID reservations | `server` | `server/src/command-validation.ts` |
 | Authenticated WS admission, token-expiry/resource policy, outbound backpressure, per-connect snapshot | `server` | `server/src/wsserver.ts` |

@@ -71,9 +71,10 @@ try {
   await until(() => saw(/"command":"prompt"/), 20000, "first prompt response");
 
   record("── step 2: touch the extension's own source — must NOT reload");
-  await new Promise((r) => setTimeout(r, 2500)); // past the watcher arm window
   // Baseline AFTER bootstrap: each resumed/spawned session loads the extension
-  // too, so "extension loaded" count is only meaningful as a delta.
+  // too, so wait until bootstrap restoration and WS server are fully up.
+  await until(() => saw(/WS server on/), 30000, "bootstrap complete");
+  await new Promise((r) => setTimeout(r, 2500)); // past the watcher arm window
   const baseline = loadCount();
   record(`baseline: factory ran ${baseline}x during bootstrap (host + resumed sessions)`);
   utimesSync(EXT, new Date(), new Date());
