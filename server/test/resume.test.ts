@@ -166,3 +166,53 @@ test("spawn excludes pinest from child session extensions", async () => {
   }
   await sup.shutdownAll();
 });
+
+test("sessions in same folder with same name have isolated files and history", async () => {
+  const sharedWorkdir = makeTempDir("rc-shared-folder-");
+  events = [];
+  const sup = new Supervisor("uid", makeCallbacks(), registry, { agentDir: AGENT_DIR });
+
+  // Spawn two sessions in the EXACT SAME folder with the SAME name
+  await sup.spawn({ sessionId: "s1", cwd: sharedWorkdir, name: "repo" });
+  await sup.spawn({ sessionId: "s2", cwd: sharedWorkdir, name: "repo" });
+
+  const row1 = registry.get("s1");
+  const row2 = registry.get("s2");
+  assert.ok(row1 && row2, "both sessions registered");
+  assert.notEqual(row1.id, row2.id, "session IDs are distinct");
+  assert.equal(row1.cwd, row2.cwd, "both are in the same folder");
+  assert.equal(row1.name, row2.name, "both share the same name");
+  assert.notEqual(row1.piSessionPath, row2.piSessionPath, "session files on disk are completely distinct");
+
+  // Add messages to s1 only
+  const live1 = sup.sessions.get("s1")!.session as any;
+  live1.sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: "msg for session 1" }] });
+  live1.sessionManager.appendMessage({ role: "assistant", content: [{ type: "text", text: "reply for session 1" }] });
+  live1.agent.state.messages.push(
+    { role: "user", content: [{ type: "text", text: "msg for session 1" }] },
+    { role: "assistant", content: [{ type: "text", text: "reply for session 1" }] },
+  );
+
+  // Add messages to s2 only
+  const live2 = sup.sessions.get("s2")!.session as any;
+  live2.sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: "msg for session 2" }] });
+  live2.sessionManager.appendMessage({ role: "assistant", content: [{ type: "text", text: "reply for session 2" }] });
+  live2.agent.state.messages.push(
+    { role: "user", content: [{ type: "text", text: "msg for session 2" }] },
+    { role: "assistant", content: [{ type: "text", text: "reply for session 2" }] },
+  );
+
+  // Check history isolation
+  const hist1 = await sup.getHistory(sup.sessions.get("s1")!);
+  const hist2 = await sup.getHistory(sup.sessions.get("s2")!);
+
+  assert.equal(hist1.length, 2);
+  assert.equal(hist1[0].text, "msg for session 1");
+  assert.equal(hist1[1].text, "reply for session 1");
+
+  assert.equal(hist2.length, 2);
+  assert.equal(hist2[0].text, "msg for session 2");
+  assert.equal(hist2[1].text, "reply for session 2");
+
+  await sup.shutdownAll();
+});
