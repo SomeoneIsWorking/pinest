@@ -8,7 +8,12 @@ export const changedSources = new Set<string>();
 let _watcher: SourceWatcher | null = null;
 
 export function watcherTargets(ctx?: ExtensionContext | null): { dirs: string[]; files: string[] } {
-  const cwd = ctx?.cwd ?? process.cwd();
+  let cwd = process.cwd();
+  try {
+    if (ctx?.cwd) cwd = ctx.cwd;
+  } catch {
+    // If ctx is stale, fall back to process.cwd()
+  }
   const agentDir = join(homedir(), ".pi", "agent");
   const extra = (process.env.RC_WATCH_DIRS || "")
     .split(":")

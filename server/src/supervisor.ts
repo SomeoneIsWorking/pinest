@@ -7,8 +7,16 @@
  * stays resumable), and resume() re-opens a session from its pi session file.
  */
 import debug from "./log.ts";
-import { createAgentSession, SessionManager, ModelRuntime, ModelRegistry } from "@earendil-works/pi-coding-agent";
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import {
+  createAgentSession,
+  SessionManager,
+  ModelRuntime,
+  ModelRegistry,
+  DefaultResourceLoader,
+  SettingsManager,
+  getAgentDir,
+} from "@earendil-works/pi-coding-agent";
+import type { AgentSession, ResourceLoader } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
@@ -18,6 +26,13 @@ import { createMessageSubmitter, type MessageSubmitter } from "./submit.ts";
 import { resolveThinkingLevel, reportThinkingLevel } from "./thinking.ts";
 import type { SessionRegistry } from "./registry.ts";
 import type { SessionSnapshot, SessionRow, UserImage } from "./protocol.ts";
+
+function isPinestExtension(path: string, resolvedPath?: string): boolean {
+  const normPath = (path || "").replace(/\\/g, "/").toLowerCase();
+  const normResolved = (resolvedPath || "").replace(/\\/g, "/").toLowerCase();
+  return normPath.includes("/pinest/") || normPath.endsWith("/pinest")
+    || normResolved.includes("/pinest/") || normResolved.endsWith("/pinest");
+}
 
 /** Where live sessions are parked across an extension re-import (hot reload).
  * globalThis survives the re-import; module-level state does not. */
@@ -115,6 +130,7 @@ function normaliseAdopted(id: string, s: LiveSession): string[] {
 }
 
 export class Supervisor {
+  static activeSpawning = false;
   ownerUid: string;
   callbacks: SupervisorCallbacks;
   registry: SessionRegistry | null;
@@ -182,10 +198,24 @@ export class Supervisor {
     this.agentDir = opts.agentDir;
   }
 
-  private createSessionOpts(cwd: string, sessionManager?: SessionManager): {
-    cwd: string; agentDir?: string; sessionManager?: SessionManager;
-  } {
-    const opts: { cwd: string; agentDir?: string; sessionManager?: SessionManager } = { cwd };
+  private async createSessionOpts(cwd: string, sessionManager?: SessionManager): Promise<{
+    cwd: string; agentDir?: string; sessionManager?: SessionManager; resourceLoader?: ResourceLoader;
+  }> {
+    const agentDir = this.agentDir ?? getAgentDir();
+    const settingsManager = SettingsManager.create(cwd, agentDir);
+    const resourceLoader = new DefaultResourceLoader({
+      cwd,
+      agentDir,
+      settingsManager,
+      extensionsOverride: (base) => ({
+        ...base,
+        extensions: base.extensions.filter((ext) => !isPinestExtension(ext.path, ext.resolvedPath)),
+      }),
+    });
+    await resourceLoader.reload();
+    const opts: {
+      cwd: string; agentDir?: string; sessionManager?: SessionManager; resourceLoader?: ResourceLoader;
+    } = { cwd, resourceLoader };
     if (this.agentDir) opts.agentDir = this.agentDir;
     if (sessionManager) opts.sessionManager = sessionManager;
     return opts;
@@ -215,7 +245,15 @@ export class Supervisor {
     let isDirectory = false;
     try { isDirectory = statSync(cwd).isDirectory(); } catch { /* checked below */ }
     if (!isDirectory) throw new Error(`workspace directory does not exist: ${cwd}`);
-    const { session } = await createAgentSession(this.createSessionOpts(cwd));
+    Supervisor.activeSpawning = true;
+    let session: AgentSession;
+    try {
+      const opts = await this.createSessionOpts(cwd);
+      const res = await createAgentSession(opts);
+      session = res.session;
+    } finally {
+      Supervisor.activeSpawning = false;
+    }
     const name = deriveSessionName(cwd, cmd.name);
     const s: LiveSession = {
       session, currentTurnId: null, unsub: null, cwd, status: "idle", name,
@@ -270,7 +308,15 @@ export class Supervisor {
     if (this.sessions.has(id)) throw new Error(`session ${id} is already running`);
     const cwd = cmd.cwd ?? process.cwd();
     const sessionManager = SessionManager.open(cmd.piSessionPath);
-    const { session } = await createAgentSession(this.createSessionOpts(cwd, sessionManager));
+    Supervisor.activeSpawning = true;
+    let session: AgentSession;
+    try {
+      const opts = await this.createSessionOpts(cwd, sessionManager);
+      const res = await createAgentSession(opts);
+      session = res.session;
+    } finally {
+      Supervisor.activeSpawning = false;
+    }
     const name = cmd.name || deriveSessionName(cwd);
     const s: LiveSession = {
       session, currentTurnId: null, unsub: null, cwd, status: "idle", name,
@@ -381,7 +427,15 @@ export class Supervisor {
           const id = cmd.sessionId as string;
           try { s.unsub?.(); } catch { /* */ }
           await this.stopSession(id, s);
-          const { session } = await createAgentSession(this.createSessionOpts(s.cwd));
+          Supervisor.activeSpawning = true;
+          let session: AgentSession;
+          try {
+            const opts = await this.createSessionOpts(s.cwd);
+            const res = await createAgentSession(opts);
+            session = res.session;
+          } finally {
+            Supervisor.activeSpawning = false;
+          }
           s.session = session;
           s.status = "idle";
           const newModel = (session as any).model;

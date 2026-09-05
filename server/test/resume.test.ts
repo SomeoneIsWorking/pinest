@@ -152,3 +152,17 @@ test("shutdownAll: live rows become idle (resumable), not closed", async () => {
   assert.equal(registry.get("r3").status, "idle");
   assert.ok(registry.get("r3").piSessionPath, "path kept for resume");
 });
+
+test("spawn excludes pinest from child session extensions", async () => {
+  const workdir = makeTempDir("rc-child-work-");
+  const sup = new Supervisor("uid", makeCallbacks(), registry, { agentDir: AGENT_DIR });
+  await sup.spawn({ sessionId: "child-ext-check", cwd: workdir });
+  const live = sup.sessions.get("child-ext-check");
+  assert.ok(live, "child session is live");
+  const runner = (live.session as any)._extensionRunner;
+  if (runner) {
+    const paths = runner.getExtensionPaths?.() ?? [];
+    assert.ok(!paths.some((p: string) => p.includes("pinest")), "pinest is not loaded in child session");
+  }
+  await sup.shutdownAll();
+});
