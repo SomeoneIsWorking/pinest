@@ -2,9 +2,9 @@
  * Pure, side-effect-free logic for remote-code. Extracted so it can be
  * unit-tested without Firebase or the Pi SDK. Used by supervisor.ts / index.ts.
  */
-import { readdirSync, existsSync, statSync } from "node:fs";
+import { readdirSync, existsSync, statSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve as resolvePath, dirname, join } from "node:path";
+import { resolve as resolvePath, isAbsolute, dirname, join } from "node:path";
 import type { HistoryItem, ModelInfo } from "./protocol.ts";
 
 /** Project a Pi SDK Model onto the wire shape (vision inferred from input). */
@@ -175,6 +175,29 @@ export function historyWithEmbeds(
     ...m,
     text: m.role === "assistant" ? embed?.(m.text) ?? m.text : m.text,
   }));
+}
+
+/** Embed markdown image links as base64 data URIs when local files exist and are within size limits. */
+export function embedImages(text: string): string {
+  if (!text) return text;
+  try {
+    return text.replace(/!\[([^\]]*)\]\(([^)]+)(?:\s+"[^"]*")?\)/g, (match: string, alt: string, imgPath: string) => {
+      if (imgPath.startsWith("http") || imgPath.startsWith("data:")) return match;
+      const full = isAbsolute(imgPath) ? imgPath : resolvePath(process.cwd(), imgPath);
+      try {
+        if (!existsSync(full)) return match;
+        if (statSync(full).size > 500_000) return match;
+        const ext = full.split(".").pop()?.toLowerCase() ?? "";
+        const mime: Record<string, string> = {
+          png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+          gif: "image/gif", webp: "image/webp", svg: "image/svg+xml",
+        };
+        const m = mime[ext];
+        if (!m) return match;
+        return `![${alt}](data:${m};base64,${readFileSync(full).toString("base64")})`;
+      } catch { return match; }
+    });
+  } catch { return text; }
 }
 
 /** Keep the newest images within the payload budget; older tool cards keep a

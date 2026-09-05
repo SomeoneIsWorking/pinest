@@ -51,7 +51,7 @@ class StructureCheckTests(unittest.TestCase):
         self.assertEqual(
             check_structure.LEGACY_LINE_LIMITS,
             {
-                Path("server/src/index.ts"): 1_290,
+                Path("server/src/index.ts"): 1_220,
             },
         )
 
