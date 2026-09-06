@@ -158,7 +158,14 @@ export function messagesToHistory(messages: unknown): HistoryItem[] {
           }
         }
       }
-      return { role: m.role as "user" | "assistant", text, tools, images };
+      const id = typeof m.id === "string" ? m.id : typeof m.entryId === "string" ? m.entryId : undefined;
+      return {
+        ...(id ? { id } : {}),
+        role: m.role as "user" | "assistant",
+        text,
+        tools,
+        images,
+      };
     })
     .filter((m) => m.text.length > 0 || m.tools.length > 0 || (m.images?.length ?? 0) > 0);
   return budgetHistoryImages(items);
@@ -175,6 +182,27 @@ export function historyWithEmbeds(
     ...m,
     text: m.role === "assistant" ? embed?.(m.text) ?? m.text : m.text,
   }));
+}
+
+/** Embed markdown image links as base64 data URIs when local files exist and are within size limits. */
+export function extractSessionMessages(sm: any): any[] {
+  if (!sm) return [];
+  if (typeof sm.buildContextEntries === "function") {
+    try {
+      const entries = sm.buildContextEntries() ?? [];
+      const msgs: any[] = [];
+      for (const entry of entries) {
+        if (entry.type === "message" && entry.message) {
+          msgs.push({ ...entry.message, id: entry.id });
+        } else if (entry.type === "custom_message") {
+          msgs.push({ role: "user", content: entry.content, id: entry.id });
+        }
+      }
+      if (msgs.length > 0) return msgs;
+    } catch { /* fall back to buildSessionContext */ }
+  }
+  const result = sm.buildSessionContext?.();
+  return result?.messages ?? [];
 }
 
 /** Embed markdown image links as base64 data URIs when local files exist and are within size limits. */

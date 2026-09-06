@@ -44,6 +44,7 @@ const SESSION_COMMAND_TYPES = new Set<ClientCommand["type"]>([
   "queue_delete",
   "session_tree_get",
   "session_tree_navigate",
+  "session_rewind",
 ]);
 
 export class CommandValidationError extends Error {}
@@ -310,6 +311,16 @@ export function parseClientCommand(input: unknown): ClientCommand {
         id: commandId(command),
       };
     }
+    case "session_rewind": {
+      rejectUnknownFields(command, ["type", "sessionId", "entryId", "id"]);
+      const entryId = requiredString(command, "entryId", { maxCharacters: 128, trim: true });
+      return {
+        type: "session_rewind",
+        sessionId: sessionId(command, false),
+        entryId,
+        id: commandId(command),
+      };
+    }
     case "model_set":
       rejectUnknownFields(command, ["type", "sessionId", "provider", "modelId"]);
       return {
@@ -427,7 +438,8 @@ export type SessionCommand = Extract<ClientCommand, {
     | "queue_clear"
     | "queue_delete"
     | "session_tree_get"
-    | "session_tree_navigate";
+    | "session_tree_navigate"
+    | "session_rewind";
 }>;
 
 export function isSessionCommand(command: ClientCommand): command is SessionCommand {

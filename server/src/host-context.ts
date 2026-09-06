@@ -16,6 +16,7 @@ interface HostSessionManager {
 export interface HostContext {
   compact?: () => unknown;
   newSession?: (options?: { withSession?: (ctx: HostContext) => Promise<void> | void }) => Promise<unknown> | unknown;
+  navigateTree?: (entryId: string, options?: { summarize?: boolean }) => Promise<unknown> | unknown;
   getContextUsage?: () => Record<string, unknown> | null;
   model?: HostModel | null;
   sessionManager?: HostSessionManager | null;
@@ -162,5 +163,61 @@ export class HostContextController {
         debug("[remote-code] auto-compact failed:", (error as Error).message);
       })
       .finally(() => { this.compacting = false; });
+  }
+
+  async navigateTree(
+    entryId: string,
+    options?: { summarize?: boolean; isRewind?: boolean; cmdId?: string },
+  ): Promise<void> {
+    const context = this.deps.getContext();
+    const anySession = (context as any)?.session ?? (context as any)?._session;
+    if (anySession?.isStreaming) {
+      try { await anySession.abort?.(); } catch { /* best effort abort */ }
+    }
+    let navResult: any;
+    const summarize = options?.summarize ?? false;
+    if (typeof (context as any)?.navigateTree === "function") {
+      navResult = await (context as any).navigateTree(entryId, { summarize });
+    } else if (typeof anySession?.navigateTree === "function") {
+      navResult = await anySession.navigateTree(entryId, { summarize });
+    } else {
+      throw new Error("Session tree navigation is not supported by the host session");
+    }
+
+    this.deps.clearPending();
+    const updatedHistory = await this.deps.getHistory();
+    this.deps.broadcast({
+      type: "history",
+      sessionId: this.deps.getSessionId(),
+      ...pageHistory(updatedHistory),
+      reset: true,
+    });
+
+    const sm = (context as any)?.sessionManager;
+    const tree = sm?.getTree?.() ?? [];
+    const leafId = sm?.getLeafId?.() ?? null;
+
+    if (options?.isRewind) {
+      this.deps.broadcast({
+        type: "session_rewound",
+        cmdId: options.cmdId,
+        sessionId: this.deps.getSessionId(),
+        entryId,
+        editorText: navResult?.editorText ?? "",
+      });
+    } else {
+      this.deps.broadcast({
+        type: "session_tree",
+        cmdId: options?.cmdId,
+        sessionId: this.deps.getSessionId(),
+        tree,
+        leafId,
+        editorText: navResult?.editorText,
+      });
+    }
+    this.deps.upsertSession(this.deps.getSessionId(), {
+      contextUsage: this.contextUsage(context),
+    });
+    this.deps.broadcastState();
   }
 }

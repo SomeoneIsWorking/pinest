@@ -20,7 +20,7 @@ import type { AgentSession, ResourceLoader } from "@earendil-works/pi-coding-age
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
-import { mapModel, deriveSessionName, messagesToHistory, pageHistory, historyWithEmbeds, extractUserText, extractText, popPending } from "./logic.ts";
+import { mapModel, deriveSessionName, messagesToHistory, pageHistory, historyWithEmbeds, extractSessionMessages, extractUserText, extractText, popPending } from "./logic.ts";
 import { StreamSegmenter } from "./stream.ts";
 import { createMessageSubmitter, type MessageSubmitter } from "./submit.ts";
 import { resolveThinkingLevel, reportThinkingLevel } from "./thinking.ts";
@@ -523,29 +523,61 @@ export class Supervisor {
           }
           break;
         }
-        case "session_tree_navigate": {
+        case "session_tree_navigate":
+        case "session_rewind": {
           try {
+            if ((s.session as any)?.isStreaming) {
+              try { await (s.session as any).abort?.(); } catch { /* */ }
+            }
+            let navResult: any;
+            const summarize = cmd.type === "session_tree_navigate" ? cmd.summarize : false;
             if (typeof (s.session as any).navigateTree === "function") {
-              await (s.session as any).navigateTree(cmd.entryId, {
-                summarize: cmd.summarize,
+              navResult = await (s.session as any).navigateTree(cmd.entryId, {
+                summarize,
               });
+              s.pending = [];
+              s.pendingSteering = [];
+              s.pendingImagesByText = {};
               this.syncQueue(cmd.sessionId, s);
               const sessionManager = (s.session as any).sessionManager;
               const tree = sessionManager?.getTree?.() ?? [];
               const leafId = sessionManager?.getLeafId?.() ?? null;
+
+              const h = await this.getHistory(s);
               this.callbacks.broadcast({
-                type: "session_tree",
-                cmdId: cmd.id,
+                type: "history",
                 sessionId: cmd.sessionId,
-                tree,
-                leafId,
+                ...pageHistory(h),
+                reset: true,
               });
+              this.callbacks.upsertSession(cmd.sessionId, {
+                contextUsage: (s.session as any)?.contextUsage?.() ?? null,
+              });
+
+              if (cmd.type === "session_rewind") {
+                this.callbacks.broadcast({
+                  type: "session_rewound",
+                  cmdId: cmd.id,
+                  sessionId: cmd.sessionId,
+                  entryId: cmd.entryId,
+                  editorText: navResult?.editorText ?? "",
+                });
+              } else {
+                this.callbacks.broadcast({
+                  type: "session_tree",
+                  cmdId: cmd.id,
+                  sessionId: cmd.sessionId,
+                  tree,
+                  leafId,
+                  editorText: navResult?.editorText,
+                });
+              }
             }
           } catch (e) {
             this.callbacks.broadcast({
               type: "error",
               sessionId: cmd.sessionId,
-              message: `Failed to navigate tree: ${(e as Error).message || e}`,
+              message: `Failed to ${cmd.type === "session_rewind" ? "rewind" : "navigate tree"}: ${(e as Error).message || e}`,
             });
           }
           break;
@@ -888,8 +920,10 @@ export class Supervisor {
 
   private async getHistory(s: LiveSession) {
     try {
-      const msgs = (s.session as any).messages ?? [];
-      return historyWithEmbeds(msgs, this.callbacks.embedImages);
+      const sm = (s.session as any)?.sessionManager;
+      const msgs = extractSessionMessages(sm);
+      const fallbackMsgs = msgs.length > 0 ? msgs : ((s.session as any).messages ?? []);
+      return historyWithEmbeds(fallbackMsgs, this.callbacks.embedImages);
     } catch (e) {
       debug("[remote-code] getHistory failed:", (e as Error).message);
       return [];
