@@ -15,6 +15,7 @@ import '../models/tool_call_view.dart';
 import 'app_toast.dart';
 import 'session_actions.dart';
 import 'tool_call_card.dart';
+import 'message_options_sheet.dart';
 
 export 'session_actions.dart';
 import 'tree_dialog.dart';
@@ -359,169 +360,6 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  void _showQueuedMessageOptions(
-    BuildContext context,
-    AgentService svc,
-    Session s,
-    String text,
-    List<PendingImage> pendingImgs,
-  ) {
-    final isSteering = s.pendingSteering.contains(text);
-
-    showModalBottomSheet<void>(
-      context: context,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.edit_outlined),
-              title: const Text('Edit message'),
-              subtitle: const Text('Remove from queue and copy back to editor'),
-              onTap: () {
-                Navigator.of(ctx).pop();
-                if (!svc.isMessageQueued(s.id, text)) {
-                  showAppToast(
-                    context,
-                    "Can't edit: message already processed",
-                    isError: true,
-                  );
-                  return;
-                }
-                svc.deleteQueuedMessage(s, text);
-                _pendingImagesByText.remove(text);
-                setState(() {
-                  _input.text = text == '[image]' ? '' : text;
-                  if (pendingImgs.isNotEmpty) {
-                    _attachedImages.addAll(pendingImgs);
-                  }
-                });
-                showAppToast(
-                  context,
-                  'Message removed from queue and copied to editor',
-                  duration: const Duration(seconds: 2),
-                );
-              },
-            ),
-            if (isSteering)
-              ListTile(
-                leading: const Icon(Icons.schedule, color: Colors.indigoAccent),
-                title: const Text('Change to Queued'),
-                subtitle: const Text('Run after agent finishes current turn'),
-                onTap: () {
-                  Navigator.of(ctx).pop();
-                  if (!svc.isMessageQueued(s.id, text)) {
-                    showAppToast(
-                      context,
-                      "Can't change: message already processed",
-                      isError: true,
-                    );
-                    return;
-                  }
-                  svc.deleteQueuedMessage(s, text);
-                  svc.sendMessage(
-                    s,
-                    text == '[image]' ? '' : text,
-                    images: pendingImgs,
-                    steer: false,
-                  );
-                  showAppToast(
-                    context,
-                    'Changed to Queued (will run after current turn)',
-                  );
-                },
-              )
-            else
-              ListTile(
-                leading: const Icon(Icons.alt_route, color: Colors.orangeAccent),
-                title: const Text('Change to Steered'),
-                subtitle: const Text('Deliver immediately to guide current turn'),
-                onTap: () {
-                  Navigator.of(ctx).pop();
-                  if (!svc.isMessageQueued(s.id, text)) {
-                    showAppToast(
-                      context,
-                      "Can't change: message already processed",
-                      isError: true,
-                    );
-                    return;
-                  }
-                  svc.deleteQueuedMessage(s, text);
-                  svc.sendMessage(
-                    s,
-                    text == '[image]' ? '' : text,
-                    images: pendingImgs,
-                    steer: true,
-                  );
-                  showAppToast(
-                    context,
-                    'Changed to Steered (guiding current turn)',
-                  );
-                },
-              ),
-            ListTile(
-              leading: const Icon(Icons.bolt, color: Colors.amber),
-              title: const Text('Interrupt agent & send now'),
-              subtitle: const Text('Stop current response and run this message immediately'),
-              onTap: () {
-                Navigator.of(ctx).pop();
-                if (!svc.isMessageQueued(s.id, text)) {
-                  showAppToast(
-                    context,
-                    "Can't interrupt: message already processed",
-                    isError: true,
-                  );
-                  return;
-                }
-                svc.deleteQueuedMessage(s, text);
-                svc.cancel(s);
-                Future.delayed(const Duration(milliseconds: 80), () {
-                  svc.sendMessage(
-                    s,
-                    text == '[image]' ? '' : text,
-                    images: pendingImgs,
-                    steer: false,
-                  );
-                });
-                showAppToast(
-                  context,
-                  'Interrupted agent and running message now',
-                  duration: const Duration(seconds: 2),
-                );
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.delete_outline, color: Colors.red),
-              title: const Text(
-                'Delete message',
-                style: TextStyle(color: Colors.red),
-              ),
-              subtitle: const Text('Remove from queue without editing'),
-              onTap: () {
-                Navigator.of(ctx).pop();
-                if (!svc.isMessageQueued(s.id, text)) {
-                  showAppToast(
-                    context,
-                    "Can't delete: message already processed",
-                    isError: true,
-                  );
-                  return;
-                }
-                svc.deleteQueuedMessage(s, text);
-                _pendingImagesByText.remove(text);
-                showAppToast(
-                  context,
-                  'Message deleted from queue',
-                  duration: const Duration(seconds: 2),
-                );
-              },
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   Widget _messageList(
     List<Map<String, dynamic>> history,
     String? streaming,
@@ -581,15 +419,42 @@ class _ChatScreenState extends State<ChatScreen> {
       final text = msg['text'] as String? ?? '';
       final tools = msg['tools'] as List?;
       if (role == 'user') {
+        final historyImgs = [
+          for (final img in (msg['images'] as List? ?? const []))
+            Map<String, dynamic>.from(img as Map),
+        ];
+        final entryId = msg['id'] as String?;
+        void openOptions() {
+          if (s == null) return;
+          showHistoryMessageOptions(
+            context: context,
+            svc: svc,
+            session: s,
+            text: text,
+            entryId: entryId,
+            historyImages: historyImgs,
+            onRewindRestore: (rewoundText, restoredImgs) {
+              if (mounted) {
+                setState(() {
+                  _input.text = rewoundText;
+                  if (restoredImgs.isNotEmpty) {
+                    _attachedImages.addAll(restoredImgs);
+                  }
+                });
+              }
+            },
+          );
+        }
+
         items.add(
           _bubble(
             text,
             Alignment.centerRight,
             Colors.blueGrey.withAlpha(40),
-            historyImages: [
-              for (final img in (msg['images'] as List? ?? const []))
-                Map<String, dynamic>.from(img as Map),
-            ],
+            historyImages: historyImgs,
+            onTap: (s == null) ? null : openOptions,
+            onSecondaryTap: (s == null) ? null : openOptions,
+            onLongPress: (s == null) ? null : openOptions,
           ),
         );
       } else {
@@ -680,34 +545,42 @@ class _ChatScreenState extends State<ChatScreen> {
           s?.pendingImagesByText[text] ?? const <PendingImage>[];
       final pendingImgs = localImgs.isNotEmpty ? localImgs : serverImgs;
       final isSteering = (s?.isWorking == true) && (s?.pendingSteering.any((st) => st.trim() == trimmedText) ?? false);
+      void openQueuedOptions() {
+        if (s == null) return;
+        showQueuedMessageOptions(
+          context: context,
+          svc: svc,
+          session: s,
+          text: text,
+          pendingImgs: pendingImgs,
+          onEdit: (editedText, restoredImgs) {
+            _pendingImagesByText.remove(text);
+            if (mounted) {
+              setState(() {
+                _input.text = editedText;
+                if (restoredImgs.isNotEmpty) {
+                  _attachedImages.addAll(restoredImgs);
+                }
+              });
+            }
+          },
+          onDelete: () {
+            _pendingImagesByText.remove(text);
+          },
+        );
+      }
+
       items.add(
-        GestureDetector(
-          onTap: (s == null)
-              ? null
-              : () => _showQueuedMessageOptions(
-                    context,
-                    svc,
-                    s,
-                    text,
-                    pendingImgs,
-                  ),
-          onLongPress: (s == null)
-              ? null
-              : () => _showQueuedMessageOptions(
-                    context,
-                    svc,
-                    s,
-                    text,
-                    pendingImgs,
-                  ),
-          child: _bubble(
-            text,
-            Alignment.centerRight,
-            Colors.orange.withAlpha(40),
-            queued: true,
-            steering: isSteering,
-            images: pendingImgs,
-          ),
+        _bubble(
+          text,
+          Alignment.centerRight,
+          Colors.orange.withAlpha(40),
+          queued: true,
+          steering: isSteering,
+          images: pendingImgs,
+          onTap: (s == null) ? null : openQueuedOptions,
+          onSecondaryTap: (s == null) ? null : openQueuedOptions,
+          onLongPress: (s == null) ? null : openQueuedOptions,
         ),
       );
     }
@@ -959,23 +832,25 @@ class _ChatScreenState extends State<ChatScreen> {
     /// History image attachments (base64 maps from the server) — the in-memory
     /// [images] form dies on refresh; this one survives it.
     List<Map<String, dynamic>> historyImages = const [],
+    VoidCallback? onTap,
+    VoidCallback? onSecondaryTap,
+    VoidCallback? onLongPress,
   }) {
-    return Align(
-      alignment: align,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 3),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          color: bg,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.82,
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          mainAxisSize: MainAxisSize.min,
-          children: [
+    final isClickable = onTap != null || onSecondaryTap != null || onLongPress != null;
+    Widget bubbleContent = Container(
+      margin: const EdgeInsets.symmetric(vertical: 3),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      constraints: BoxConstraints(
+        maxWidth: MediaQuery.of(context).size.width * 0.82,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        mainAxisSize: MainAxisSize.min,
+        children: [
             // A steer is NOT a follow-up: measured, pi delivers it at the end
             // of the assistant's current step, not at the end of the turn.
             // Labelling both "queued" made a working steer look ignored.
@@ -1062,7 +937,24 @@ class _ChatScreenState extends State<ChatScreen> {
                   : Text(text),
           ],
         ),
-      ),
+      );
+
+    if (isClickable) {
+      bubbleContent = MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: onTap,
+          onSecondaryTap: onSecondaryTap,
+          onLongPress: onLongPress,
+          child: bubbleContent,
+        ),
+      );
+    }
+
+    return Align(
+      alignment: align,
+      child: bubbleContent,
     );
   }
 

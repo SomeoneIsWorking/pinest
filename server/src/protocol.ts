@@ -29,6 +29,7 @@ export interface ToolEvent {
 }
 
 export interface HistoryItem {
+  id?: string;
   role: "user" | "assistant";
   text: string;
   /** Images the MESSAGE itself carried (user image attachments), base64. */
@@ -117,7 +118,8 @@ export type ServerMessage =
   | { type: "tool"; sessionId: string; tool: ToolEvent }
   | { type: "models"; sessionId?: string; models: ModelInfo[] }
   | { type: "paths"; cmdId?: string; paths: string[] }
-  | { type: "session_tree"; sessionId: string; tree: unknown[]; leafId: string | null; cmdId?: string }
+  | { type: "session_tree"; sessionId: string; tree: unknown[]; leafId: string | null; cmdId?: string; editorText?: string }
+  | { type: "session_rewound"; sessionId: string; entryId: string; editorText?: string; cmdId?: string }
   | { type: "path_check"; cmdId?: string; exists: boolean; isDirectory: boolean }
   | { type: "folder_created"; cmdId?: string; path?: string; error?: string };
 
@@ -152,6 +154,7 @@ export type ClientCommand =
   | { type: "queue_delete"; sessionId?: string; text: string }
   | { type: "session_tree_get"; sessionId?: string; id?: string }
   | { type: "session_tree_navigate"; sessionId?: string; entryId: string; summarize?: boolean; id?: string }
+  | { type: "session_rewind"; sessionId?: string; entryId: string; id?: string }
   | { type: "list_paths"; sessionId?: string; prefix?: string; id?: string }
   | { type: "path_check"; path: string; id?: string }
   | { type: "folder_create"; path: string; id?: string }

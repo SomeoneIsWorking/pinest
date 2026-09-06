@@ -50,9 +50,7 @@ class StructureCheckTests(unittest.TestCase):
     def test_legacy_limits_match_head_baselines(self) -> None:
         self.assertEqual(
             check_structure.LEGACY_LINE_LIMITS,
-            {
-                Path("server/src/index.ts"): 1_220,
-            },
+            {},
         )
 
     def test_oversized_source_reports_exact_path_count_and_limit(self) -> None:
@@ -77,18 +75,24 @@ class StructureCheckTests(unittest.TestCase):
         )
 
     def test_legacy_file_cannot_grow_past_its_baseline(self) -> None:
-        relative_path = Path("server/src/index.ts")
-        legacy_limit = check_structure.LEGACY_LINE_LIMITS[relative_path]
-        self.write_lines(relative_path.as_posix(), legacy_limit + 1)
+        relative_path = Path("server/src/mock_legacy.ts")
+        legacy_limit = 1_500
+        original_limits = dict(check_structure.LEGACY_LINE_LIMITS)
+        try:
+            check_structure.LEGACY_LINE_LIMITS[relative_path] = legacy_limit
+            self.write_lines(relative_path.as_posix(), legacy_limit + 1)
 
-        self.assertEqual(
-            check_structure.find_violations(self.root),
-            [
-                check_structure.Violation(
-                    relative_path, legacy_limit + 1, legacy_limit
-                )
-            ],
-        )
+            self.assertEqual(
+                check_structure.find_violations(self.root),
+                [
+                    check_structure.Violation(
+                        relative_path, legacy_limit + 1, legacy_limit
+                    )
+                ],
+            )
+        finally:
+            check_structure.LEGACY_LINE_LIMITS.clear()
+            check_structure.LEGACY_LINE_LIMITS.update(original_limits)
 
     def test_generated_vendor_build_and_scratch_sources_are_skipped(self) -> None:
         oversized = check_structure.DEFAULT_LINE_LIMIT + 1

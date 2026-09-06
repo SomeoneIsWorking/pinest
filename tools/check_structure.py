@@ -15,9 +15,7 @@ from typing import Iterable, Sequence
 
 
 DEFAULT_LINE_LIMIT = 1_200
-LEGACY_LINE_LIMITS = {
-    Path("server/src/index.ts"): 1_220,
-}
+LEGACY_LINE_LIMITS: dict[Path, int] = {}
 
 SOURCE_SUFFIXES = frozenset(
     {

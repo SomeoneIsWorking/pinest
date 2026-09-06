@@ -39,6 +39,9 @@ test("every ClientCommand discriminant has a validated route shape", () => {
     { type: "get_history", sessionId: "child-1", limit: 50, cursor: 0 },
     { type: "queue_clear", sessionId: "child-1" },
     { type: "queue_delete", sessionId: "child-1", text: "cancel this steer" },
+    { type: "session_tree_get", sessionId: "child-1", id: "tree-1" },
+    { type: "session_tree_navigate", sessionId: "child-1", entryId: "entry-1", summarize: false, id: "tree-2" },
+    { type: "session_rewind", sessionId: "child-1", entryId: "entry-1", id: "rewind-1" },
     // Compatibility with the current app: spawn_dialog is correlation context,
     // not a session selector for this global command.
     { type: "list_paths", sessionId: "spawn_dialog", prefix: "~/repo", id: "request-1" },
@@ -67,6 +70,9 @@ test("every ClientCommand discriminant has a validated route shape", () => {
     "get_history",
     "queue_clear",
     "queue_delete",
+    "session_tree_get",
+    "session_tree_navigate",
+    "session_rewind",
     "list_paths",
     "path_check",
     "folder_create",
@@ -186,6 +192,7 @@ test("session routing never falls through unknown or stale IDs to the host", () 
 test("only commands with session semantics enter the session router", () => {
   assert.equal(isSessionCommand(parseClientCommand({ type: "cancel" })), true);
   assert.equal(isSessionCommand(parseClientCommand({ type: "get_history" })), true);
+  assert.equal(isSessionCommand(parseClientCommand({ type: "session_rewind", entryId: "e1" })), true);
   assert.equal(
     isSessionCommand(parseClientCommand({ type: "list_paths", sessionId: "spawn_dialog" })),
     false,

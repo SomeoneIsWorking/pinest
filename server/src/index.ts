@@ -25,7 +25,7 @@ import type { FirebaseAuth } from "./auth.ts";
 import { WSServer } from "./wsserver.ts";
 import { Supervisor } from "./supervisor.ts";
 import { SessionRegistry } from "./registry.ts";
-import { mapModel, deriveSessionName, historyWithEmbeds, embedImages, listPaths, resolvePathInput, pageHistory } from "./logic.ts";
+import { mapModel, deriveSessionName, historyWithEmbeds, embedImages, extractSessionMessages, listPaths, resolvePathInput, pageHistory } from "./logic.ts";
 import { StreamSegmenter } from "./stream.ts";
 import { loadConfig, saveConfig } from "./config.ts";
 import { PROVIDERS } from "./tunnel.ts";
@@ -796,29 +796,19 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
       }
       break;
     }
-    case "session_tree_navigate": {
+    case "session_tree_navigate":
+    case "session_rewind": {
       try {
-        const session = (_ctx as any)?.session ?? (_ctx as any)?._session ?? (_pi as any)?.session;
-        if (typeof (_ctx as any)?.navigateTree === "function") {
-          await (_ctx as any).navigateTree(cmd.entryId, { summarize: cmd.summarize });
-        } else if (typeof session?.navigateTree === "function") {
-          await session.navigateTree(cmd.entryId, { summarize: cmd.summarize });
-        }
-        const sm = (_ctx as any)?.sessionManager ?? (_pi as any)?.sessionManager;
-        const tree = sm?.getTree?.() ?? [];
-        const leafId = sm?.getLeafId?.() ?? null;
-        broadcast({
-          type: "session_tree",
+        await hostContext.navigateTree(cmd.entryId, {
+          summarize: cmd.type === "session_tree_navigate" ? cmd.summarize : false,
+          isRewind: cmd.type === "session_rewind",
           cmdId: cmd.id,
-          sessionId: _sessionId,
-          tree,
-          leafId,
         });
       } catch (e) {
         broadcast({
           type: "error",
           sessionId: _sessionId,
-          message: `Failed to navigate tree: ${(e as Error).message || e}`,
+          message: `Failed to ${cmd.type === "session_rewind" ? "rewind" : "navigate tree"}: ${(e as Error).message || e}`,
         });
       }
       break;
@@ -871,8 +861,7 @@ async function getInteractiveHistory() {
   try {
     const sm = (_ctx as any)?.sessionManager;
     if (!sm) return [];
-    const result = sm.buildSessionContext?.();
-    const msgs = result?.messages ?? [];
+    const msgs = extractSessionMessages(sm);
     return historyWithEmbeds(msgs, embedImages);
   } catch (e) {
     debug("[remote-code] getHistory failed:", (e as Error).message);

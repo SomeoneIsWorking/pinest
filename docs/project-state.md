@@ -38,7 +38,9 @@ registry. Gap: a real host-crash, reconnect, and full client lifecycle drill rem
 ### S9 — Live remote interaction
 
 The clients implement streamed messages, steering and queued follow-ups, image paste, tool-call
-inspection, and remote stop. Gap: the complete operation set is not yet qualified end to end on every
+inspection, and remote stop. Web and mobile clients support interactive message options
+(edit/delete queued messages, copy text) and conversation rewind restoring prompt and images into the
+editor (I-042). Gap: the complete operation set is not yet qualified end to end on every
 shipping client.
 
 ### S10 — Context and compaction controls
