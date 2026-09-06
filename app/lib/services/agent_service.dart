@@ -540,6 +540,13 @@ class AgentService extends ChangeNotifier {
         }
         break;
       }
+      case 'session_rewound': {
+        final cmdId = msg['cmdId'] as String? ?? '';
+        if (cmdId.isNotEmpty) {
+          _requests.complete(cmdId, msg);
+        }
+        break;
+      }
       case 'error':
         _error = msg['message'] as String?;
         if (_error != null && _error!.isNotEmpty) {
@@ -720,6 +727,21 @@ class AgentService extends ChangeNotifier {
     'entryId': entryId,
     'summarize': summarize,
   });
+
+  Future<String?> rewindSession(
+    Session s,
+    String entryId,
+  ) => _requests.request<String?>(
+    send: (id) => _send({
+      'type': 'session_rewind',
+      'sessionId': s.id,
+      'entryId': entryId,
+      'id': id,
+    }),
+    decode: (message) => message['editorText'] as String?,
+    fallback: null,
+    timeout: const Duration(seconds: 10),
+  );
 
   /// Set the auto-compact threshold (context tokens) on the host.
   void setCompactThreshold(int tokens) =>
