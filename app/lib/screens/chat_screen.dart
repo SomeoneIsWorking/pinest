@@ -16,6 +16,7 @@ import 'app_toast.dart';
 import 'session_actions.dart';
 import 'tool_call_card.dart';
 import 'message_options_sheet.dart';
+import 'background_jobs_sheet.dart';
 import '../logic/time_format.dart';
 
 export 'session_actions.dart';
@@ -352,6 +353,7 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         if (MediaQuery.of(context).size.width >= wideBarMinWidth)
           _toolbar(context, svc, s, working, models),
+        BackgroundJobsBanner(svc: svc, sessionId: widget.sessionId),
         Expanded(child: _messageList(history, streaming, toolCalls, svc, s)),
         if (history.isEmpty && streaming == null)
           const Padding(

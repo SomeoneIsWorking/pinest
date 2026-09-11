@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:typed_data';
+import 'background_job.dart';
 
 /// A live session, as seen in the ephemeral state doc.
 /// Not a stored record — just a snapshot of what's running right now.
@@ -60,6 +61,9 @@ class Session {
   /// app reloads and device switches.
   final Map<String, List<PendingImage>> pendingImagesByText;
 
+  /// Background jobs associated with this session.
+  final List<BackgroundJob> jobs;
+
   Session({
     required this.id,
     required this.name,
@@ -80,6 +84,7 @@ class Session {
     this.pendingMessages = const [],
     this.pendingSteering = const [],
     this.pendingImagesByText = const {},
+    this.jobs = const [],
   });
 
   factory Session.fromLiveMap(Map<String, dynamic> map) =>
@@ -135,6 +140,13 @@ class Session {
           ? const []
           : (map['pendingSteering'] as List?)?.cast<String>() ?? const [],
       pendingImagesByText: pendingImagesByText,
+      jobs: registry
+          ? const []
+          : (map['jobs'] as List?)
+                  ?.whereType<Map>()
+                  .map((j) => BackgroundJob.fromJson(Map<String, dynamic>.from(j)))
+                  .toList() ??
+              const [],
     );
   }
 
