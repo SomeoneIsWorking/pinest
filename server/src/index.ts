@@ -25,7 +25,8 @@ import type { FirebaseAuth } from "./auth.ts";
 import { WSServer } from "./wsserver.ts";
 import { Supervisor } from "./supervisor.ts";
 import { SessionRegistry } from "./registry.ts";
-import { mapModel, deriveSessionName, historyWithEmbeds, embedImages, extractSessionMessages, listPaths, resolvePathInput, pageHistory } from "./logic.ts";
+import { mapModel, deriveSessionName, historyWithEmbeds, embedImages, extractSessionMessages, extractToolResult, listPaths, resolvePathInput, pageHistory } from "./logic.ts";
+import { createDefaultBackgroundManager, registerBashIntegration, type BackgroundProcessManager } from "./bash-tool.ts";
 import { StreamSegmenter } from "./stream.ts";
 import { loadConfig, saveConfig } from "./config.ts";
 import { PROVIDERS } from "./tunnel.ts";
@@ -98,6 +99,7 @@ let _heartbeat: NodeJS.Timeout | null = null;
 let _footer: FooterManager | null = null;
 let _isTornDown = false;
 let _bootstrapPromise: Promise<void> | null = null;
+let _bgManager: BackgroundProcessManager | null = null;
 
 // True between a run's first message_start and its agent_end. Used by the
 // submission queue to know a submission actually started a run.
@@ -303,6 +305,8 @@ async function teardownRemote(reason: "reload" | "shutdown" = "shutdown"): Promi
   }
   stopWatcher();
   if (_heartbeat) { clearInterval(_heartbeat); _heartbeat = null; }
+  _bgManager?.dispose();
+  _bgManager = null;
   if (reason === "reload" && _supervisor) _supervisor.stashForReload();
   try { await _supervisor?.shutdownAll(); } catch { /* */ }
   _supervisor = null;
@@ -356,6 +360,7 @@ async function bootstrap(): Promise<void> {
         // quiet in non-interactive / test modes
       }
     },
+    bgManager: _bgManager ?? undefined,
   }, _registry);
 
   // Re-attach runs parked by the previous instance FIRST — before the WS
@@ -1033,19 +1038,10 @@ function bridge(pi: ExtensionAPI): void {
   });
 
   pi.on("tool_execution_end", (event: any) => {
-    let resultText = "";
-    const resultImages: Array<{ data: string; mimeType: string }> = [];
-    if (event.result?.content) {
-      for (const p of event.result.content) {
-        if (p.type === "text") resultText += p.text;
-        if (p.type === "image" && p.data) resultImages.push({ data: p.data, mimeType: p.mimeType });
-      }
-    } else if (typeof event.result === "string") {
-      resultText = event.result;
-    }
+    const r = extractToolResult(event.result);
     broadcast({ type: "tool", sessionId: _sessionId, tool: {
       callId: event.toolCallId, name: event.toolName || "?",
-      result: resultText.slice(0, 10000), images: resultImages.slice(0, 5),
+      result: r.text, images: r.images,
       isError: event.isError, running: false,
     }});
   });
@@ -1149,29 +1145,13 @@ const remoteCode = (pi: ExtensionAPI): void => {
     try { _pi?.sendMessage?.({ customType: "pinest", content, details, display: true }); } catch { /* */ }
   };
 
-  // ── reload_runtime — LLM-callable; lets the agent apply its own edits ──
-  // Tools get ExtensionContext (no .reload()), so queue the command instead.
-  pi.registerTool({
-    name: "reload_runtime",
-    label: "Reload Runtime",
-    description:
-      "Reload your own runtime: extensions, skills, prompts, themes, and settings. " +
-      "Edits to extension code under .pi/extensions, this extension's source, or " +
-      "PI_AGENT_DIR/settings.json do NOT apply until you call this — nothing reloads " +
-      "on file change. Reloading re-imports (and briefly tears down) this extension, " +
-      "so call it when your edits are COMPLETE, not between them. If a watched file " +
-      "has a syntax error the reload is refused and the file is named.",
-    parameters: Type.Object({}),
-    async execute(_toolCallId: string, _params: unknown, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
-      if (ctx) _ctx = ctx;
-      const pending = pendingReloadState();
-      const { message } = queueReload(_pi, ctx ?? _ctx);
-      return {
-        content: [{ type: "text", text: message }],
-        details: { pending },
-      };
-    },
+  _bgManager = createDefaultBackgroundManager({
+    getPi: () => _pi,
+    getSessionId: () => _sessionId,
+    getSupervisor: () => _supervisor,
+    broadcast,
   });
+  registerBashIntegration(pi, { bgManager: _bgManager });
 
   _hostCommandDeps = () => ({
     sessionId: _sessionId,

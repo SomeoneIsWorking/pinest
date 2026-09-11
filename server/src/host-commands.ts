@@ -8,6 +8,8 @@ import { createSessionsView, type SessionSummary } from "./sessions-view.ts";
 import { resolvePathInput, deriveSessionName } from "./logic.ts";
 import { DEFAULT_MODEL } from "./product-defaults.ts";
 import { reauthenticateRemoteOwner } from "./owner-runtime.ts";
+import { pendingReloadState, queueReload } from "./reload-manager.ts";
+import { Type } from "typebox";
 import debug from "./log.ts";
 
 function statSyncSafe(p: string): boolean {
@@ -361,6 +363,28 @@ export function registerHostCommands(pi: ExtensionAPI, deps: () => HostCommandDe
       } catch (e) {
         say(ctx, `[pinest] spawn failed: ${(e as Error)?.message || e}`);
       }
+    },
+  });
+
+  // ── reload_runtime — LLM-callable; lets the agent apply its own edits ──
+  pi.registerTool({
+    name: "reload_runtime",
+    label: "Reload Runtime",
+    description:
+      "Reload your own runtime: extensions, skills, prompts, themes, and settings. " +
+      "Edits to extension code under .pi/extensions, this extension's source, or " +
+      "PI_AGENT_DIR/settings.json do NOT apply until you call this — nothing reloads " +
+      "on file change. Reloading re-imports (and briefly tears down) this extension, " +
+      "so call it when your edits are COMPLETE, not between them. If a watched file " +
+      "has a syntax error the reload is refused and the file is named.",
+    parameters: Type.Object({}),
+    async execute(_toolCallId: string, _params: unknown, _signal: any, _onUpdate: unknown, ctx: any) {
+      const pending = pendingReloadState();
+      const { message } = queueReload(pi, ctx);
+      return {
+        content: [{ type: "text", text: message }],
+        details: { pending },
+      };
     },
   });
 }

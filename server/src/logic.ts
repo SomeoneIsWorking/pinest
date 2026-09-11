@@ -158,6 +158,13 @@ export function messagesToHistory(messages: unknown): HistoryItem[] {
           }
         }
       }
+      const rawTs = m.timestamp;
+      const parsedTs = typeof rawTs === "number"
+        ? rawTs
+        : typeof rawTs === "string"
+          ? Date.parse(rawTs)
+          : undefined;
+      const validTs = (parsedTs !== undefined && !isNaN(parsedTs)) ? parsedTs : undefined;
       const id = typeof m.id === "string" ? m.id : typeof m.entryId === "string" ? m.entryId : undefined;
       return {
         ...(id ? { id } : {}),
@@ -165,6 +172,7 @@ export function messagesToHistory(messages: unknown): HistoryItem[] {
         text,
         tools,
         images,
+        ...(validTs !== undefined ? { timestamp: validTs } : {}),
       };
     })
     .filter((m) => m.text.length > 0 || m.tools.length > 0 || (m.images?.length ?? 0) > 0);
@@ -192,10 +200,17 @@ export function extractSessionMessages(sm: any): any[] {
       const entries = sm.buildContextEntries() ?? [];
       const msgs: any[] = [];
       for (const entry of entries) {
+        const rawTs = entry.message?.timestamp ?? entry.timestamp;
+        const parsedTs = typeof rawTs === "number"
+          ? rawTs
+          : typeof rawTs === "string"
+            ? Date.parse(rawTs)
+            : undefined;
+        const validTs = (parsedTs !== undefined && !isNaN(parsedTs)) ? parsedTs : undefined;
         if (entry.type === "message" && entry.message) {
-          msgs.push({ ...entry.message, id: entry.id });
+          msgs.push({ ...entry.message, id: entry.id, ...(validTs !== undefined ? { timestamp: validTs } : {}) });
         } else if (entry.type === "custom_message") {
-          msgs.push({ role: "user", content: entry.content, id: entry.id });
+          msgs.push({ role: "user", content: entry.content, id: entry.id, ...(validTs !== undefined ? { timestamp: validTs } : {}) });
         }
       }
       if (msgs.length > 0) return msgs;
@@ -203,6 +218,21 @@ export function extractSessionMessages(sm: any): any[] {
   }
   const result = sm.buildSessionContext?.();
   return result?.messages ?? [];
+}
+
+/** Extract text and images from a tool execution result. */
+export function extractToolResult(result: any): { text: string; images: Array<{ data: string; mimeType: string }> } {
+  let text = "";
+  const images: Array<{ data: string; mimeType: string }> = [];
+  if (result?.content && Array.isArray(result.content)) {
+    for (const p of result.content) {
+      if (p?.type === "text" && typeof p.text === "string") text += p.text;
+      if (p?.type === "image" && p.data) images.push({ data: p.data, mimeType: p.mimeType });
+    }
+  } else if (typeof result === "string") {
+    text = result;
+  }
+  return { text: text.slice(0, 10_000), images: images.slice(0, 5) };
 }
 
 /** Embed markdown image links as base64 data URIs when local files exist and are within size limits. */
