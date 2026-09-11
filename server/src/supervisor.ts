@@ -20,7 +20,8 @@ import type { AgentSession, ResourceLoader } from "@earendil-works/pi-coding-age
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
-import { mapModel, deriveSessionName, messagesToHistory, pageHistory, historyWithEmbeds, extractSessionMessages, extractUserText, extractText, popPending } from "./logic.ts";
+import { mapModel, deriveSessionName, messagesToHistory, pageHistory, historyWithEmbeds, extractSessionMessages, extractUserText, extractText, extractToolResult, popPending } from "./logic.ts";
+import { createAutoBackgroundBashTool, type BackgroundProcessManager } from "./bash-tool.ts";
 import { StreamSegmenter } from "./stream.ts";
 import { createMessageSubmitter, type MessageSubmitter } from "./submit.ts";
 import { resolveThinkingLevel, reportThinkingLevel } from "./thinking.ts";
@@ -74,6 +75,8 @@ export interface SupervisorCallbacks {
   compactAtTokens?: () => number | undefined;
   /** Notify the host pi terminal UI (e.g. background task finished or error). */
   notifyHost?: (message: string, type?: "info" | "warning" | "error") => void;
+  /** Background process manager for auto-backgrounding commands. */
+  bgManager?: BackgroundProcessManager;
 }
 
 interface LiveSession {
@@ -214,10 +217,13 @@ export class Supervisor {
     });
     await resourceLoader.reload();
     const opts: {
-      cwd: string; agentDir?: string; sessionManager?: SessionManager; resourceLoader?: ResourceLoader;
+      cwd: string; agentDir?: string; sessionManager?: SessionManager; resourceLoader?: ResourceLoader; customTools?: any[];
     } = { cwd, resourceLoader };
     if (this.agentDir) opts.agentDir = this.agentDir;
     if (sessionManager) opts.sessionManager = sessionManager;
+    if (this.callbacks.bgManager) {
+      opts.customTools = [createAutoBackgroundBashTool({ bgManager: this.callbacks.bgManager, cwd })];
+    }
     return opts;
   }
 
@@ -727,16 +733,10 @@ export class Supervisor {
           callId: event.toolCallId, name: event.toolName || "?", args: event.args, running: true,
         }});
       } else if (event.type === "tool_execution_end") {
-        let resultText = ""; const images: Array<{ data: string; mimeType: string }> = [];
-        if (event.result?.content) {
-          for (const p of event.result.content) {
-            if (p.type === "text") resultText += p.text;
-            if (p.type === "image" && p.data) images.push({ data: p.data, mimeType: p.mimeType });
-          }
-        }
+        const r = extractToolResult(event.result);
         this.callbacks.broadcast({ type: "tool", sessionId: id, tool: {
           callId: event.toolCallId, name: event.toolName || "?",
-          result: resultText.slice(0, 10000), images: images.slice(0, 5),
+          result: r.text, images: r.images,
           isError: event.isError, running: false,
         }});
       } else if (event.type === "agent_end") {
