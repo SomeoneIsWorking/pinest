@@ -47,6 +47,10 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Cross-platform application identity (`com.barishamil.pinest`) + native Firebase clients | `app` | `app/android/app/`, `app/ios/Runner.xcodeproj/`, `app/linux/CMakeLists.txt`, `app/macos/Runner/`, `app/lib/firebase_options.dart` |
 | Live Firestore owner-boundary verification | `tools` | `tools/verify_firestore_rules.py`, `tools/test_verify_firestore_rules.py` |
 | Generated Flutter platform runner projects and packaging shells | `app` | `app/android/`, `app/ios/`, `app/linux/`, `app/macos/`, `app/windows/` |
+| Auto-backgrounding bash tool & task lifecycle manager | `server` | `server/src/bash-tool.ts` (`BackgroundProcessManager`, `createAutoBackgroundBashTool`) |
+| First-party background tools (`bg_run`, `bg_status`, `bg_logs`, `bg_kill`) & job commands | `server` | `server/src/background-tools.ts` (`createBackgroundTools`, `registerBackgroundTools`, `handleJobCommand`) |
+| Background jobs models, banner, and management sheet | `app` | `app/lib/models/background_job.dart`, `app/lib/screens/background_jobs_sheet.dart` (`BackgroundJobsBanner`, `_JobsListSheet`) |
+| Relative/exact time formatting for messages & jobs | `app` | `app/lib/logic/time_format.dart` (`formatRelativeTime`, `formatExactTime`) |
 | Android release package/certificate identity (single authority) | `app` | `app/release-identity.json`, consumed by `app/tools/verify_apk.py` and the attested release workflow |
 | Android APK build/sign/attest/publish trust boundaries and workflow-policy tests | repo root | `.github/workflows/apk.yml`, `app/tools/install_flutter.py`, `app/tools/verify_apk.py`, `app/tools/test_apk_workflow_policy.py` → immutable per-commit GitHub releases |
 | APK download location (one definition, used by the settings screen) | `app` | `app/lib/services/apk_release.dart` |

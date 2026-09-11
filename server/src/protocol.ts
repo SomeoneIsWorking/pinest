@@ -98,6 +98,24 @@ export interface SessionSnapshot {
   pendingImagesByText?: Record<string, UserImage[]>;
   /** True while a compact() is in flight for this session. */
   isCompacting?: boolean;
+  /** Background jobs running or recently finished for this session. */
+  jobs?: BackgroundJobSummary[];
+}
+
+export interface BackgroundJobSummary {
+  id: string;
+  command: string;
+  name?: string;
+  cwd: string;
+  sessionId?: string;
+  pid?: number;
+  startedAt: number;
+  finishedAt?: number;
+  status: "running" | "completed" | "failed" | "cancelled";
+  exitCode?: number | null;
+  error?: string;
+  logPath: string;
+  totalBytes: number;
 }
 
 export type ServerMessage =
@@ -110,6 +128,9 @@ export type ServerMessage =
   | { type: "state"; online: boolean; hostname: string; homePath?: string; activeSessionId?: string | null; sessions: SessionSnapshot[]; registry: SessionRow[]; tunnelUrl?: string | null; tunnelProvider?: string | null }
   | { type: "session_list"; sessions: SessionRow[] }
   | { type: "session_deleted"; sessionId: string; deleted: boolean }
+  | { type: "jobs_list"; sessionId?: string; jobs: BackgroundJobSummary[] }
+  | { type: "job_update"; sessionId?: string; job: BackgroundJobSummary }
+  | { type: "job_logs"; jobId: string; logs: string; truncated: boolean; path: string; cmdId?: string }
   | { type: "history"; sessionId: string; history: HistoryItem[];
       /** Page the client asked for / the server decided to push. */
       cursor: number; hasMore: boolean; mode: "replace" | "older";
@@ -161,4 +182,7 @@ export type ClientCommand =
   | { type: "path_check"; path: string; id?: string }
   | { type: "folder_create"; path: string; id?: string }
   | { type: "set_compact_threshold"; thresholdTokens: number }
+  | { type: "jobs_list"; sessionId?: string }
+  | { type: "job_kill"; jobId: string; sessionId?: string }
+  | { type: "job_logs"; jobId: string; maxBytes?: number; tail?: boolean; id?: string }
   | { type: "reload" };

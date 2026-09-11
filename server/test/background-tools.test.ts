@@ -1,0 +1,107 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { BackgroundProcessManager } from "../src/bash-tool.ts";
+import { createBackgroundTools, handleJobCommand } from "../src/background-tools.ts";
+import type { ServerMessage } from "../src/protocol.ts";
+
+test("createBackgroundTools: provides bg_run, bg_status, bg_logs, bg_kill and aliases", () => {
+  const manager = new BackgroundProcessManager();
+  const tools = createBackgroundTools(manager);
+  const names = tools.map((t) => t.name);
+
+  assert.ok(names.includes("bg_run"), "has bg_run");
+  assert.ok(names.includes("job_start"), "has job_start alias");
+  assert.ok(names.includes("bg_status"), "has bg_status");
+  assert.ok(names.includes("job_status"), "has job_status alias");
+  assert.ok(names.includes("bg_logs"), "has bg_logs");
+  assert.ok(names.includes("job_logs"), "has job_logs alias");
+  assert.ok(names.includes("bg_kill"), "has bg_kill");
+  assert.ok(names.includes("job_kill"), "has job_kill alias");
+
+  manager.dispose();
+});
+
+test("bg_run: launches a background command and returns receipt", async () => {
+  const manager = new BackgroundProcessManager();
+  const tools = createBackgroundTools(manager);
+  const bgRun = tools.find((t) => t.name === "bg_run")!;
+
+  const result = await bgRun.execute("call_1", {
+    command: "echo 'hello from bg'",
+    name: "test echo",
+  });
+
+  assert.ok(result.content[0].text.includes("Started background task: test echo"));
+  assert.ok(result.details?.task?.id, "has task ID");
+  const taskId = result.details.task.id;
+
+  // Wait briefly for the echo to complete
+  await new Promise((r) => setTimeout(r, 100));
+
+  const statusTool = tools.find((t) => t.name === "bg_status")!;
+  const statusRes = await statusTool.execute("call_2", { taskId });
+  assert.ok(statusRes.content[0].text.includes("completed"));
+
+  const logsTool = tools.find((t) => t.name === "bg_logs")!;
+  const logsRes = await logsTool.execute("call_3", { taskId });
+  assert.ok(logsRes.content[0].text.includes("hello from bg"));
+
+  manager.dispose();
+});
+
+test("bg_kill: terminates a running task", async () => {
+  const manager = new BackgroundProcessManager();
+  const tools = createBackgroundTools(manager);
+  const bgRun = tools.find((t) => t.name === "bg_run")!;
+
+  const result = await bgRun.execute("call_1", {
+    command: "sleep 60",
+    name: "long sleep",
+  });
+  const taskId = result.details.task.id;
+
+  const killTool = tools.find((t) => t.name === "bg_kill")!;
+  const killRes = await killTool.execute("call_2", { taskId });
+  assert.ok(killRes.content[0].text.includes("Stopped background task"));
+
+  const statusTool = tools.find((t) => t.name === "bg_status")!;
+  const statusRes = await statusTool.execute("call_3", { taskId });
+  assert.ok(statusRes.content[0].text.includes("cancelled"));
+
+  manager.dispose();
+});
+
+test("handleJobCommand: handles jobs_list, job_logs, and job_kill", async () => {
+  const manager = new BackgroundProcessManager();
+  const messages: ServerMessage[] = [];
+  const broadcast = (msg: ServerMessage) => { messages.push(msg); };
+
+  const task = manager.startTask("echo 'handled via job command'", { name: "test cmd" });
+  await new Promise((r) => setTimeout(r, 100));
+
+  // 1. jobs_list
+  handleJobCommand({ type: "jobs_list" }, manager, broadcast);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].type, "jobs_list");
+  if (messages[0].type === "jobs_list") {
+    assert.equal(messages[0].jobs.length, 1);
+    assert.equal(messages[0].jobs[0].id, task.id);
+  }
+
+  // 2. job_logs
+  handleJobCommand({ type: "job_logs", jobId: task.id }, manager, broadcast);
+  assert.equal(messages.length, 2);
+  assert.equal(messages[1].type, "job_logs");
+  if (messages[1].type === "job_logs") {
+    assert.ok(messages[1].logs.includes("handled via job command"));
+  }
+
+  // 3. job_kill
+  const sleepTask = manager.startTask("sleep 60");
+  handleJobCommand({ type: "job_kill", jobId: sleepTask.id }, manager, broadcast);
+  assert.equal(messages.length, 3);
+  assert.equal(messages[2].type, "notice");
+  assert.equal(sleepTask.status, "cancelled");
+
+  manager.dispose();
+});

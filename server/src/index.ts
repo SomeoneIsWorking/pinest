@@ -26,7 +26,8 @@ import { WSServer } from "./wsserver.ts";
 import { Supervisor } from "./supervisor.ts";
 import { SessionRegistry } from "./registry.ts";
 import { mapModel, deriveSessionName, historyWithEmbeds, embedImages, extractSessionMessages, extractToolResult, listPaths, resolvePathInput, pageHistory } from "./logic.ts";
-import { createDefaultBackgroundManager, registerBashIntegration, type BackgroundProcessManager } from "./bash-tool.ts";
+import { createDefaultBackgroundManager, registerBashIntegration, toJobSummary, type BackgroundProcessManager } from "./bash-tool.ts";
+import { registerBackgroundTools, handleJobCommand } from "./background-tools.ts";
 import { StreamSegmenter } from "./stream.ts";
 import { loadConfig, saveConfig } from "./config.ts";
 import { PROVIDERS } from "./tunnel.ts";
@@ -226,7 +227,11 @@ function removeSession(id: string): void {
 }
 
 function getSessionSnapshots(): SessionSnapshot[] {
-  return [..._sessions.values()];
+  const mgr = _supervisor?.bgManager ?? _bgManager;
+  return [..._sessions.values()].map((s) => ({
+    ...s,
+    jobs: mgr ? mgr.listTasks(s.id).map(toJobSummary) : [],
+  }));
 }
 
 // ── Broadcasting ────────────────────────────────────────────────────────────
@@ -538,6 +543,9 @@ async function handleCommand(input: unknown): Promise<void> {
       sessionList: () => broadcast({ type: "session_list", sessions: mergedRegistryRows() }),
       resume: resumeSession, rename: renameSession, select: selectSession, delete: deleteSession,
       pathCheck: checkPath, folderCreate: createFolder, compactThreshold: setCompactThreshold,
+      jobsList: (cmd) => handleJobCommand(cmd, _supervisor?.bgManager ?? _bgManager, broadcast),
+      jobKill: (cmd) => handleJobCommand(cmd, _supervisor?.bgManager ?? _bgManager, broadcast),
+      jobLogs: (cmd) => handleJobCommand(cmd, _supervisor?.bgManager ?? _bgManager, broadcast),
       reload: () => {
         const r = queueReload(_pi, _ctx);
         if (!r.ok) broadcast({ type: "error", message: `[remote-code] ${r.message}` });
@@ -1159,6 +1167,7 @@ const remoteCode = (pi: ExtensionAPI): void => {
     broadcast,
   });
   registerBashIntegration(pi, { bgManager: _bgManager });
+  registerBackgroundTools(pi, _bgManager, _sessionId);
 
   _hostCommandDeps = () => ({
     sessionId: _sessionId,
