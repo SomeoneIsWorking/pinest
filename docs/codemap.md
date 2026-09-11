@@ -25,6 +25,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Repeatable evidence drills (explicit-reload contract, mid-run handoff, steer delivery timing, compact/clear observability) | `drills` | `drills/` (`*.mjs`) |
 | Reload safety gate (syntax-check watched sources; broken edits don't tear down the host) | `server` | `firstSyntaxError` in `server/src/index.ts` |
 | Host-session compact/clear/auto-compact policy and client-visible rewrite aftermath | `server` | `server/src/host-context.ts` (`HostContextController`) |
+| Auto-background bash tool execution (>30s) and background process management | `server` | `server/src/bash-tool.ts` (`BackgroundProcessManager`, `createAutoBackgroundBashTool`) |
 | Pure helpers (history shaping, model mapping, path completion) | `server` | `server/src/logic.ts` |
 | Thinking-level resolution ("Default" = omit reasoning override, opencode semantics) | `server` | `server/src/thinking.ts` |
 | Config (tunnel provider prefs; paths, env escapes) | `server` | `server/src/config.ts` |
@@ -38,6 +39,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Historical/live tool payload normalization for UI cards | `app` | `app/lib/models/tool_call_view.dart` (`ToolCallView`) |
 | Durable-session UI + reconnect | `app` | `app/lib/screens/main_shell.dart` (`SessionHistorySheet`), `app/lib/services/agent_service.dart` |
 | Message options bottom sheet (queued edit/delete + history rewind/copy) | `app` | `app/lib/screens/message_options_sheet.dart` |
+| Relative and exact timestamp formatting for chat messages | `app` | `app/lib/logic/time_format.dart` (`formatRelativeTime`, `formatExactTime`) |
 | AgentService per-session transient state + eviction | `app` | `app/lib/services/session_cache.dart` (`SessionCache`) |
 | Correlated WebSocket request/reply lifecycle | `app` | `app/lib/services/correlated_request_broker.dart` (`CorrelatedRequestBroker`) |
 | Web client local deploy + Hosting-site routing | `app` | `app/deploy.sh`, `app/firebase.json`, `app/.firebaserc` (`pinest` canonical; `pinest-app` legacy redirect) |

@@ -32,6 +32,8 @@ export interface HistoryItem {
   id?: string;
   role: "user" | "assistant";
   text: string;
+  /** Timestamp in epoch milliseconds when the message was recorded. */
+  timestamp?: number;
   /** Images the MESSAGE itself carried (user image attachments), base64. */
   images?: Array<{ data: string; mimeType: string }>;
   /** Item images dropped by the payload budget — reported, never silent. */

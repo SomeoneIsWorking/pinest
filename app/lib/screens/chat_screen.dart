@@ -16,6 +16,7 @@ import 'app_toast.dart';
 import 'session_actions.dart';
 import 'tool_call_card.dart';
 import 'message_options_sheet.dart';
+import '../logic/time_format.dart';
 
 export 'session_actions.dart';
 import 'tree_dialog.dart';
@@ -418,6 +419,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final role = msg['role'] as String? ?? '';
       final text = msg['text'] as String? ?? '';
       final tools = msg['tools'] as List?;
+      final timestamp = (msg['timestamp'] as num?)?.toInt() ?? (msg['ts'] as num?)?.toInt();
       if (role == 'user') {
         final historyImgs = [
           for (final img in (msg['images'] as List? ?? const []))
@@ -452,6 +454,7 @@ class _ChatScreenState extends State<ChatScreen> {
             Alignment.centerRight,
             Colors.blueGrey.withAlpha(40),
             historyImages: historyImgs,
+            timestamp: timestamp,
             onTap: (s == null) ? null : openOptions,
             onSecondaryTap: (s == null) ? null : openOptions,
             onLongPress: (s == null) ? null : openOptions,
@@ -472,7 +475,7 @@ class _ChatScreenState extends State<ChatScreen> {
           }
         }
         if (text.isNotEmpty) {
-          items.add(_bubble(text, Alignment.centerLeft, null, markdown: true));
+          items.add(_bubble(text, Alignment.centerLeft, null, markdown: true, timestamp: timestamp));
         }
       }
     }
@@ -827,6 +830,7 @@ class _ChatScreenState extends State<ChatScreen> {
     bool markdown = false,
     bool queued = false,
     bool steering = false,
+    int? timestamp,
     List<PendingImage> images = const [],
 
     /// History image attachments (base64 maps from the server) — the in-memory
@@ -935,6 +939,20 @@ class _ChatScreenState extends State<ChatScreen> {
               markdown
                   ? MarkdownBody(data: text, shrinkWrap: true, selectable: true)
                   : Text(text),
+            if (timestamp != null && timestamp > 0)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Tooltip(
+                  message: formatExactTime(timestamp),
+                  child: Text(
+                    formatRelativeTime(timestamp),
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: Theme.of(context).colorScheme.onSurface.withAlpha(102),
+                    ),
+                  ),
+                ),
+              ),
           ],
         ),
       );

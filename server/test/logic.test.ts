@@ -11,6 +11,7 @@ import {
   extractText,
   extractUserText,
   messagesToHistory,
+  extractSessionMessages,
   listPaths,
 } from "../src/logic.ts";
 
@@ -271,3 +272,42 @@ test("messagesToHistory carries tool-result images, and reports what it drops", 
   const last = big[big.length - 1]!.tools[0]!;
   assert.equal(last.images?.length, 1, "the most recent image must be the one kept");
 });
+
+test("messagesToHistory: preserves numeric and ISO string timestamps", () => {
+  const msgs = [
+    { role: "user", content: "hello", timestamp: 1789111760000 },
+    { role: "assistant", content: [{ type: "text", text: "hi" }], timestamp: "2026-09-11T07:29:20.000Z" },
+  ];
+  const history = messagesToHistory(msgs);
+  assert.equal(history.length, 2);
+  assert.equal(history[0].timestamp, 1789111760000);
+  assert.equal(history[1].timestamp, Date.parse("2026-09-11T07:29:20.000Z"));
+});
+
+test("extractSessionMessages: pulls timestamps from message or entry", () => {
+  const fakeSessionManager = {
+    buildContextEntries: () => [
+      {
+        type: "message",
+        id: "msg1",
+        timestamp: "2026-09-11T07:00:00.000Z",
+        message: { role: "user", content: "ping", timestamp: 1789110000000 },
+      },
+      {
+        type: "custom_message",
+        id: "cmsg1",
+        timestamp: "2026-09-11T07:05:00.000Z",
+        content: "notice text",
+      },
+    ],
+  };
+  const extracted = extractSessionMessages(fakeSessionManager);
+  assert.equal(extracted.length, 2);
+  assert.equal(extracted[0].timestamp, 1789110000000);
+  assert.equal(extracted[1].timestamp, Date.parse("2026-09-11T07:05:00.000Z"));
+
+  const history = messagesToHistory(extracted);
+  assert.equal(history[0].timestamp, 1789110000000);
+  assert.equal(history[1].timestamp, Date.parse("2026-09-11T07:05:00.000Z"));
+});
+
