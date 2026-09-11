@@ -88,6 +88,18 @@ export function queueReload(
       debug(`[remote-code] ${msg}`);
       return { ok: false, message: msg };
     }
+    if (ctx && "reload" in ctx && typeof (ctx as any).reload === "function") {
+      try {
+        void (ctx as any).reload();
+        return {
+          ok: true,
+          message: "reloaded runtime directly",
+        };
+      } catch (err) {
+        debug("[remote-code] ctx.reload failed:", err);
+      }
+    }
+
     pi.sendUserMessage("/pinest-reload", {
       deliverAs: "followUp",
       expandPromptTemplates: true,
