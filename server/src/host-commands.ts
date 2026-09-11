@@ -289,7 +289,6 @@ export function registerHostCommands(pi: ExtensionAPI, deps: () => HostCommandDe
       captureUi(ctx);
       try {
         say(ctx, "[pinest] reloading extensions, skills, prompts, settings…");
-        await ctx.waitForIdle?.();
         await ctx.reload();
       } catch (e) {
         const msg = `[pinest] reload failed: ${(e as Error)?.message || e}`;
