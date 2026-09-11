@@ -48,6 +48,9 @@ test("every ClientCommand discriminant has a validated route shape", () => {
     { type: "path_check", path: "~/repo", id: "request-2" },
     { type: "folder_create", path: "~/repo/new-folder", id: "request-3" },
     { type: "set_compact_threshold", thresholdTokens: 400_000 },
+    { type: "jobs_list" },
+    { type: "job_kill", jobId: "bg_123" },
+    { type: "job_logs", jobId: "bg_123" },
     { type: "reload" },
   ];
 
@@ -77,6 +80,9 @@ test("every ClientCommand discriminant has a validated route shape", () => {
     "path_check",
     "folder_create",
     "set_compact_threshold",
+    "jobs_list",
+    "job_kill",
+    "job_logs",
     "reload",
   ]);
 

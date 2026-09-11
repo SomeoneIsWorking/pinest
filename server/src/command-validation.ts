@@ -417,6 +417,28 @@ export function parseClientCommand(input: unknown): ClientCommand {
           max: Number.MAX_SAFE_INTEGER,
         })!,
       };
+    case "jobs_list":
+      rejectUnknownFields(command, ["type", "sessionId"]);
+      return {
+        type: "jobs_list",
+        sessionId: sessionId(command, false),
+      };
+    case "job_kill":
+      rejectUnknownFields(command, ["type", "jobId", "sessionId"]);
+      return {
+        type: "job_kill",
+        jobId: requiredString(command, "jobId", { maxCharacters: 128, trim: true }),
+        sessionId: sessionId(command, false),
+      };
+    case "job_logs":
+      rejectUnknownFields(command, ["type", "jobId", "maxBytes", "tail", "id"]);
+      return {
+        type: "job_logs",
+        jobId: requiredString(command, "jobId", { maxCharacters: 128, trim: true }),
+        maxBytes: boundedInteger(command, "maxBytes", { min: 1, max: 10 * 1024 * 1024 }),
+        tail: optionalBoolean(command, "tail"),
+        id: commandId(command),
+      };
     case "reload":
       rejectUnknownFields(command, ["type"]);
       return { type: "reload" };
@@ -572,6 +594,9 @@ export interface ClientCommandDispatcherDeps {
   pathCheck: (command: Extract<ClientCommand, { type: "path_check" }>) => void | Promise<void>;
   folderCreate: (command: Extract<ClientCommand, { type: "folder_create" }>) => void | Promise<void>;
   compactThreshold: (command: Extract<ClientCommand, { type: "set_compact_threshold" }>) => void | Promise<void>;
+  jobsList?: (command: Extract<ClientCommand, { type: "jobs_list" }>) => void | Promise<void>;
+  jobKill?: (command: Extract<ClientCommand, { type: "job_kill" }>) => void | Promise<void>;
+  jobLogs?: (command: Extract<ClientCommand, { type: "job_logs" }>) => void | Promise<void>;
   reload: () => void | Promise<void>;
 }
 
@@ -622,6 +647,9 @@ export async function dispatchClientCommand(
     case "path_check": return void await deps.pathCheck(command);
     case "folder_create": return void await deps.folderCreate(command);
     case "set_compact_threshold": return void await deps.compactThreshold(command);
+    case "jobs_list": return void await deps.jobsList?.(command);
+    case "job_kill": return void await deps.jobKill?.(command);
+    case "job_logs": return void await deps.jobLogs?.(command);
     case "reload": return void await deps.reload();
     case "list_paths": return void await deps.host(command);
     case "ping": return;

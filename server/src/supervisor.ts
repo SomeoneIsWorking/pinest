@@ -22,6 +22,7 @@ import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { mapModel, deriveSessionName, messagesToHistory, pageHistory, historyWithEmbeds, extractSessionMessages, extractUserText, extractText, extractToolResult, popPending } from "./logic.ts";
 import { createAutoBackgroundBashTool, type BackgroundProcessManager } from "./bash-tool.ts";
+import { createBackgroundTools } from "./background-tools.ts";
 import { StreamSegmenter } from "./stream.ts";
 import { createMessageSubmitter, type MessageSubmitter } from "./submit.ts";
 import { resolveThinkingLevel, reportThinkingLevel } from "./thinking.ts";
@@ -201,6 +202,10 @@ export class Supervisor {
     this.agentDir = opts.agentDir;
   }
 
+  get bgManager(): BackgroundProcessManager | undefined {
+    return this.callbacks.bgManager;
+  }
+
   private async createSessionOpts(cwd: string, sessionManager?: SessionManager): Promise<{
     cwd: string; agentDir?: string; sessionManager?: SessionManager; resourceLoader?: ResourceLoader;
   }> {
@@ -222,7 +227,10 @@ export class Supervisor {
     if (this.agentDir) opts.agentDir = this.agentDir;
     if (sessionManager) opts.sessionManager = sessionManager;
     if (this.callbacks.bgManager) {
-      opts.customTools = [createAutoBackgroundBashTool({ bgManager: this.callbacks.bgManager, cwd })];
+      opts.customTools = [
+        createAutoBackgroundBashTool({ bgManager: this.callbacks.bgManager, cwd }),
+        ...createBackgroundTools(this.callbacks.bgManager, sessionManager?.getSessionId?.()),
+      ];
     }
     return opts;
   }

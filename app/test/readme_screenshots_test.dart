@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:pinest_app/main.dart';
 import 'package:pinest_app/models/chat_item.dart';
 import 'package:pinest_app/models/session.dart';
+import 'package:pinest_app/models/background_job.dart';
 import 'package:pinest_app/screens/login_screen.dart';
 import 'package:pinest_app/screens/main_shell.dart';
 import 'package:pinest_app/services/agent_service.dart';
@@ -351,6 +352,18 @@ class _MockAgentService extends ChangeNotifier implements AgentService {
 
   @override
   List<Map<String, dynamic>> toolCallsFor(String id) => const [];
+
+  @override
+  List<BackgroundJob> jobsFor(String? sessionId) => const [];
+
+  @override
+  void requestJobs({String? sessionId}) {}
+
+  @override
+  void killJob(String jobId, {String? sessionId}) {}
+
+  @override
+  Future<Map<String, dynamic>?> fetchJobLogs(String jobId, {int? maxBytes, bool? tail}) async => null;
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);

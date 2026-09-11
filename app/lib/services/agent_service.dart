@@ -12,6 +12,7 @@ import '../models/session.dart';
 export '../models/session.dart' show PendingImage;
 import '../models/chat_item.dart';
 import '../models/session_tree.dart';
+import '../models/background_job.dart';
 
 bool _itemsMatch(Map<String, dynamic> a, Map<String, dynamic> b) {
   if (a['role'] != b['role']) return false;
@@ -547,6 +548,39 @@ class AgentService extends ChangeNotifier {
         }
         break;
       }
+      case 'jobs_list': {
+        final sid = msg['sessionId'] as String? ?? '';
+        final rawJobs = (msg['jobs'] as List? ?? const []);
+        _jobs[sid] = rawJobs
+            .whereType<Map>()
+            .map((j) => BackgroundJob.fromJson(Map<String, dynamic>.from(j)))
+            .toList();
+        notifyListeners();
+        break;
+      }
+      case 'job_update': {
+        final sid = msg['sessionId'] as String? ?? '';
+        final rawJob = msg['job'] as Map?;
+        if (rawJob != null) {
+          final job = BackgroundJob.fromJson(Map<String, dynamic>.from(rawJob));
+          final list = _jobs.putIfAbsent(sid, () => []);
+          final idx = list.indexWhere((j) => j.id == job.id);
+          if (idx >= 0) {
+            list[idx] = job;
+          } else {
+            list.insert(0, job);
+          }
+          notifyListeners();
+        }
+        break;
+      }
+      case 'job_logs': {
+        final cmdId = msg['cmdId'] as String? ?? '';
+        if (cmdId.isNotEmpty) {
+          _requests.complete(cmdId, msg);
+        }
+        break;
+      }
       case 'error':
         _error = msg['message'] as String?;
         if (_error != null && _error!.isNotEmpty) {
@@ -758,6 +792,45 @@ class AgentService extends ChangeNotifier {
     'deleteHistory': deleteHistory,
   });
   void requestSessionList() => _send({'type': 'session_list'});
+  final Map<String, List<BackgroundJob>> _jobs = {};
+
+  List<BackgroundJob> jobsFor(String? sessionId) {
+    if (sessionId != null) {
+      final sessionJobs = _sessions.where((s) => s.id == sessionId).firstOrNull?.jobs;
+      if (sessionJobs != null && sessionJobs.isNotEmpty) return sessionJobs;
+      return _jobs[sessionId] ?? const [];
+    }
+    return _jobs.values.expand((x) => x).toList();
+  }
+
+  void requestJobs({String? sessionId}) => _send({
+    'type': 'jobs_list',
+    ...?sessionId == null ? null : {'sessionId': sessionId},
+  });
+
+  void killJob(String jobId, {String? sessionId}) => _send({
+    'type': 'job_kill',
+    'jobId': jobId,
+    ...?sessionId == null ? null : {'sessionId': sessionId},
+  });
+
+  Future<Map<String, dynamic>?> fetchJobLogs(
+    String jobId, {
+    int? maxBytes,
+    bool? tail,
+  }) => _requests.request<Map<String, dynamic>?>(
+    send: (id) => _send({
+      'type': 'job_logs',
+      'jobId': jobId,
+      ...?maxBytes == null ? null : {'maxBytes': maxBytes},
+      ...?tail == null ? null : {'tail': tail},
+      'id': id,
+    }),
+    decode: (message) => message,
+    fallback: null,
+    timeout: const Duration(seconds: 10),
+  );
+
   void reload() => _send({'type': 'reload'});
 
   Future<List<String>> listPaths(String prefix) =>

@@ -503,6 +503,19 @@ confidentiality boundary because there is no application-level device key or
 end-to-end encryption (I-038). This is intentionally not an absolute-security
 claim.
 
+### S8 — Native background job execution and UI management (I-043, I-044)
+
+Status: `verified`
+
+PiNest natively owns background process execution, auto-backgrounding, and UI management, retiring third-party background task plugins (`npm:pi-background-tasks`):
+1. Commands executed via `bash` exceeding 30 seconds automatically detach into the background, return an immediate receipt, and stream outputs to task log files without blocking the agent turn.
+2. Native tools `bg_run`, `bg_status`, `bg_logs`, and `bg_kill` (along with aliases `job_start`, `job_status`, `job_logs`, `job_kill`) are registered on host and supervisor-spawned sessions.
+3. Terminal notifications (`<background-task-notification>`) wake up follow-up agent turns with command status, exit codes, and output summaries.
+4. The Flutter client provides real-time visibility and control via `BackgroundJobsBanner` in the chat screen and `_JobsListSheet` with live log inspection and job termination.
+5. Message history and bubbles carry relative timestamps (`3m ago`) and full datetime tooltips.
+
+Evidence: Node suite (`npm test`) passes with 290 tests and 0 failures; `npm run typecheck` and `tools/check_structure.py` pass clean; Flutter test suite passes with 68/68 tests; Flutter analyze clean (0 issues).
+
 ## Current focus
 
 S7 is the current focus: design host/device-key binding and application-level tunnel encryption for

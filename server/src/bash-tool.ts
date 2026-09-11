@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, appendFileSync, existsSync } from "node:fs";
+import { mkdirSync, appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join, isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
@@ -13,12 +13,14 @@ import {
   type ToolDefinition,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import type { BackgroundJobSummary } from "./protocol.ts";
 import debug from "./log.ts";
 
 export const DEFAULT_AUTO_BG_TIMEOUT_MS = 30_000;
 
 export interface BackgroundTask {
   id: string;
+  name?: string;
   command: string;
   cwd: string;
   sessionId?: string;
@@ -32,6 +34,27 @@ export interface BackgroundTask {
   outputChunks: string[];
   totalBytes: number;
   child?: ChildProcess;
+  isAgent?: boolean;
+  notifyOnCompletion?: boolean;
+  triggerOnCompletion?: boolean;
+}
+
+export function toJobSummary(task: BackgroundTask): BackgroundJobSummary {
+  return {
+    id: task.id,
+    name: task.name,
+    command: task.command,
+    cwd: task.cwd,
+    sessionId: task.sessionId,
+    pid: task.pid,
+    startedAt: task.startedAt,
+    finishedAt: task.finishedAt,
+    status: task.status,
+    exitCode: task.exitCode,
+    error: task.error,
+    logPath: task.logPath,
+    totalBytes: task.totalBytes,
+  };
 }
 
 export function escapeXml(str: string): string {
@@ -124,35 +147,230 @@ export function formatTaskNotificationXml(task: BackgroundTask): string {
 export interface BackgroundProcessManagerOptions {
   autoBgTimeoutMs?: number;
   notifyCompletion?: (task: BackgroundTask) => void | Promise<void>;
+  onTaskUpdate?: (task: BackgroundTask) => void;
 }
 
 export class BackgroundProcessManager {
   private readonly tasks = new Map<string, BackgroundTask>();
   private readonly autoBgTimeoutMs: number;
   private readonly notifyCompletion?: (task: BackgroundTask) => void | Promise<void>;
+  public onTaskUpdate?: (task: BackgroundTask) => void;
 
   constructor(options: BackgroundProcessManagerOptions = {}) {
     this.autoBgTimeoutMs = options.autoBgTimeoutMs ??
       (Number(process.env.PI_AUTO_BG_TIMEOUT_MS) || DEFAULT_AUTO_BG_TIMEOUT_MS);
     this.notifyCompletion = options.notifyCompletion;
+    this.onTaskUpdate = options.onTaskUpdate;
   }
 
   getTask(id: string): BackgroundTask | undefined {
     return this.tasks.get(id);
   }
 
-  listTasks(): BackgroundTask[] {
-    return Array.from(this.tasks.values());
+  resolveTask(idOrPrefix: string): BackgroundTask {
+    const trimmed = idOrPrefix.trim();
+    if (!trimmed) throw new Error("Task ID cannot be empty");
+    const exact = this.tasks.get(trimmed);
+    if (exact) return exact;
+    const matches = Array.from(this.tasks.values()).filter((t) => t.id.startsWith(trimmed));
+    if (matches.length === 1 && matches[0]) return matches[0];
+    if (matches.length === 0) throw new Error(`Background task not found: ${trimmed}`);
+    throw new Error(`Ambiguous task ID prefix "${trimmed}" matches ${matches.length} tasks`);
   }
 
-  killTask(id: string): boolean {
-    const task = this.tasks.get(id);
+  listTasks(sessionId?: string): BackgroundTask[] {
+    const all = Array.from(this.tasks.values());
+    if (!sessionId) return all;
+    return all.filter((t) => !t.sessionId || t.sessionId === sessionId);
+  }
+
+  killTask(idOrPrefix: string): boolean {
+    let task: BackgroundTask | undefined;
+    try {
+      task = this.resolveTask(idOrPrefix);
+    } catch {
+      return false;
+    }
     if (!task || task.status !== "running") return false;
     task.status = "cancelled";
     task.error = "Cancelled by user";
     task.finishedAt = Date.now();
     killProcessTree(task.pid);
+    this.onTaskUpdate?.(task);
     return true;
+  }
+
+  getTaskLogs(
+    taskOrId: string | BackgroundTask,
+    options: { maxBytes?: number; tail?: boolean } = {}
+  ): { text: string; truncated: boolean; bytesRead: number; path: string } {
+    const task = typeof taskOrId === "string" ? this.resolveTask(taskOrId) : taskOrId;
+    const maxBytes = options.maxBytes && options.maxBytes > 0 ? options.maxBytes : DEFAULT_MAX_BYTES;
+    const tail = options.tail ?? true;
+
+    let content = "";
+    if (existsSync(task.logPath)) {
+      try {
+        content = readFileSync(task.logPath, "utf8");
+      } catch {
+        content = task.outputChunks.join("");
+      }
+    } else {
+      content = task.outputChunks.join("");
+    }
+
+    const buf = Buffer.from(content, "utf8");
+    if (buf.length <= maxBytes) {
+      return {
+        text: content,
+        truncated: false,
+        bytesRead: buf.length,
+        path: task.logPath,
+      };
+    }
+
+    const truncated = true;
+    if (tail) {
+      const slice = buf.subarray(buf.length - maxBytes);
+      return {
+        text: slice.toString("utf8"),
+        truncated,
+        bytesRead: slice.length,
+        path: task.logPath,
+      };
+    } else {
+      const slice = buf.subarray(0, maxBytes);
+      return {
+        text: slice.toString("utf8"),
+        truncated,
+        bytesRead: slice.length,
+        path: task.logPath,
+      };
+    }
+  }
+
+  startTask(
+    command: string,
+    options: {
+      name?: string;
+      cwd?: string;
+      sessionId?: string;
+      timeoutSeconds?: number;
+      isAgent?: boolean;
+      notifyOnCompletion?: boolean;
+      triggerOnCompletion?: boolean;
+    } = {}
+  ): BackgroundTask {
+    const cwd = options.cwd || process.cwd();
+    const taskId = `bg_${randomBytes(4).toString("hex")}`;
+    const logDir = resolveLogDirectory(cwd);
+    const logPath = join(logDir, `${taskId}.log`);
+
+    const shellConfig = getShellConfig();
+    const commandFromStdin = shellConfig.commandTransport === "stdin";
+
+    const child = spawn(
+      shellConfig.shell,
+      commandFromStdin ? shellConfig.args : [...shellConfig.args, command],
+      {
+        cwd,
+        detached: process.platform !== "win32",
+        env: process.env,
+        stdio: [commandFromStdin ? "pipe" : "ignore", "pipe", "pipe"],
+        windowsHide: true,
+      }
+    );
+
+    if (commandFromStdin) {
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(command);
+    }
+
+    const task: BackgroundTask = {
+      id: taskId,
+      name: options.name,
+      command,
+      cwd,
+      sessionId: options.sessionId,
+      pid: child.pid,
+      startedAt: Date.now(),
+      status: "running",
+      logPath,
+      outputChunks: [],
+      totalBytes: 0,
+      child,
+      isAgent: options.isAgent,
+      notifyOnCompletion: options.notifyOnCompletion ?? true,
+      triggerOnCompletion: options.triggerOnCompletion ?? true,
+    };
+
+    this.tasks.set(taskId, task);
+    this.onTaskUpdate?.(task);
+
+    const appendChunk = (raw: Buffer | string) => {
+      const text = stripAnsi(typeof raw === "string" ? raw : raw.toString("utf8"))
+        .replace(/\r\n/g, "\n")
+        .replace(/\r/g, "\n");
+      task.outputChunks.push(text);
+      task.totalBytes += Buffer.byteLength(text, "utf8");
+      try {
+        appendFileSync(logPath, text);
+      } catch {
+        // Logging write failure should not crash execution.
+      }
+    };
+
+    child.stdout?.on("data", appendChunk);
+    child.stderr?.on("data", appendChunk);
+
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+    if (typeof options.timeoutSeconds === "number" && options.timeoutSeconds > 0) {
+      timeoutTimer = setTimeout(() => {
+        if (task.status === "running") {
+          task.status = "failed";
+          task.error = `Command timed out after ${options.timeoutSeconds} seconds`;
+          task.finishedAt = Date.now();
+          killProcessTree(child.pid);
+          this.onTaskUpdate?.(task);
+        }
+      }, options.timeoutSeconds * 1000);
+    }
+
+    const finish = (status: "completed" | "failed", exitCode: number | null, error?: string) => {
+      if (timeoutTimer) {
+        clearTimeout(timeoutTimer);
+        timeoutTimer = undefined;
+      }
+      if (task.status === "running") {
+        task.status = status;
+        task.exitCode = exitCode;
+        task.error = error;
+        task.finishedAt = Date.now();
+      }
+      this.onTaskUpdate?.(task);
+      if (task.notifyOnCompletion) {
+        try {
+          void this.notifyCompletion?.(task);
+        } catch {
+          // Ignore notification failures.
+        }
+      }
+    };
+
+    child.on("error", (err) => {
+      finish("failed", null, err.message);
+    });
+
+    child.on("close", (code) => {
+      if (task.status !== "running") return;
+      if (code === 0) {
+        finish("completed", code);
+      } else {
+        finish("failed", code, `Command exited with code ${code}`);
+      }
+    });
+
+    return task;
   }
 
   dispose(): void {
@@ -311,6 +529,7 @@ export class BackgroundProcessManager {
           foregroundSettled = true;
           cleanupFgSignal();
           this.tasks.set(taskId, task);
+          this.onTaskUpdate?.(task);
 
           // If there was also an explicit timeout (e.g. 60s), enforce it in background.
           if (explicitTimeoutMs !== undefined && explicitTimeoutMs > autoTimeoutMs) {
@@ -407,6 +626,7 @@ export class BackgroundProcessManager {
         } else if (isBackground) {
           // Finished in background after 30s threshold.
           debug(`[pinest] background task ${task.id} finished with code ${code}`);
+          this.onTaskUpdate?.(task);
           if (this.notifyCompletion) {
             Promise.resolve(this.notifyCompletion(task)).catch((err) => {
               debug(`[pinest] task ${task.id} completion notification error:`, err);
@@ -424,8 +644,11 @@ export class BackgroundProcessManager {
           foregroundSettled = true;
           cleanupFgSignal();
           reject(err);
-        } else if (isBackground && this.notifyCompletion) {
-          Promise.resolve(this.notifyCompletion(task)).catch(() => {});
+        } else if (isBackground) {
+          this.onTaskUpdate?.(task);
+          if (this.notifyCompletion) {
+            Promise.resolve(this.notifyCompletion(task)).catch(() => {});
+          }
         }
       });
     });
@@ -523,6 +746,14 @@ export function createDefaultBackgroundManager(
         type: "notice",
         sessionId: targetSessionId,
         message: `Background command "${task.command.slice(0, 60)}" ${task.status} (exit ${task.exitCode ?? 0})`,
+      });
+    },
+    onTaskUpdate: (task) => {
+      const targetSessionId = task.sessionId || deps.getSessionId();
+      deps.broadcast({
+        type: "job_update",
+        sessionId: targetSessionId,
+        job: toJobSummary(task),
       });
     },
   });
