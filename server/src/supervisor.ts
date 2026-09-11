@@ -370,6 +370,16 @@ export class Supervisor {
     try {
       switch (cmd.type) {
         case "user_message": {
+          const trimmed = cmd.text.trim();
+          if (trimmed === "/reload" || trimmed === "/pinest-reload") {
+            try {
+              await s.session.reload();
+              this.callbacks.broadcast({ type: "notice", sessionId: cmd.sessionId, message: "[pinest] session reloaded" });
+            } catch (e) {
+              this.callbacks.broadcast({ type: "error", sessionId: cmd.sessionId, message: `[pinest] reload failed: ${(e as Error).message}` });
+            }
+            break;
+          }
           s.currentTurnId = cmd.id || randomUUID();
           if (s.status !== "working") {
             s.segmenter?.reset();

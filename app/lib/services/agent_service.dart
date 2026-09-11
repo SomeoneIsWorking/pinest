@@ -758,6 +758,7 @@ class AgentService extends ChangeNotifier {
     'deleteHistory': deleteHistory,
   });
   void requestSessionList() => _send({'type': 'session_list'});
+  void reload() => _send({'type': 'reload'});
 
   Future<List<String>> listPaths(String prefix) =>
       _requests.request<List<String>>(

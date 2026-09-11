@@ -678,6 +678,13 @@ async function deleteSession(cmd: Extract<ClientCommand, { type: "session_delete
 async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
   switch (cmd.type) {
     case "user_message": {
+      const trimmed = cmd.text.trim();
+      if (trimmed === "/reload" || trimmed === "/pinest-reload") {
+        const r = queueReload(_pi, _ctx);
+        if (!r.ok) broadcast({ type: "error", message: `[remote-code] ${r.message}` });
+        else broadcast({ type: "notice", sessionId: _sessionId, message: "[pinest] reloading runtime…" });
+        break;
+      }
       _currentTurnId = cmd.id || randomUUID();
       const wasWorking = _status === "working";
       if (!wasWorking) {

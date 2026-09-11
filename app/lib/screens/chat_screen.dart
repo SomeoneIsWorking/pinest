@@ -256,6 +256,13 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _send() {
     final text = _input.text.trim();
+    if (text == '/reload' || text == '/pinest-reload') {
+      _input.clear();
+      final svc = context.read<AgentService>();
+      svc.reload();
+      showAppToast(context, 'Reloading runtime…');
+      return;
+    }
     if (text == '/tree') {
       _input.clear();
       final svc = context.read<AgentService>();
