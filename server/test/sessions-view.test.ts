@@ -158,3 +158,80 @@ test("createSessionsView: safe theme colors handle throwing theme safely", () =>
     assert.ok(lines.length > 0);
   });
 });
+
+test("showSessionsFlow: maps live supervisor sessions with exact IDs and allows attachment", async () => {
+  const { showSessionsFlow } = await import("../src/host-commands.ts");
+
+  const supervisor = {
+    sessions: new Map<string, any>([
+      ["sess-child-123", {
+        name: "test-child",
+        cwd: "/tmp/test-child",
+        status: "idle",
+        model: "antigravity/gemini-3.8-flash",
+        modelName: "Gemini 3.8 Flash",
+        session: {
+          messages: [],
+          subscribe: () => () => {},
+        },
+      }],
+    ]),
+  };
+
+  const sessions = new Map<string, any>([
+    ["host-session-id", {
+      name: "host",
+      cwd: "/tmp/host",
+      status: "idle",
+    }],
+  ]);
+
+  let customCalls = 0;
+  let attachedSessionName = "";
+
+  const ctx = {
+    ui: {
+      custom: async (factory: any) => {
+        customCalls++;
+        if (customCalls === 1) {
+          // In the sessions view
+          const view = factory({}, {}, {}, () => {});
+          // Item at index 1 is sess-child-123
+          view.handleInput("\x1b[B"); // Down to child
+          view.handleInput("\r");     // Select
+        } else if (customCalls === 2) {
+          // In the attach overlay view
+          const view = factory({}, {}, {}, () => {});
+          const lines = view.render(80);
+          attachedSessionName = lines.find((l: string) => l.includes("test-child")) ? "test-child" : "";
+          view.handleInput("\x1b"); // Detach
+        } else if (customCalls === 3) {
+          // Back in sessions view after detach, cancel to exit loop
+          const view = factory({}, {}, {}, () => {});
+          view.handleInput("\x1b"); // Cancel
+        }
+      },
+    },
+  };
+
+  await showSessionsFlow(ctx, () => ({
+    sessionId: "host-session-id",
+    sessions,
+    supervisor,
+    say: () => {},
+    captureUi: () => {},
+    broadcastState: () => {},
+    renderFooter: () => {},
+    publishCurrentPresence: async () => {},
+    setTunnelStarting: () => {},
+    fbAsync: async () => {},
+    getOwnerUid: () => "owner-1",
+    setOwner: () => {},
+    bootstrap: async () => {},
+    ws: null,
+  }));
+
+  assert.equal(customCalls, 3);
+  assert.equal(attachedSessionName, "test-child");
+});
+

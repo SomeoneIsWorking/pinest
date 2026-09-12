@@ -73,7 +73,7 @@ export async function showSessionsFlow(
 
   while (true) {
     const hostSnap = sessions.get(sessionId);
-    const liveSessions = supervisor ? Array.from(supervisor.sessions.values()) : [];
+    const liveSessions: [string, any][] = supervisor ? Array.from(supervisor.sessions.entries()) : [];
 
     const summaries: SessionSummary[] = [
       {
@@ -85,8 +85,8 @@ export async function showSessionsFlow(
         model: hostSnap?.model,
         modelName: hostSnap?.modelName,
       },
-      ...liveSessions.map((s: any) => ({
-        id: s.id,
+      ...liveSessions.map(([id, s]: [string, any]) => ({
+        id,
         name: s.name ?? "session",
         cwd: s.cwd,
         status: (s.status as any) ?? "idle",
@@ -126,10 +126,13 @@ export async function showSessionsFlow(
           onNew: async () => {
             if (supervisor) {
               try {
-                const newEntry = await supervisor.spawn({ cwd: process.cwd() });
+                const newId = await supervisor.spawn({ cwd: process.cwd() });
                 broadcastState();
-                nextStep = { action: "attach", entry: newEntry };
-                loopBack = true;
+                const newEntry = supervisor.sessions.get(newId);
+                if (newEntry) {
+                  nextStep = { action: "attach", entry: newEntry };
+                  loopBack = true;
+                }
               } catch (e) {
                 say(ctx, `[pinest] failed to spawn session: ${(e as Error)?.message || e}`);
               }
