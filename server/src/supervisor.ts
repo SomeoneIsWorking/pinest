@@ -208,6 +208,7 @@ export class Supervisor {
 
   private async createSessionOpts(cwd: string, sessionManager?: SessionManager): Promise<{
     cwd: string; agentDir?: string; sessionManager?: SessionManager; resourceLoader?: ResourceLoader;
+    modelRuntime?: ModelRuntime; customTools?: any[];
   }> {
     const agentDir = this.agentDir ?? getAgentDir();
     const settingsManager = SettingsManager.create(cwd, agentDir);
@@ -221,9 +222,22 @@ export class Supervisor {
       }),
     });
     await resourceLoader.reload();
+    const modelRuntime = await ModelRuntime.create({
+      authPath: join(agentDir, "auth.json"),
+      modelsPath: join(agentDir, "models.json"),
+    });
+    const extRes = resourceLoader.getExtensions();
+    for (const { name, config } of extRes.runtime.pendingProviderRegistrations) {
+      try { modelRuntime.registerProvider(name, config); } catch { /* */ }
+    }
+    for (const { provider } of extRes.runtime.pendingNativeProviderRegistrations) {
+      try { modelRuntime.registerNativeProvider(provider); } catch { /* */ }
+    }
+    await modelRuntime.refresh({ allowNetwork: false });
     const opts: {
-      cwd: string; agentDir?: string; sessionManager?: SessionManager; resourceLoader?: ResourceLoader; customTools?: any[];
-    } = { cwd, resourceLoader };
+      cwd: string; agentDir?: string; sessionManager?: SessionManager; resourceLoader?: ResourceLoader;
+      modelRuntime?: ModelRuntime; customTools?: any[];
+    } = { cwd, resourceLoader, modelRuntime };
     if (this.agentDir) opts.agentDir = this.agentDir;
     if (sessionManager) opts.sessionManager = sessionManager;
     if (this.callbacks.bgManager) {
@@ -253,7 +267,7 @@ export class Supervisor {
     });
   }
 
-  async spawn(cmd: SpawnCommand): Promise<void> {
+  async spawn(cmd: SpawnCommand): Promise<string> {
     const id = cmd.sessionId || randomUUID();
     const cwd = cmd.cwd ?? process.cwd();
     let isDirectory = false;
@@ -310,6 +324,7 @@ export class Supervisor {
     this.persistRow(id, { status: "idle", model: s.model, modelName: s.modelName });
     this.wire(id, s);
     debug(`[remote-code] Spawned session ${id} in ${cwd}`);
+    return id;
   }
 
   /**
@@ -342,11 +357,23 @@ export class Supervisor {
     const m = (session as any).model;
     if (m) { s.model = `${m.provider}/${m.id}`; s.modelName = m.name; }
 
+    const savedModel = this.registry?.get(id)?.model;
+    if (savedModel && s.model !== savedModel) {
+      try {
+        const smdl = await this.findModel(savedModel);
+        if (smdl) {
+          await session.setModel(smdl);
+          s.model = `${smdl.provider}/${smdl.id}`;
+          s.modelName = smdl.name;
+        }
+      } catch { /* best effort */ }
+    }
+
     this.callbacks.upsertSession(id, {
       name, cwd, model: s.model, modelName: s.modelName,
       status: "idle", isInteractive: false, resumed: true,
     });
-    this.persistRow(id, { status: "idle" });
+    this.persistRow(id, { status: "idle", model: s.model, modelName: s.modelName });
     this.wire(id, s);
     debug(`[remote-code] Resumed session ${id} from ${cmd.piSessionPath}`);
     return id;
