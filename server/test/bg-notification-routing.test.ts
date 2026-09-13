@@ -81,10 +81,15 @@ test("the host's own task (tagged with either host identity) still reaches the h
   }
 });
 
-test("a task with NO sessionId belongs to the host (legacy tasks)", async () => {
+test("a task with no owner id cannot be created at all", async () => {
+  // The leak was a task created with no id; the API no longer allows one, so
+  // "no id" cannot silently become "the host's" in the first place.
   const { runAndSettle, hostDeliveries } = makeWorld();
-  await runAndSettle("sleep 0.3");
-  assert.equal(hostDeliveries.length, 1);
+  await assert.rejects(
+    async () => await runAndSettle("sleep 0.3", ""),
+    /no owning session id/,
+  );
+  assert.equal(hostDeliveries.length, 0, "and nothing was delivered anywhere");
 });
 
 test("an ORPHAN task (no session id) routes by its directory, not to the host", async () => {
@@ -118,11 +123,14 @@ test("an ORPHAN task (no session id) routes by its directory, not to the host", 
     autoBgTimeoutMs: 50,
   });
 
-  // A task with NO session id, cwd inside the spawned session's directory.
-  await manager.executeCommand("sleep 0.2 && echo orphan", {
-    sessionId: undefined,
+  // A LEGACY task: only reachable when a task created by an older build is
+  // still in memory across a reload. New tasks cannot lack an owner, so the
+  // state is reproduced directly.
+  const started = await manager.executeCommand("sleep 0.2 && echo orphan", {
+    sessionId: "host-app",
     cwd: taskCwd,
   });
+  started.task!.sessionId = undefined;
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline && supDeliveries.length === 0) {
     await new Promise((r) => setTimeout(r, 25));
@@ -156,7 +164,7 @@ test("an orphan owned by another session is not host-owned, so the host choke bl
     autoBgTimeoutMs: 50,
   });
 
-  const started = await manager.executeCommand("sleep 0.2", { cwd: taskCwd });
+  const started = await manager.executeCommand("sleep 0.2", { sessionId: "host-app", cwd: taskCwd });
   const taskId = started.task?.id;
   assert.ok(taskId, "the task started");
   assert.equal(

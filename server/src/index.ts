@@ -17,6 +17,7 @@ import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { hostname, homedir } from "node:os";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { extractUserText, extractText } from "./logic.ts";
 import { HostPendingQueue } from "./pending-queue.ts";
 import { createMessageSubmitter, type MessageSubmitter } from "./submit.ts";
@@ -56,6 +57,8 @@ import { installCrashReporter } from "./crash.ts";
 import { DEFAULT_MODEL } from "./product-defaults.ts";
 import { HostContextController } from "./host-context.ts";
 import { dispatchClientCommand } from "./command-validation.ts";
+import { applyCompactThresholdCommand } from "./compaction-settings.ts";
+import { buildStateMessage, mergeRegistryRows } from "./state-message.ts";
 import { reauthenticateRemoteOwner, verifiedOwnerToken } from "./owner-runtime.ts";
 
 const REGISTRY_PATH = process.env.RC_REGISTRY_PATH
@@ -236,25 +239,20 @@ function broadcast(msg: ServerMessage): void {
 }
 
 function stateMessage(): ServerMessage {
-  // Cheap sync overlay so every tab carries live status + context usage,
-  // not just whichever session last emitted an event.
-  // The overlay updates the snapshots that this message will read. It must
-  // not broadcast while a state message is already being built.
+  // Cheap sync overlay so every tab carries live status + context usage, not
+  // just whichever session last emitted an event. The overlay updates the
+  // snapshots this message reads; it must not broadcast while a state message
+  // is already being built.
   _supervisor?.refreshUsage?.(false);
-  return {
-    type: "state",
-    online: true,
+  return buildStateMessage({
     hostname: hostname(),
     homePath: homedir(),
-    activeSessionId: _activeSessionId,
+    activeSessionId: _activeSessionId ?? "",
     sessions: getSessionSnapshots(),
-    // Durable registry rows (incl. not-running sessions). Old clients ignore
-    // this field; new clients merge it with `sessions` for the full list.
     registry: _registry?.all() ?? [],
-    // So the app can show (and the user can verify) the live tunnel endpoint.
     tunnelUrl: _ws?.tunnelUrl ?? null,
     tunnelProvider: _ws?.tunnel?.provider ?? null,
-  };
+  });
 }
 
 function broadcastState(): void {
@@ -274,17 +272,7 @@ function publishCurrentPresence(online: boolean): Promise<void> {
 
 /** Registry rows overlaid with live status (live: true = loaded in-process). */
 function mergedRegistryRows(): SessionRow[] {
-  return (_registry?.all() ?? []).map((row) => {
-    const live = _sessions.get(row.id);
-    return {
-      ...row,
-      live: !!live,
-      // A row stuck "running" from a dead host is resumable, not running.
-      status: live
-        ? (live.status === "working" ? "running" : "idle")
-        : (row.status === "running" ? "idle" : row.status),
-    };
-  });
+  return mergeRegistryRows(_registry?.all() ?? [], (id) => _sessions.get(id)?.status);
 }
 
 // ── Self-modification: reload of extension code / settings ─────────────────
@@ -676,8 +664,18 @@ function selectSession(cmd: Extract<ClientCommand, { type: "session_select" }>):
 }
 
 async function setCompactThreshold(cmd: Extract<ClientCommand, { type: "set_compact_threshold" }>): Promise<void> {
-  saveConfig({ compactAtTokens: cmd.thresholdTokens });
   debug(`[remote-code] auto-compact threshold set to ${cmd.thresholdTokens} tokens`);
+  applyCompactThresholdCommand(
+    {
+      saveConfig,
+      agentDir: getAgentDir(),
+      contextWindow: () => (hostContext.contextUsage() as { contextWindow?: number } | undefined)?.contextWindow,
+      broadcast: (message) => broadcast(message as ServerMessage),
+      refreshUsage: () => upsertSession(_sessionId, { contextUsage: hostContext.contextUsage() }),
+      hostSessionId: _sessionId,
+    },
+    cmd.thresholdTokens,
+  );
   broadcastState();
 }
 

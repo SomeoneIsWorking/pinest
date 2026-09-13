@@ -161,11 +161,6 @@ export class Supervisor {
   private async createSessionOpts(
     cwd: string,
     sessionManager?: SessionManager,
-    /** This session's identity, stamped on every task its tools start. Without
-     * it a fresh session's background tools had no owner: the task looked
-     * host-owned, got routed to the host, and the host choke dropped it — the
-     * completion notice was invisible everywhere. */
-    ownershipId?: string,
   ): Promise<{
     cwd: string; agentDir?: string; sessionManager?: SessionManager; resourceLoader?: ResourceLoader;
     modelRuntime?: ModelRuntime; customTools?: any[];
@@ -202,8 +197,8 @@ export class Supervisor {
     if (sessionManager) opts.sessionManager = sessionManager;
     if (this.callbacks.bgManager) {
       opts.customTools = [
-        createAutoBackgroundBashTool({ bgManager: this.callbacks.bgManager, cwd, sessionId: ownershipId }),
-        ...createBackgroundTools(this.callbacks.bgManager, ownershipId),
+        createAutoBackgroundBashTool({ bgManager: this.callbacks.bgManager, cwd }),
+        ...createBackgroundTools(this.callbacks.bgManager),
       ];
     }
     return opts;
@@ -214,19 +209,19 @@ export class Supervisor {
    * code never updates (pre-reload tasks kept notifying the host session).
    * Re-arm the definitions' execute closures onto THIS instance's manager —
    * same object identity, then refresh the registry so the wrappers
-   * re-capture — and the ownership id these tools stamp on new tasks. */
-  private rearmSessionTools(id: string, s: LiveSession): void {
+   * re-capture. Ownership is not re-armed because it was never captured: the
+   * tools read it from the live execution context. */
+  private rearmSessionTools(s: LiveSession): void {
     const manager = this.callbacks.bgManager;
     if (!manager) return;
     const session = s.session as any;
     const customTools = session?._customTools as ToolDefinition[] | undefined;
     if (!Array.isArray(customTools) || customTools.length === 0) return;
-    // The APP session id, not the pi session-file id: the host stamps its own
-    // tasks with the app id, and the app's job queries use that same identity.
-    // Re-arming with the pi id would make adopted sessions' jobs unqueryable.
+    // No identity is handed over: the re-armed tools resolve their owner from
+    // the live execution context, exactly like freshly created ones.
     const fresh = [
-      createAutoBackgroundBashTool({ bgManager: manager, cwd: s.cwd, sessionId: id }),
-      ...createBackgroundTools(manager, id),
+      createAutoBackgroundBashTool({ bgManager: manager, cwd: s.cwd }),
+      ...createBackgroundTools(manager),
     ];
     const freshByName = new Map(fresh.map((tool) => [tool.name, tool]));
     let reamed = 0;
@@ -238,9 +233,9 @@ export class Supervisor {
     }
     if (reamed > 0) {
       try { session._refreshToolRegistry?.(); } catch (e) {
-        debug(`[remote-code] reload: tool registry refresh failed on ${id}:`, (e as Error).message);
+        debug(`[remote-code] reload: tool registry refresh failed on ${s.name}:`, (e as Error).message);
       }
-      debug(`[remote-code] reload: re-armed ${reamed} background tool(s) on adopted session ${id} (${s.name})`);
+      debug(`[remote-code] reload: re-armed ${reamed} background tool(s) on adopted session ${s.name}`);
     }
   }
 
@@ -271,7 +266,7 @@ export class Supervisor {
     Supervisor.activeSpawning = true;
     let session: AgentSession;
     try {
-      const opts = await this.createSessionOpts(cwd, undefined, id);
+      const opts = await this.createSessionOpts(cwd);
       const res = await createAgentSession(opts);
       session = res.session;
     } finally {
@@ -335,7 +330,7 @@ export class Supervisor {
     Supervisor.activeSpawning = true;
     let session: AgentSession;
     try {
-      const opts = await this.createSessionOpts(cwd, sessionManager, id);
+      const opts = await this.createSessionOpts(cwd, sessionManager);
       const res = await createAgentSession(opts);
       session = res.session;
     } finally {
@@ -1101,7 +1096,7 @@ export class Supervisor {
       s.status = working ? "working" : "idle";
       // A session still mid-run keeps its submission gate closed.
       this.wire(id, s, { resumeTurn: working });
-      this.rearmSessionTools(id, s);
+      this.rearmSessionTools(s);
       // The new instance starts with an EMPTY snapshot map, so this must carry
       // the session's IDENTITY too. Reporting only status/model is what made
       // adopted sessions show up as "session" with a blank workspace.

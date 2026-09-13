@@ -24,7 +24,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Session-history extraction incl. pre-compaction messages and compaction bubbles | `server` | `server/src/logic.ts` (`extractSessionMessages`, `entriesToSessionMessages`) |
 | Headless session spawn/resume/kill/route/stream (SDK sessions in-process) | `server` | `server/src/supervisor.ts` |
 | Model lookup/switch + available-model listing (per-session runtime preferred, registry fallback) | `server` | `server/src/session-models.ts` (`SessionModelService`) |
-| Background-task ownership identity (resolved from the LIVE tool context, not creation-time capture) | `server` | `ownershipId` in `server/src/background-tools.ts`; `createAutoBackgroundBashTool` in `server/src/bash-tool.ts` |
+| Background-task ownership identity (resolved from the LIVE tool context; a task cannot be started without an owner) | `server` | `ownerFromContext` + `SessionTasks` in `server/src/bash-tool.ts`; `scopeFor` in `server/src/background-tools.ts` |
 | Orphan background-task routing (no owner id → most specific cwd, then host, else a visible notice) | `server` | `server/src/bg-routing.ts` (`routeOrphanTask`), wired as `BackgroundProcessManager.resolveOrphan` |
 | Owner-bound session registry persistence (private sessions.json, atomic writes/history deletion, corrupt/symlink refusal) | `server` | `server/src/registry.ts` |
 | Harness source-change watcher (debounced file watch → pending-change notice; never reloads) | `server` | `server/src/watch.ts` |
@@ -63,6 +63,8 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Canonical Hosting bundle + legacy-redirect verifier | repo root | `tools/verify_hosting.py` |
 | Cross-platform application identity (`com.barishamil.pinest`) + native Firebase clients | `app` | `app/android/app/`, `app/ios/Runner.xcodeproj/`, `app/linux/CMakeLists.txt`, `app/macos/Runner/`, `app/lib/firebase_options.dart` |
 | Live Firestore owner-boundary verification | `tools` | `tools/verify_firestore_rules.py`, `tools/test_verify_firestore_rules.py` |
+| Auto-compact threshold (ONE conversion from the user's threshold to pi's `compaction.reserveTokens`, applied to the trigger that actually compacts) | `server` | `server/src/compaction-settings.ts` (`applyCompactThreshold`, `applyCompactThresholdCommand`), `reserveTokensFor`/`compactionSettings` in `server/src/provision-core.ts`; command wired in `server/src/index.ts` |
+| State snapshot wire shape + registry/live row merging (pure) | `server` | `server/src/state-message.ts` (`buildStateMessage`, `mergeRegistryRows`) |
 | Generated Flutter platform runner projects and packaging shells | `app` | `app/android/`, `app/ios/`, `app/linux/`, `app/macos/`, `app/windows/` |
 | Auto-backgrounding bash tool & task lifecycle manager | `server` | `server/src/bash-tool.ts` (`BackgroundProcessManager`, `createAutoBackgroundBashTool`) |
 | First-party background tools (`bg_run`, `bg_status`, `bg_logs`, `bg_kill`) & job commands | `server` | `server/src/background-tools.ts` (`createBackgroundTools`, `registerBackgroundTools`, `handleJobCommand`) |

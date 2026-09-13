@@ -5,6 +5,8 @@ import { formatSize, DEFAULT_MAX_BYTES } from "@earendil-works/pi-coding-agent";
 import {
   BackgroundProcessManager,
   type BackgroundTask,
+  type SessionTasks,
+  ownerFromContext,
   toJobSummary,
 } from "./bash-tool.ts";
 import type { BackgroundJobSummary, ClientCommand, ServerMessage } from "./protocol.ts";
@@ -158,18 +160,24 @@ const BgKillParams = Type.Object({
   taskId: Type.String({ description: "Task ID or unambiguous prefix to stop" }),
 });
 
-/** A task's owning session: the id captured when the tool was created, or the
- * live session from the tool context. A fresh session's tools were created
- * before its pi session existed, so the captured id was undefined and the task
- * was treated as host-owned — its completion notice then reached no session at
- * all (the host choke dropped it). */
-function ownershipId(captured: string | undefined, ctx: any): string | undefined {
-  return captured ?? ctx?.sessionManager?.getSessionId?.();
+/**
+ * The scope a tool call runs in. Derived from the live execution context, so no
+ * factory has to be handed an id and none can be handed the wrong one; a fresh
+ * session's tools are created before its pi session exists, which is why a
+ * creation-time capture was undefined and its tasks were treated as the host's.
+ */
+function scopeFor(
+  manager: BackgroundProcessManager,
+  ctx: unknown,
+  preferredOwner?: string,
+): SessionTasks {
+  return manager.forSession(ownerFromContext(ctx, preferredOwner));
 }
 
 export function createBackgroundTools(
   manager: BackgroundProcessManager,
-  sessionId?: string
+  /** Overrides the context-derived owner (host only — see ownerFromContext). */
+  preferredOwner?: string
 ): ToolDefinition[] {
   const bgRunExecute = async (
     _toolCallId: string,
@@ -192,10 +200,9 @@ export function createBackgroundTools(
       throw new Error("command is required and cannot be empty");
     }
 
-    const task = manager.startTask(p.command, {
+    const task = scopeFor(manager, ctx, preferredOwner).startTask(p.command, {
       name: p.name ?? p.description,
       cwd: ctx?.cwd,
-      sessionId: ownershipId(sessionId, ctx),
       timeoutSeconds: p.timeoutSeconds,
       isAgent: p.isAgent ?? false,
       notifyOnCompletion: p.notifyOnCompletion ?? true,
@@ -224,10 +231,9 @@ export function createBackgroundTools(
     ctx?: unknown
   ) => {
     const p = (params ?? {}) as { taskId?: string };
-    const owner = ownershipId(sessionId, ctx);
+    const tasks = scopeFor(manager, ctx, preferredOwner);
     if (p.taskId && p.taskId.trim()) {
-      const task = manager.resolveTask(p.taskId);
-      if (!manager.isOwned(task, owner)) throw new Error(`Task not found: ${p.taskId}`);
+      const task = tasks.resolveOwned(p.taskId);
       const duration = Math.round(((task.finishedAt ?? Date.now()) - task.startedAt) / 1000);
       return {
         content: textContent(
@@ -249,10 +255,10 @@ export function createBackgroundTools(
       };
     }
 
-    const tasks = manager.listTasks(owner);
+    const list = tasks.list();
     return {
-      content: textContent(formatTaskList(tasks)),
-      details: { tasks: tasks.map(toJobSummary) },
+      content: textContent(formatTaskList(list)),
+      details: { tasks: list.map(toJobSummary) },
     };
   };
 
@@ -264,13 +270,12 @@ export function createBackgroundTools(
     ctx?: unknown
   ) => {
     const p = (params ?? {}) as { taskId: string; maxBytes?: number; tail?: boolean };
-    const owner = ownershipId(sessionId, ctx);
     if (!p.taskId || !p.taskId.trim()) {
       throw new Error("taskId is required");
     }
-    const task = manager.resolveTask(p.taskId);
-    if (!manager.isOwned(task, owner)) throw new Error(`Task not found: ${p.taskId}`);
-    const result = manager.getTaskLogs(task, {
+    const tasks = scopeFor(manager, ctx, preferredOwner);
+    const task = tasks.resolveOwned(p.taskId);
+    const result = tasks.getLogs(task, {
       maxBytes: p.maxBytes,
       tail: p.tail ?? true,
     });
@@ -293,13 +298,12 @@ export function createBackgroundTools(
     ctx?: unknown
   ) => {
     const p = (params ?? {}) as { taskId: string };
-    const owner = ownershipId(sessionId, ctx);
     if (!p.taskId || !p.taskId.trim()) {
       throw new Error("taskId is required");
     }
-    const task = manager.resolveTask(p.taskId);
-    if (!manager.isOwned(task, owner)) throw new Error(`Task not found: ${p.taskId}`);
-    const killed = manager.killTask(task.id);
+    const tasks = scopeFor(manager, ctx, preferredOwner);
+    const task = tasks.resolveOwned(p.taskId);
+    const killed = tasks.kill(task.id);
     const message = killed
       ? `Stopped background task ${taskDisplayName(task)} (${task.id}). Output saved to ${task.logPath}`
       : `Task ${task.id} was not running (status: ${task.status})`;
@@ -375,9 +379,9 @@ export function createBackgroundTools(
 export function registerBackgroundTools(
   pi: any,
   manager: BackgroundProcessManager,
-  sessionId?: string
+  preferredOwner?: string
 ): void {
-  for (const tool of createBackgroundTools(manager, sessionId)) {
+  for (const tool of createBackgroundTools(manager, preferredOwner)) {
     try {
       pi.registerTool(tool);
     } catch {
