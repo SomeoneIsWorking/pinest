@@ -1038,6 +1038,8 @@ function bridge(pi: ExtensionAPI): void {
     const ae = event.assistantMessageEvent;
     if (ae?.type === "text_delta") {
       broadcast({ type: "stream", sessionId: _sessionId, ...segmenter.onTextDelta(ae.delta), status: "working" });
+    } else if (ae?.type === "thinking_delta") {
+      broadcast({ type: "stream", sessionId: _sessionId, ...segmenter.onThinkingDelta(ae.delta), status: "working" });
     }
   });
 
@@ -1047,17 +1049,14 @@ function bridge(pi: ExtensionAPI): void {
     const promoted = segmenter.onToolStart();
     if (promoted) broadcast({ type: "stream", sessionId: _sessionId, ...promoted, status: "working" });
     broadcast({ type: "tool", sessionId: _sessionId, tool: {
-      callId: event.toolCallId, name: event.toolName || "?",
-      args: event.args, running: true,
+      callId: event.toolCallId, name: event.toolName || "?", args: event.args, running: true, timestamp: Date.now(),
     }});
   });
 
   pi.on("tool_execution_end", (event: any) => {
     const r = extractToolResult(event.result);
     broadcast({ type: "tool", sessionId: _sessionId, tool: {
-      callId: event.toolCallId, name: event.toolName || "?",
-      result: r.text, images: r.images,
-      isError: event.isError, running: false,
+      callId: event.toolCallId, name: event.toolName || "?", result: r.text, images: r.images, isError: event.isError, running: false, timestamp: Date.now(),
     }});
   });
 

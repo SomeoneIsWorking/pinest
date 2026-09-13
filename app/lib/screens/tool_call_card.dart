@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import '../logic/time_format.dart';
 
 /// Full-size viewer for a base64 image (tool results, user attachments).
 void showImageDialog(BuildContext context, String b64) {
@@ -26,6 +27,7 @@ class ToolCallCard extends StatefulWidget {
   final int imagesOmitted;
   final bool isError;
   final bool running;
+  final int? timestamp;
 
   const ToolCallCard({
     super.key,
@@ -36,6 +38,7 @@ class ToolCallCard extends StatefulWidget {
     required this.isError,
     required this.running,
     this.imagesOmitted = 0,
+    this.timestamp,
   });
 
   @override
@@ -94,6 +97,19 @@ class _ToolCallCardState extends State<ToolCallCard> {
                         size: 16,
                         color: Colors.grey,
                       ),
+                      if (widget.timestamp != null && widget.timestamp! > 0) ...[
+                        const Spacer(),
+                        Tooltip(
+                          message: formatExactTime(widget.timestamp!),
+                          child: Text(
+                            formatRelativeTime(widget.timestamp!),
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: Theme.of(context).colorScheme.onSurface.withAlpha(102),
+                            ),
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                   // The summary gets its OWN line with the full card width:

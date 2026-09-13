@@ -6,6 +6,7 @@ import '../models/chat_item.dart';
 /// requires adding it here, so session deletion and full teardown cannot drift.
 class SessionCache {
   final Map<String, String> streamingText = {};
+  final Map<String, String> streamingThinking = {};
   final Map<String, List<String>> streamingSegments = {};
   final Map<String, List<PinestModel>> models = {};
   final Map<String, List<Map<String, dynamic>>> history = {};
@@ -15,6 +16,7 @@ class SessionCache {
 
   void evict(String sessionId) {
     streamingText.remove(sessionId);
+    streamingThinking.remove(sessionId);
     streamingSegments.remove(sessionId);
     models.remove(sessionId);
     history.remove(sessionId);
@@ -26,6 +28,7 @@ class SessionCache {
   void clear() {
     final sessionIds = <String>{
       ...streamingText.keys,
+      ...streamingThinking.keys,
       ...streamingSegments.keys,
       ...models.keys,
       ...history.keys,

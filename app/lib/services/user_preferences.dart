@@ -7,6 +7,8 @@ class UserPreferences {
   static const _midTurnKey = 'mid_turn_mode';
   static const _notifyOnFinishKey = 'notify_on_finish';
   static const _notifyOnErrorKey = 'notify_on_error';
+  static const _showThinkingKey = 'show_thinking';
+  static const _collapseToolCallsKey = 'collapse_tool_calls';
 
   final SharedPreferences _prefs;
 
@@ -48,5 +50,19 @@ class UserPreferences {
 
   Future<void> saveNotifyOnError(bool enabled) async {
     await _prefs.setBool(_notifyOnErrorKey, enabled);
+  }
+
+  /// Whether to display model thinking / reasoning in the chat.
+  bool get showThinking => _prefs.getBool(_showThinkingKey) ?? true;
+
+  Future<void> saveShowThinking(bool enabled) async {
+    await _prefs.setBool(_showThinkingKey, enabled);
+  }
+
+  /// Whether to collapse multiple sequential tool calls into a group.
+  bool get collapseToolCalls => _prefs.getBool(_collapseToolCallsKey) ?? true;
+
+  Future<void> saveCollapseToolCalls(bool enabled) async {
+    await _prefs.setBool(_collapseToolCallsKey, enabled);
   }
 }

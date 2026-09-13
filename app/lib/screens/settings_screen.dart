@@ -22,6 +22,8 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   final _threshold = TextEditingController();
   bool _steerByDefault = false;
+  bool _showThinking = true;
+  bool _collapseToolCalls = true;
   bool _notifyOnFinish = true;
   bool _notifyOnError = true;
   bool _browserNotificationsGranted = false;
@@ -56,6 +58,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     super.initState();
     final prefs = context.read<UserPreferences>();
     _steerByDefault = prefs.steerByDefault;
+    _showThinking = prefs.showThinking;
+    _collapseToolCalls = prefs.collapseToolCalls;
     _notifyOnFinish = prefs.notifyOnFinish;
     _notifyOnError = prefs.notifyOnError;
     if (kIsWeb) {
@@ -216,27 +220,59 @@ class _SettingsScreenState extends State<SettingsScreen> {
               style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
           const SizedBox(height: 8),
           Card(
-            child: SwitchListTile(
-              secondary: Icon(
-                _steerByDefault ? Icons.bolt : Icons.low_priority,
-                color: _steerByDefault ? Colors.deepOrange : Colors.grey,
-              ),
-              title: const Text('Steer by default'),
-              subtitle: Text(
-                _steerByDefault
-                    ? 'Messages sent while the agent works are delivered '
-                        'before its next step. The ⚡ icon in the chat '
-                        'overrides per message.'
-                    : 'Messages sent while the agent works queue as '
-                        'follow-ups. The ⚡ icon in the chat overrides '
-                        'per message.',
-                style: const TextStyle(fontSize: 12),
-              ),
-              value: _steerByDefault,
-              onChanged: (v) {
-                setState(() => _steerByDefault = v);
-                context.read<UserPreferences>().saveSteerByDefault(v);
-              },
+            child: Column(
+              children: [
+                SwitchListTile(
+                  secondary: Icon(
+                    _steerByDefault ? Icons.bolt : Icons.low_priority,
+                    color: _steerByDefault ? Colors.deepOrange : Colors.grey,
+                  ),
+                  title: const Text('Steer by default'),
+                  subtitle: Text(
+                    _steerByDefault
+                        ? 'Messages sent while the agent works are delivered '
+                            'before its next step. The ⚡ icon in the chat '
+                            'overrides per message.'
+                        : 'Messages sent while the agent works queue as '
+                            'follow-ups. The ⚡ icon in the chat overrides '
+                            'per message.',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  value: _steerByDefault,
+                  onChanged: (v) {
+                    setState(() => _steerByDefault = v);
+                    context.read<UserPreferences>().saveSteerByDefault(v);
+                  },
+                ),
+                const Divider(height: 1),
+                SwitchListTile(
+                  secondary: const Icon(Icons.psychology_outlined),
+                  title: const Text('Show thinking'),
+                  subtitle: const Text(
+                    'Display reasoning and thinking process from supported models.',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                  value: _showThinking,
+                  onChanged: (v) {
+                    setState(() => _showThinking = v);
+                    context.read<UserPreferences>().saveShowThinking(v);
+                  },
+                ),
+                const Divider(height: 1),
+                SwitchListTile(
+                  secondary: const Icon(Icons.unfold_less),
+                  title: const Text('Collapse sequential tool calls'),
+                  subtitle: const Text(
+                    'Group consecutive tool calls into a single collapsible card.',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                  value: _collapseToolCalls,
+                  onChanged: (v) {
+                    setState(() => _collapseToolCalls = v);
+                    context.read<UserPreferences>().saveCollapseToolCalls(v);
+                  },
+                ),
+              ],
             ),
           ),
           const SizedBox(height: 24),
