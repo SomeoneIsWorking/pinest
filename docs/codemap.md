@@ -19,6 +19,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Same-owner credential rotation and verified-token mapping | `server` | `server/src/owner-runtime.ts` |
 | Streaming-text state (segments promoted at tool pauses; shared by supervisor + host) | `server` | `server/src/stream.ts` (`StreamSegmenter`) |
 | History paging (last-50-first, cursor scroll-back) | `server` | `server/src/logic.ts` (`pageHistory`) |
+| Session-history extraction incl. pre-compaction messages and compaction bubbles | `server` | `server/src/logic.ts` (`extractSessionMessages`, `entriesToSessionMessages`) |
 | Headless session spawn/resume/kill/route/stream (SDK sessions in-process) | `server` | `server/src/supervisor.ts` |
 | Owner-bound session registry persistence (private sessions.json, atomic writes/history deletion, corrupt/symlink refusal) | `server` | `server/src/registry.ts` |
 | Harness source-change watcher (debounced file watch → pending-change notice; never reloads) | `server` | `server/src/watch.ts` |
