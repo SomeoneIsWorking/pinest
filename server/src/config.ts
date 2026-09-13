@@ -9,8 +9,11 @@ import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { DEFAULT_COMPACT_AT_TOKENS } from "./product-defaults.ts";
 
-const CONFIG_PATH = process.env.RC_CONFIG_PATH
-  || join(homedir(), ".pi", "agent", "remote-code", "config.json");
+function realUserConfigPath(): string {
+  return join(homedir(), ".pi", "agent", "remote-code", "config.json");
+}
+
+const CONFIG_PATH = process.env.RC_CONFIG_PATH || realUserConfigPath();
 
 export interface Config {
   tunnelProvider: string; // "cloudflared" | "ngrok" | "tailscale" | "off"
@@ -36,7 +39,28 @@ export function loadConfig(): Config {
   return cfg;
 }
 
+/**
+ * A test process that did not redirect the config path would otherwise write
+ * into the user's real configuration — resetting saved settings to defaults is
+ * how the user's auto-compact threshold kept reverting to 400k. Refuse instead
+ * of silently clobbering: the fix is one `RC_CONFIG_PATH`, and it is named.
+ */
+function assertWritableTarget(): void {
+  // Keyed on the RESOLVED path, not on the env var: a test that assigns
+  // RC_CONFIG_PATH after this module was already imported still holds the real
+  // path here, and that is the case that clobbered the user's settings.
+  if (CONFIG_PATH !== realUserConfigPath()) return;
+  const underTest = Boolean(process.env.NODE_TEST_CONTEXT)
+    || /(^|\s)--test(\s|$)/.test(process.env.NODE_OPTIONS ?? "");
+  if (!underTest) return;
+  throw new Error(
+    `refusing to write the user's real config (${CONFIG_PATH}) from a test process; `
+    + "import server/support/isolate-config.ts (or set RC_CONFIG_PATH) BEFORE config.ts",
+  );
+}
+
 export function saveConfig(patch: Partial<Config>): Config {
+  assertWritableTarget();
   const cfg = { ...loadConfig(), ...patch };
   mkdirSync(dirname(CONFIG_PATH), { recursive: true });
   writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
@@ -45,6 +69,7 @@ export function saveConfig(patch: Partial<Config>): Config {
 
 /** Clear the config file (test helper). */
 export function resetConfig(): void {
+  assertWritableTarget();
   try { writeFileSync(CONFIG_PATH, JSON.stringify(DEFAULTS, null, 2)); }
   catch { /* ignore */ }
 }

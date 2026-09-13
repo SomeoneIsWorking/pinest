@@ -1,7 +1,12 @@
+// FIRST: `footer.ts` imports config.ts, so the config path must be redirected
+// before any other import is evaluated — otherwise this test writes the user's
+// real config. It did: resetConfig() silently reset their auto-compact
+// threshold to the default on every test run.
+import "../support/isolate-config.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { FooterManager, type FooterStateProvider } from "../src/footer.ts";
-import { saveConfig, resetConfig } from "../src/config.ts";
+const { saveConfig, resetConfig } = await import("../src/config.ts");
 
 function createStubUi() {
   const calls: Array<{ key: string; text: string | undefined }> = [];
