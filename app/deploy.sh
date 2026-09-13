@@ -18,7 +18,7 @@ if [ -z "${FIREBASE_ANDROID_API_KEY:-}" ]; then
   FIREBASE_ANDROID_API_KEY="$(firebase apps:sdkconfig ANDROID 1:271491621267:android:e30a5fa653b8872b7b8866 -P pinest-app 2>&1 | python3 -c 'import sys, re; text=sys.stdin.read(); m=re.search(r"\"apiKey\":\s*\"([^\"]+)\"", text); print(m.group(1) if m else "")' || true)"
 fi
 
-flutter build web --release --pwa-strategy=none \
+flutter build web --release --pwa-strategy=none --no-tree-shake-icons \
   --dart-define=FIREBASE_WEB_API_KEY="$FIREBASE_WEB_API_KEY" \
   --dart-define=FIREBASE_ANDROID_API_KEY="${FIREBASE_ANDROID_API_KEY:-$FIREBASE_WEB_API_KEY}"
 
