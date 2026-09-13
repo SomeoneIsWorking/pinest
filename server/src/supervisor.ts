@@ -221,10 +221,12 @@ export class Supervisor {
     const session = s.session as any;
     const customTools = session?._customTools as ToolDefinition[] | undefined;
     if (!Array.isArray(customTools) || customTools.length === 0) return;
-    const sessionId = session?.sessionManager?.getSessionId?.();
+    // The APP session id, not the pi session-file id: the host stamps its own
+    // tasks with the app id, and the app's job queries use that same identity.
+    // Re-arming with the pi id would make adopted sessions' jobs unqueryable.
     const fresh = [
-      createAutoBackgroundBashTool({ bgManager: manager, cwd: s.cwd, sessionId }),
-      ...createBackgroundTools(manager, sessionId),
+      createAutoBackgroundBashTool({ bgManager: manager, cwd: s.cwd, sessionId: id }),
+      ...createBackgroundTools(manager, id),
     ];
     const freshByName = new Map(fresh.map((tool) => [tool.name, tool]));
     let reamed = 0;
