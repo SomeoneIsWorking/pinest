@@ -6,7 +6,10 @@
  *
  * Protocol: see ./protocol.ts (ServerMessage / ClientCommand).
  */
+import { createServer } from "node:http";
+import type { Server } from "node:http";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
+import { createAccessKey, createHttpApi } from "./http-api.ts";
 import debug from "./log.ts";
 import { startTunnel as startProviderTunnel, type StartTunnelResult } from "./tunnel.ts";
 import type { ServerMessage, ClientCommand } from "./protocol.ts";
@@ -22,6 +25,16 @@ type CommandHandler = (cmd: ClientCommand) => void;
 
 interface AuthedSocket extends WebSocket {
   authed: boolean;
+  /**
+   * Sessions this socket asked to follow, or null for "no preference".
+   *
+   * One socket carried every session's stream, so a single busy agent filled the
+   * client's queue and another session's history, images or messages waited
+   * behind it. A client that subscribes receives only the sessions it is
+   * looking at; a client that never subscribes keeps receiving everything, so
+   * this cannot break an app build that predates it.
+   */
+  subscriptions?: Set<string> | null;
   outbound?: OutboundBox;
   authAttempted: boolean;
   acceptingMessages: boolean;
@@ -58,6 +71,24 @@ interface OutboundBox {
 /** How long stream deltas may coalesce before the newest one is flushed. */
 const STREAM_FLUSH_MS = 50;
 
+/**
+ * The one rule for "does this socket get to see this session's traffic".
+ *
+ * A frame with no session (state, errors, authentication) is always delivered:
+ * the session LIST and its notifications must not depend on which tab is open.
+ */
+function followsSession(ws: AuthedSocket, sessionId: string | undefined): boolean {
+  if (!ws.subscriptions) return true;
+  if (sessionId === undefined) return true;
+  return ws.subscriptions.has(sessionId);
+}
+
+/** The session a frame belongs to, when it belongs to exactly one. */
+function frameSessionId(msg: ServerMessage): string | undefined {
+  const value = (msg as { sessionId?: unknown }).sessionId;
+  return typeof value === "string" ? value : undefined;
+}
+
 /** The coalescing key for a supersedable frame; null when it must not coalesce. */
 function streamKeyOf(msg: ServerMessage): string | null {
   if (msg.type !== "stream") return null;
@@ -79,6 +110,7 @@ export class WSServer {
   port: number;
   private expectedUid: string;
   private wss: WebSocketServer | null = null;
+  private httpServer: Server | null = null;
   tunnel: StartTunnelResult | null = null;
   tunnelUrl: string | null = null;
   /** authenticated clients */
@@ -111,28 +143,46 @@ export class WSServer {
     if (event === "command") this.handlers.command = handler;
   }
 
+  /** Secret the app presents on HTTP. Per process, never persisted. */
+  private httpKey = createAccessKey();
+
+  get accessKey(): string {
+    return this.httpKey;
+  }
+
   async start(): Promise<void> {
     this.stopped = false;
     return new Promise((resolve, reject) => {
+      // HTTP and WS share one port: the app reaches one origin through the
+      // tunnel, and everything it SENDS goes over HTTP while the socket stays
+      // for what the server pushes.
+      const server = createServer(
+        createHttpApi({
+          accessKey: this.httpKey,
+          dispatch: (command) => this.handlers.command?.(command as ClientCommand),
+        }),
+      );
+      this.httpServer = server;
       const wss = new WebSocketServer({
-        port: this.port,
-        host: "127.0.0.1",
+        server,
         maxPayload: MAX_PAYLOAD_BYTES,
       });
       this.wss = wss;
       let listening = false;
-      wss.on("error", (error) => {
+      server.on("error", (error: Error) => {
         if (!listening) {
           this.wss = null;
+          this.httpServer = null;
           reject(error);
           return;
         }
-        debug("[remote-code] WS server error:", error.message);
+        debug("[remote-code] control server error:", error.message);
       });
-      this.wss.on("listening", () => {
+      server.listen(this.port, "127.0.0.1");
+      server.on("listening", () => {
         listening = true;
-        this.port = (this.wss!.address() as { port: number }).port;
-        debug(`[remote-code] WS server on 127.0.0.1:${this.port}`);
+        this.port = (server.address() as { port: number }).port;
+        debug(`[remote-code] control server on 127.0.0.1:${this.port} (HTTP + WS)`);
         resolve();
       });
       this.wss.on("connection", (ws) => this.onConnection(ws as AuthedSocket));
@@ -210,6 +260,24 @@ export class WSServer {
       return;
     }
 
+    if (message.type === "subscribe") {
+      if (!ws.authed) {
+        this.closeSocket(ws, 1008, "subscribe before authentication");
+        return;
+      }
+      const ids = Array.isArray(message.sessionIds) ? message.sessionIds : [];
+      ws.subscriptions = new Set(ids.filter((id): id is string => typeof id === "string"));
+      // Anything already queued for a session this socket no longer follows is
+      // stale by definition, so it is dropped rather than delivered.
+      const box = ws.outbound;
+      if (box) {
+        for (const key of [...box.streams.keys()]) {
+          if (!followsSession(ws, key)) box.streams.delete(key);
+        }
+      }
+      return;
+    }
+
     if (message.type === "command") {
       if (!isRecord(message.cmd) || typeof message.cmd.type !== "string") {
         this.closeSocket(ws, 1008, "invalid command envelope");
@@ -277,7 +345,14 @@ export class WSServer {
     this.send(ws, { type: "authed" });
     try {
       const state = this.stateProvider?.();
-      if (state) this.send(ws, state);
+      // The HTTP access key travels with the first snapshot: it is how the app
+      // fetches images and posts messages without the socket, and it is issued
+      // per process, so it belongs to the socket that owns it.
+      if (state?.type === "state") {
+        this.send(ws, { ...state, httpKey: this.httpKey });
+      } else if (state) {
+        this.send(ws, state);
+      }
     } catch (error) {
       debug("[remote-code] WS state snapshot failed:", (error as Error).message);
     }
@@ -361,6 +436,7 @@ export class WSServer {
   /** Schedule one frame for one client, honouring its class. */
   private enqueue(ws: AuthedSocket, msg: ServerMessage, data: string, byteLength: number): void {
     if (ws.readyState !== WebSocket.OPEN || !ws.acceptingMessages) return;
+    if (!followsSession(ws, frameSessionId(msg))) return;
     const box = this.boxOf(ws);
     const key = streamKeyOf(msg);
     if (key !== null) {
@@ -481,6 +557,7 @@ export class WSServer {
   }
 
   stop(): void {
+    this.httpServer?.close();
     this.stopped = true;
     try { this.tunnel?.stop?.(); } catch { /* */ }
     this.tunnel = null;

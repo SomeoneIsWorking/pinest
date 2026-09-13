@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -11,9 +12,29 @@ class ImageStore {
   /// Cap on remembered image bytes; the oldest are dropped first.
   static const int maxBytes = 48 * 1024 * 1024;
 
+  /// How many requests may be in flight at once.
+  ///
+  /// One at a time protected the send path but made every image wait for the
+  /// one before it, so a single answer that never came stalled all of them —
+  /// an 11 KB icon hung exactly like a 3 MB screenshot. A few in parallel keeps
+  /// the socket busy without a transcript's worth of megabytes.
+  static const int maxInFlight = 3;
+
+  /// How long to wait for an answer before treating a request as lost.
+  static const Duration requestTimeout = Duration(seconds: 20);
+
+  /// Tries per id before reporting it unavailable. One retry covers a request
+  /// dropped during a reconnect without turning a dead server into a retry
+  /// storm.
+  static const int maxAttempts = 2;
+
+  /// Injectable clock so tests drive expiry without waiting 20 seconds.
+  static Future<void> Function(Duration) delay = Future<void>.delayed;
+
   final Map<String, Uint8List> _bytes = {};
   final Map<String, String> _failures = {};
   final Set<String> _inFlight = {};
+  final Map<String, int> _attempts = {};
   int _cachedBytes = 0;
 
   /// Send this to the server when an image is requested.
@@ -45,16 +66,34 @@ class ImageStore {
   final List<String> _queued = [];
 
   void _pump() {
-    if (_inFlight.isNotEmpty || _queued.isEmpty) return;
-    final id = _queued.removeAt(0);
-    _inFlight.add(id);
-    request(id);
+    while (_inFlight.length < maxInFlight && _queued.isNotEmpty) {
+      final id = _queued.removeAt(0);
+      _inFlight.add(id);
+      request(id);
+      unawaited(delay(requestTimeout).then((_) => _expired(id)));
+    }
+  }
+
+  /// A request nobody answered. It is re-queued once, then reported: silence
+  /// must become a visible failure rather than an image that loads forever.
+  void _expired(String id) {
+    if (!_inFlight.remove(id)) return;
+    final attempts = (_attempts[id] ?? 0) + 1;
+    _attempts[id] = attempts;
+    if (attempts >= maxAttempts) {
+      _failures[id] = 'the server did not answer (${requestTimeout.inSeconds}s)';
+      return;
+    }
+    if (!_queued.contains(id) && !_bytes.containsKey(id)) {
+      _queued.insert(0, id);
+    }
+    _pump();
   }
 
   void received(String id, String base64Data) {
     _inFlight.remove(id);
-    // ignore: unawaited_futures
-    Future.microtask(_pump);
+    _attempts.remove(id);
+    unawaited(Future.microtask(_pump));
     _failures.remove(id);
     final decoded = base64.decode(base64Data);
     _bytes[id] = decoded;
