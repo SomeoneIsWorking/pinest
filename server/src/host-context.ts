@@ -116,6 +116,12 @@ export class HostContextController {
     });
   }
 
+  /** The active model's context window, or undefined while unknown. */
+  contextWindow(): number | undefined {
+    const w = (this.contextUsage() as { contextWindow?: number } | undefined)?.contextWindow;
+    return typeof w === "number" ? w : undefined;
+  }
+
   onCompacted(event: { trigger?: unknown } | undefined): Promise<void> {
     this.lastFailedCompactTokens = undefined;
     const sessionId = this.deps.getSessionId();

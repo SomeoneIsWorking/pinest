@@ -57,8 +57,8 @@ import { installCrashReporter } from "./crash.ts";
 import { DEFAULT_MODEL } from "./product-defaults.ts";
 import { HostContextController } from "./host-context.ts";
 import { dispatchClientCommand } from "./command-validation.ts";
-import { applyCompactThresholdCommand } from "./compaction-settings.ts";
-import { buildStateMessage, mergeRegistryRows } from "./state-message.ts";
+import { applyCompactThreshold, applyCompactThresholdCommand, reconcileStoredThreshold } from "./compaction-settings.ts";
+import { buildStateMessage, mergeRegistryRows, snapshotsWithJobs } from "./state-message.ts";
 import { reauthenticateRemoteOwner, verifiedOwnerToken } from "./owner-runtime.ts";
 
 const REGISTRY_PATH = process.env.RC_REGISTRY_PATH
@@ -227,10 +227,9 @@ function removeSession(id: string): void {
 
 function getSessionSnapshots(): SessionSnapshot[] {
   const mgr = _supervisor?.bgManager ?? _bgManager;
-  return [..._sessions.values()].map((s) => ({
-    ...s,
-    jobs: mgr ? mgr.listTasks(s.id).map(toJobSummary) : [],
-  }));
+  return snapshotsWithJobs([..._sessions.values()], (id) =>
+    mgr ? mgr.listTasks(id).map(toJobSummary) : [],
+  );
 }
 
 // ── Broadcasting ────────────────────────────────────────────────────────────
@@ -240,9 +239,8 @@ function broadcast(msg: ServerMessage): void {
 
 function stateMessage(): ServerMessage {
   // Cheap sync overlay so every tab carries live status + context usage, not
-  // just whichever session last emitted an event. The overlay updates the
-  // snapshots this message reads; it must not broadcast while a state message
-  // is already being built.
+  // just whichever session last emitted an event. It updates the snapshots this
+  // message reads; it must not broadcast while a state message is being built.
   _supervisor?.refreshUsage?.(false);
   return buildStateMessage({
     hostname: hostname(),
@@ -1079,6 +1077,14 @@ function bridge(pi: ExtensionAPI): void {
     captureUi(ctx?.ui ? { ui: ctx.ui } : ctx);
     ensureDefaultModelPersisted(ctx);
     _ctx = ctx ?? null;
+    // Re-apply the user's stored auto-compact threshold to pi's own trigger.
+    // Without this the intent lived only in pinest's config and pi kept
+    // compacting at the provisioned value — why 300k read back as 400k.
+    reconcileStoredThreshold({
+      agentDir: getAgentDir(),
+      contextWindow: hostContext.contextWindow(),
+      compactAtTokens: loadConfig().compactAtTokens,
+    });
     // The watcher must not depend on Firebase: harness self-modification
     // (edit extension code / settings → applies live) works even when the
     // remote-control bootstrap fails (e.g. no service account key).
