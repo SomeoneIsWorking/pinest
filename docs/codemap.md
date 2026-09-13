@@ -44,6 +44,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Durable-session UI + reconnect | `app` | `app/lib/screens/main_shell.dart` (`SessionHistorySheet`), `app/lib/services/agent_service.dart` |
 | Message options bottom sheet (queued edit/delete + history rewind/copy) | `app` | `app/lib/screens/message_options_sheet.dart` |
 | Relative and exact timestamp formatting for chat messages | `app` | `app/lib/logic/time_format.dart` (`formatRelativeTime`, `formatExactTime`) |
+| Markdown rendering with tappable http(s) links (chat, streaming, release notes) | `app` | `app/lib/widgets/markdown_view.dart` (`MarkdownText` via `openExternalUrl`) |
 | AgentService per-session transient state + eviction | `app` | `app/lib/services/session_cache.dart` (`SessionCache`) |
 | Correlated WebSocket request/reply lifecycle | `app` | `app/lib/services/correlated_request_broker.dart` (`CorrelatedRequestBroker`) |
 | Web client local deploy + Hosting-site routing | `app` | `app/deploy.sh`, `app/firebase.json`, `app/.firebaserc` (`pinest` canonical; `pinest-app` legacy redirect) |
