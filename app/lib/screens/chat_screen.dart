@@ -848,6 +848,9 @@ class _ChatScreenState extends State<ChatScreen> {
                         hintText: working
                             ? 'Agent is working… (steer or wait)'
                             : 'Message… ($_sendShortcutLabel to send)',
+                        // Keep the hint to one line so a large text scale
+                        // doesn't grow the empty field to two rows.
+                        hintMaxLines: 1,
                         border: const OutlineInputBorder(),
                         contentPadding: const EdgeInsets.symmetric(
                           horizontal: 8,
