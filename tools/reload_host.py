@@ -157,6 +157,7 @@ class WebSocket:
     GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
     def __init__(self, port: int, timeout: float) -> None:
+        self._closed = False
         self.sock = socket.create_connection(("127.0.0.1", port), timeout=5)
         self.sock.settimeout(timeout)
         key = base64.b64encode(os.urandom(16)).decode()
@@ -211,6 +212,10 @@ class WebSocket:
             data += chunk
         return data
 
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
     def recv_text(self, deadline: float) -> str | None:
         """Next text frame, or None when the peer closed."""
         while True:
@@ -234,9 +239,13 @@ class WebSocket:
             if masked:
                 payload = bytes(byte ^ mask[i % 4] for i, byte in enumerate(payload))
             if opcode == 0x8:  # close
+                self._closed = True
                 return None
             if opcode in (0x9, 0xA):  # ping/pong
                 continue
+            if opcode == 0x8:  # close
+                self._closed = True
+                return None
             if opcode in (0x1, 0x2, 0x0):
                 return payload.decode(errors="replace")
 
@@ -259,14 +268,22 @@ def recv_json(ws: WebSocket, deadline: float) -> dict[str, Any] | None:
     return None
 
 
-def request_reload(token: str, ports: list[int]) -> int:
-    """Connect, authenticate, and ask for a reload. Returns the port used."""
+def request_reload(token: str, ports: list[int], deadline: float, interval: float) -> str:
+    """Ask until it takes, on one authenticated connection.
+
+    Authentication is a Firebase round trip, so reconnecting per attempt spent
+    ~20s of dead time between requests. The socket is kept open and the same
+    command re-sent until the host tears it down (which is what a reload does) or
+    no load appears before the deadline.
+    """
     failures: list[str] = []
     for port in ports:
-        ws: WebSocket | None = None
         try:
             ws = WebSocket(port, AUTH_TIMEOUT_S)
-            # Firebase verification is a network round trip: wait the full deadline.
+        except (OSError, WebSocketError) as error:
+            failures.append(f"{port}: {error}")
+            continue
+        try:
             ws.send_text(json.dumps({"type": "auth", "token": token}))
             reply = recv_json(ws, time.time() + AUTH_TIMEOUT_S)
             if reply is None:
@@ -275,17 +292,29 @@ def request_reload(token: str, ports: list[int]) -> int:
             if reply.get("type") != "authed":
                 failures.append(f"{port}: authentication refused ({reply.get('message', reply.get('type'))})")
                 continue
-            ws.send_text('{"type":"reload"}')
-            # The host reloads (and drops this socket) or refuses; either way the
-            # recorded load below is what decides.
-            recv_json(ws, time.time() + 3)
-            return port
-        except (OSError, WebSocketError) as error:
-            failures.append(f"{port}: {error}")
+            print(f"authenticated on {port}; asking until it takes", flush=True)
+            return _ask_until(ws, port, deadline, interval)
         finally:
-            if ws is not None:
-                ws.close()
+            ws.close()
     raise ReloadError("no host control channel accepted the request — " + "; ".join(failures))
+
+
+def _ask_until(ws: WebSocket, port: int, deadline: float, interval: float) -> str:
+    """Send the command on an open socket until the socket dies."""
+    attempts = 0
+    while time.time() < deadline:
+        attempts += 1
+        try:
+            ws.send_text('{"type":"reload"}')
+        except OSError as error:
+            return f"{port} (socket closed after {attempts} request(s): {error})"
+        if attempts % 10 == 1:
+            print(f"asked {attempts} time(s) on {port}", flush=True)
+        # A reload tears this socket down; the caller verifies from the record.
+        reply = ws.recv_text(time.time() + interval)
+        if reply is None and ws.closed:
+            return f"{port} (host closed the socket after {attempts} request(s))"
+    return f"{port} ({attempts} request(s), socket still open)"
 
 
 def main() -> int:
@@ -338,40 +367,30 @@ def main() -> int:
     print(f"owner {uid[:6]}… · control channel port(s) {ports}", flush=True)
 
     deadline = time.time() + args.deadline
-    attempt = 0
-    while True:
-        attempt += 1
-        started = time.time()
-        try:
-            used = request_reload(token, ports)
-            print(f"attempt {attempt}: asked the host on port {used} to reload", flush=True)
-        except ReloadError as error:
-            print(f"attempt {attempt}: {error}", flush=True)
+    print(f"asking the host to reload until a load is observed (deadline {args.deadline:g}s)", flush=True)
+    try:
+        detail = request_reload(token, ports, deadline, args.retry_interval)
+        print(f"request ended: {detail}", flush=True)
+    except ReloadError as error:
+        print(f"request failed: {error}", flush=True)
 
-        # Give the host time to re-initialize before deciding. A refusal is
-        # immediate, so this stays short and attempts stay frequent.
-        while time.time() - started < args.verify_timeout:
-            time.sleep(1.5)
-            now = read_runtime_record()
-            if now is None:
-                continue
+    while time.time() < deadline:
+        now = read_runtime_record()
+        if now is not None:
             changed = (
                 now.get("at") != (before or {}).get("at")
                 or now.get("factoryEntries", 0) > (before or {}).get("factoryEntries", 0)
             )
             if changed and now.get("load") == "ok":
-                print(f"reloaded on attempt {attempt}: {describe_record(now)}", flush=True)
+                print(f"reloaded: {describe_record(now)}", flush=True)
                 print(f"status: OK — the harness re-initialized on {now.get('sourceFingerprint')}", flush=True)
                 return 0
             if changed and now.get("load") == "failed":
-                print(f"reloaded on attempt {attempt} but bootstrap FAILED: {describe_record(now)}", flush=True)
+                print(f"reloaded but bootstrap FAILED: {describe_record(now)}", flush=True)
                 return 2
-        if time.time() >= deadline:
-            break
-        print("not reloaded yet (the session was probably mid-response) — retrying", flush=True)
-        time.sleep(args.retry_interval)
+        time.sleep(1)
 
-    print(f"after {attempt} attempt(s): {describe_record(read_runtime_record())}", flush=True)
+    print(f"after the deadline: {describe_record(read_runtime_record())}", flush=True)
     print(
         "status: NOT RELOADED — every request was accepted but no load was recorded. "
         "pi's TUI refuses a reload while a session is streaming, which is the usual cause.",
