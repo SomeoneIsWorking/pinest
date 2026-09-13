@@ -11,11 +11,14 @@ import 'package:pinest_app/models/session.dart';
 import 'package:pinest_app/models/background_job.dart';
 import 'package:pinest_app/screens/login_screen.dart';
 import 'package:pinest_app/screens/main_shell.dart';
+import 'package:pinest_app/models/stream_segment.dart';
 import 'package:pinest_app/services/agent_service.dart';
 import 'package:pinest_app/services/auth_service.dart';
 import 'package:pinest_app/services/user_preferences.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:pinest_app/services/image_store.dart';
+import 'package:pinest_app/services/outgoing_queue.dart';
 
 // Regenerate both README captures from app/ with:
 // flutter test --update-goldens test/readme_screenshots_test.dart
@@ -351,7 +354,7 @@ class _MockAgentService extends ChangeNotifier implements AgentService {
   String? streamingThinkingFor(String id) => null;
 
   @override
-  List<String> streamingSegmentsFor(String id) => const [];
+  List<StreamSegment> streamingSegmentsFor(String id) => const [];
 
   @override
   List<Map<String, dynamic>> toolCallsFor(String id) => const [];
@@ -370,6 +373,15 @@ class _MockAgentService extends ChangeNotifier implements AgentService {
 
   @override
   List<Map<String, dynamic>> parkedFor(String id) => [];
+
+  @override
+  final ImageStore images = ImageStore((_) {});
+
+  @override
+  List<OutgoingMessage> outgoingFor(String sessionId) => const [];
+
+  @override
+  Future<void> restoreOutgoing() async {}
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);

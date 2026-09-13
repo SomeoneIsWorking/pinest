@@ -3,7 +3,6 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import '../widgets/markdown_view.dart';
 import '../services/agent_service.dart';
 import '../services/attachment_selection.dart';
 import '../services/paste_bridge.dart';
@@ -19,13 +18,13 @@ import 'thinking_card.dart';
 import 'task_notification_card.dart';
 import 'message_options_sheet.dart';
 import 'background_jobs_sheet.dart';
-import '../logic/image_cache.dart';
-import '../logic/time_format.dart';
 import '../logic/slash_commands.dart';
 import 'composer_bar.dart';
 
 export 'session_actions.dart';
 import 'tree_dialog.dart';
+import '../models/stream_segment.dart';
+import 'message_bubbles.dart';
 
 class ChatScreen extends StatefulWidget {
   final String sessionId;
@@ -36,19 +35,6 @@ class ChatScreen extends StatefulWidget {
 }
 
 /// Full-size viewer for a base64 image (tool results, user attachments).
-void showImageDialog(BuildContext context, String b64) {
-  showDialog<void>(
-    context: context,
-    builder: (ctx) => Dialog(
-      insetPadding: const EdgeInsets.all(12),
-      child: InteractiveViewer(
-        maxScale: 8,
-        child: Image.memory(decodeImageBytes(b64)),
-      ),
-    ),
-  );
-}
-
 class _ChatScreenState extends State<ChatScreen> {
   final _input = TextEditingController();
   final _scroll = ScrollController();
@@ -421,6 +407,18 @@ class _ChatScreenState extends State<ChatScreen> {
 
     if (streaming != null || streamingThinking != null) _scrollDown();
 
+    // Hint only when the chat itself is empty — tool calls, streamed segments,
+    // thinking and queued sends all count as content.
+    final items = _chatItems(
+      history,
+      streaming,
+      streamingThinking,
+      toolCalls,
+      svc,
+      s,
+      prefs,
+    );
+
     return Column(
       children: [
         if (!svc.wsConnected)
@@ -451,15 +449,7 @@ class _ChatScreenState extends State<ChatScreen> {
         Expanded(
           child: Stack(
             children: [
-              _messageList(
-                history,
-                streaming,
-                streamingThinking,
-                toolCalls,
-                svc,
-                s,
-                prefs,
-              ),
+              _messageList(items),
               Positioned(
                 right: 16,
                 bottom: 16,
@@ -489,7 +479,7 @@ class _ChatScreenState extends State<ChatScreen> {
             ],
           ),
         ),
-        if (history.isEmpty && streaming == null && streamingThinking == null)
+        if (items.isEmpty)
           const Padding(
             padding: EdgeInsets.all(16),
             child: Center(
@@ -519,7 +509,25 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _messageList(
+  Widget _messageList(List<Widget> items) {
+    // Nested scrollables (expanded tool-output blocks) absorb the drag until
+    // they hit their edge; from there the leftover overscroll transfers to the
+    // chat list so the finger never gets stuck at the block's boundary.
+    return NotificationListener<OverscrollNotification>(
+      onNotification: _bubbleNestedOverscroll,
+      child: ListView(
+        controller: _scroll,
+        padding: const EdgeInsets.all(12),
+        children: items,
+      ),
+    );
+  }
+
+  /// Everything the chat renders: history, queued sends, streaming text and
+  /// live tool calls. The list and the "nothing here yet" hint must agree on
+  /// this, otherwise a working agent shows a transcript and "send a message"
+  /// at the same time.
+  List<Widget> _chatItems(
     List<Map<String, dynamic>> history,
     String? streaming,
     String? streamingThinking,
@@ -602,10 +610,10 @@ class _ChatScreenState extends State<ChatScreen> {
         items.add(TaskNotificationCard(text: text, timestamp: timestamp));
       } else if (msg['customType'] == 'compaction') {
         flushTools();
-        items.add(_systemBubble('Conversation compacted', timestamp: timestamp));
+        items.add(SystemBubble(text: 'Conversation compacted', timestamp: timestamp));
       } else if (role == 'system') {
         flushTools();
-        items.add(_systemBubble(text, timestamp: timestamp));
+        items.add(SystemBubble(text: text, timestamp: timestamp));
       } else if (role == 'user') {
         flushTools();
         final historyImgs = [
@@ -636,10 +644,10 @@ class _ChatScreenState extends State<ChatScreen> {
         }
 
         items.add(
-          _bubble(
-            text,
-            Alignment.centerRight,
-            Colors.blueGrey.withAlpha(40),
+          MessageBubble(
+            text: text,
+            align: Alignment.centerRight,
+            background: Colors.blueGrey.withAlpha(40),
             historyImages: historyImgs,
             timestamp: timestamp,
             onTap: (s == null) ? null : openOptions,
@@ -665,7 +673,12 @@ class _ChatScreenState extends State<ChatScreen> {
         }
         if (text.isNotEmpty) {
           flushTools();
-          items.add(_bubble(text, Alignment.centerLeft, null, markdown: true, timestamp: timestamp));
+          items.add(MessageBubble(
+            text: text,
+            align: Alignment.centerLeft,
+            markdown: true,
+            timestamp: timestamp,
+          ));
         }
       }
     }
@@ -692,17 +705,43 @@ class _ChatScreenState extends State<ChatScreen> {
     final isWorking = svc.statusFor(widget.sessionId) == 'working';
     final segments = isWorking
         ? svc.streamingSegmentsFor(widget.sessionId)
-        : const <String>[];
-    for (var i = 0; i < liveTools.length || i < segments.length; i++) {
-      if (i < segments.length) {
+        : const <StreamSegment>[];
+    // Speech goes where it happened: each segment records the tool index it
+    // preceded, so a paragraph written after the 8th tool call lands after
+    // those cards instead of on top of the whole batch.
+    var nextSegment = 0;
+    void flushSegmentsUpTo(int toolIndex) {
+      while (nextSegment < segments.length &&
+          segments[nextSegment].atTool <= toolIndex) {
         flushTools();
-        items.add(_bubble(segments[i], Alignment.centerLeft, null));
-      }
-      if (i < liveTools.length) {
-        currentToolBatch.add(
-          ToolCallView.fromPayload(liveTools[i], source: ToolCallSource.live),
+        items.add(
+          MessageBubble(
+            text: segments[nextSegment].text,
+            align: Alignment.centerLeft,
+            markdown: true,
+          ),
         );
+        nextSegment++;
       }
+    }
+
+    for (var i = 0; i < liveTools.length; i++) {
+      flushSegmentsUpTo(i);
+      currentToolBatch.add(
+        ToolCallView.fromPayload(liveTools[i], source: ToolCallSource.live),
+      );
+    }
+    // Any speech after the last tool call.
+    while (nextSegment < segments.length) {
+      flushTools();
+      items.add(
+        MessageBubble(
+            text: segments[nextSegment].text,
+            align: Alignment.centerLeft,
+            markdown: true,
+          ),
+      );
+      nextSegment++;
     }
     flushTools();
 
@@ -713,7 +752,7 @@ class _ChatScreenState extends State<ChatScreen> {
       items.add(ThinkingCard(thinking: streamingThinking, isStreaming: true));
     }
     if (streaming != null && isWorking) {
-      items.add(_StreamingBubble(text: streaming));
+      items.add(StreamingBubble(text: streaming));
     }
     // Queued messages at the very end — reported by the server, not tracked
     // locally. Image-only messages arrive as the server's '[image]' text.
@@ -730,6 +769,11 @@ class _ChatScreenState extends State<ChatScreen> {
         (latestHistoryUser['text'] as String? ?? '').trim();
     var skippedLatestUser = false;
 
+    // Texts this client sent and is still showing as outgoing bubbles — their
+    // bubble carries the queue state, so they are not drawn twice.
+    final outgoingTexts = {
+      for (final out in svc.outgoingFor(widget.sessionId)) out.text.trim(),
+    };
     for (final text in queued) {
       final trimmedText = text.trim();
       if (!skippedLatestUser &&
@@ -738,6 +782,12 @@ class _ChatScreenState extends State<ChatScreen> {
               (latestHistoryUserText == '[image]' &&
                   (text.isEmpty || text == '[image]')))) {
         skippedLatestUser = true;
+        continue;
+      }
+      // A queued message this client sent is rendered as ITS outgoing bubble
+      // (with the queue state), so it is not drawn twice.
+      if (outgoingTexts.contains(trimmedText) ||
+          (trimmedText == '[image]' && outgoingTexts.contains(''))) {
         continue;
       }
       final localImgs = _pendingImagesByText[text] ?? const <PendingImage>[];
@@ -771,10 +821,10 @@ class _ChatScreenState extends State<ChatScreen> {
       }
 
       items.add(
-        _bubble(
-          text,
-          Alignment.centerRight,
-          Colors.orange.withAlpha(40),
+        MessageBubble(
+          text: text,
+          align: Alignment.centerRight,
+          background: Colors.orange.withAlpha(40),
           queued: true,
           steering: isSteering,
           images: pendingImgs,
@@ -784,17 +834,41 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
       );
     }
+    // Locally-sent messages with no confirmed landing yet. They are shown with a
+    // sending/delivered state so a send can never silently vanish — including in
+    // the window where pi has dequeued the message but history has not arrived.
+    // A message the server already reports as queued keeps ONE bubble (the
+    // outgoing one, labelled), never two.
+    final queuedTexts = {
+      for (final text in queued) text.trim(),
+    };
+    final sendingNow = svc.wsConnected;
+    for (final out in svc.outgoingFor(widget.sessionId)) {
+      final delivered = queuedTexts.contains(out.text.trim()) ||
+          (out.text.trim().isEmpty && queuedTexts.contains('[image]'));
+      items.add(
+        MessageBubble(
+          text: out.text.isEmpty ? '[image]' : out.text,
+          align: Alignment.centerRight,
+          background: Colors.blueGrey.withAlpha(30),
+          images: _pendingImagesByText[out.text] ?? const <PendingImage>[],
+          statusIcon: !sendingNow
+              ? Icons.cloud_off
+              : delivered
+                  ? Icons.inbox
+                  : Icons.schedule,
+          statusLabel: !sendingNow
+              ? 'waiting for connection'
+              : delivered
+                  ? 'queued — will be delivered next'
+                  : 'sending…',
+        ),
+      );
+    }
     // Nested scrollables (expanded tool-output blocks) absorb the drag until
     // they hit their edge; from there the leftover overscroll transfers to the
     // chat list so the finger never gets stuck at the block's boundary.
-    return NotificationListener<OverscrollNotification>(
-      onNotification: _bubbleNestedOverscroll,
-      child: ListView(
-        controller: _scroll,
-        padding: const EdgeInsets.all(12),
-        children: items,
-      ),
-    );
+    return items;
   }
 
   /// Moves the chat list by an inner scrollable's leftover overscroll.
@@ -817,7 +891,6 @@ class _ChatScreenState extends State<ChatScreen> {
     args: tool.args,
     result: tool.result,
     images: tool.images,
-    imagesOmitted: tool.imagesOmitted,
     isError: tool.isError,
     running: tool.running,
     timestamp: tool.timestamp,
@@ -871,251 +944,6 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-
-  Widget _systemBubble(String text, {int? timestamp}) {
-    return Align(
-      alignment: Alignment.center,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        decoration: BoxDecoration(
-          color: Theme.of(context).colorScheme.surfaceContainerHighest.withAlpha(90),
-          borderRadius: BorderRadius.circular(14),
-        ),
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.85,
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.info_outline, size: 13, color: Colors.grey.shade600),
-            const SizedBox(width: 6),
-            Flexible(
-              child: Text(
-                text,
-                style: TextStyle(
-                  fontSize: 11,
-                  color: Colors.grey.shade800,
-                ),
-              ),
-            ),
-            if (timestamp != null && timestamp > 0) ...[
-              const SizedBox(width: 6),
-              Tooltip(
-                message: formatExactTime(timestamp),
-                child: Text(
-                  formatRelativeTime(timestamp),
-                  style: TextStyle(
-                    fontSize: 9,
-                    color: Colors.grey.shade500,
-                  ),
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _bubble(
-    String text,
-    Alignment align,
-    Color? bg, {
-    bool markdown = false,
-    bool queued = false,
-    bool steering = false,
-    int? timestamp,
-    List<PendingImage> images = const [],
-
-    /// History image attachments (base64 maps from the server) — the in-memory
-    /// [images] form dies on refresh; this one survives it.
-    List<Map<String, dynamic>> historyImages = const [],
-    VoidCallback? onTap,
-    VoidCallback? onSecondaryTap,
-    VoidCallback? onLongPress,
-  }) {
-    final isClickable = onTap != null || onSecondaryTap != null || onLongPress != null;
-    Widget bubbleContent = Container(
-      margin: const EdgeInsets.symmetric(vertical: 3),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      constraints: BoxConstraints(
-        maxWidth: MediaQuery.of(context).size.width * 0.82,
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-            // A steer is NOT a follow-up: measured, pi delivers it at the end
-            // of the assistant's current step, not at the end of the turn.
-            // Labelling both "queued" made a working steer look ignored.
-            if (queued)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: Tooltip(
-                  message: steering
-                      ? 'Steering — delivered when the current step ends'
-                      : 'Follow-up — delivered when the turn ends',
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        steering ? Icons.bolt : Icons.schedule,
-                        size: 12,
-                        color: Colors.orange,
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
-                        steering ? 'steering' : 'queued',
-                        style: const TextStyle(
-                          fontSize: 10,
-                          color: Colors.orange,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            if (images.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  alignment: WrapAlignment.end,
-                  children: [
-                    for (final img in images)
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(6),
-                        child: Image.memory(
-                          img.bytes,
-                          width: 96,
-                          height: 96,
-                          fit: BoxFit.cover,
-                          errorBuilder: (_, _, _) =>
-                              const Icon(Icons.broken_image, size: 24),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            if (historyImages.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  alignment: WrapAlignment.end,
-                  children: [
-                    for (final img in historyImages)
-                      InkWell(
-                        onTap: () =>
-                            showImageDialog(context, img['data'] as String),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(6),
-                          child: Image.memory(
-                            decodeImageBytes(img['data'] as String),
-                            width: 96,
-                            height: 96,
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, _, _) =>
-                                const Icon(Icons.broken_image, size: 24),
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            if (text.isNotEmpty)
-              markdown
-                  ? MarkdownText(text, selectable: true)
-                  : Text(text),
-            if (timestamp != null && timestamp > 0)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Tooltip(
-                  message: formatExactTime(timestamp),
-                  child: Text(
-                    formatRelativeTime(timestamp),
-                    style: TextStyle(
-                      fontSize: 10,
-                      color: Theme.of(context).colorScheme.onSurface.withAlpha(102),
-                    ),
-                  ),
-                ),
-              ),
-          ],
-        ),
-      );
-
-    if (isClickable) {
-      bubbleContent = MouseRegion(
-        cursor: SystemMouseCursors.click,
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: onTap,
-          onSecondaryTap: onSecondaryTap,
-          onLongPress: onLongPress,
-          child: bubbleContent,
-        ),
-      );
-    }
-
-    return Align(
-      alignment: align,
-      child: bubbleContent,
-    );
-  }
-
 }
 
-class _StreamingBubble extends StatelessWidget {
-  final String text;
-  const _StreamingBubble({required this.text});
 
-  @override
-  Widget build(BuildContext context) {
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 3),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          border: Border.all(color: Colors.orange.withAlpha(120)),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.82,
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            MarkdownText(text),
-            const SizedBox(height: 4),
-            Row(
-              children: [
-                const SizedBox(
-                  width: 10,
-                  height: 10,
-                  child: CircularProgressIndicator(strokeWidth: 1.5),
-                ),
-                const SizedBox(width: 6),
-                Text(
-                  'streaming…',
-                  style: TextStyle(
-                    fontSize: 10,
-                    color: Colors.orange.withAlpha(220),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}

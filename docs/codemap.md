@@ -17,10 +17,14 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Private atomic hosted refresh-credential storage | `server` | `server/src/auth-cache.ts` |
 | Nonce-bound canonical-loopback browser pairing | `server` | `server/src/browser-login.ts`, `server/src/login.html` |
 | Same-owner credential rotation and verified-token mapping | `server` | `server/src/owner-runtime.ts` |
-| Streaming-text state (segments promoted at tool pauses; shared by supervisor + host) | `server` | `server/src/stream.ts` (`StreamSegmenter`) |
+| Streaming-text state (segments promoted at tool pauses, each stamped with the tool index it preceded; shared by supervisor + host) | `server` | `server/src/stream.ts` (`StreamSegmenter`); `app/lib/models/stream_segment.dart`, interleave in `chat_screen.dart` |
 | History paging (last-50-first, cursor scroll-back) | `server` | `server/src/logic.ts` (`pageHistory`) |
+| History image references + on-demand fetch (LRU store; base64 never travels with history) | `server`, `app` | `registerImage`/`lookupImage` in `server/src/logic.ts`; `get_image` in `server/src/index.ts` + `server/src/supervisor.ts`; `app/lib/services/image_store.dart`, `app/lib/widgets/lazy_image_tile.dart` |
+| Outbound payload guard (oversized single message dropped + counted, never misread as a slow client) | `server` | `server/src/wsserver.ts` (`sendSerialized`) |
 | Session-history extraction incl. pre-compaction messages and compaction bubbles | `server` | `server/src/logic.ts` (`extractSessionMessages`, `entriesToSessionMessages`) |
 | Headless session spawn/resume/kill/route/stream (SDK sessions in-process) | `server` | `server/src/supervisor.ts` |
+| Model lookup/switch + available-model listing (per-session runtime preferred, registry fallback) | `server` | `server/src/session-models.ts` (`SessionModelService`) |
+| Background-task ownership identity (resolved from the LIVE tool context, not creation-time capture) | `server` | `ownershipId` in `server/src/background-tools.ts`; `createAutoBackgroundBashTool` in `server/src/bash-tool.ts` |
 | Owner-bound session registry persistence (private sessions.json, atomic writes/history deletion, corrupt/symlink refusal) | `server` | `server/src/registry.ts` |
 | Harness source-change watcher (debounced file watch → pending-change notice; never reloads) | `server` | `server/src/watch.ts` |
 | Repeatable evidence drills (explicit-reload contract, mid-run handoff, steer delivery timing, compact/clear observability) | `drills` | `drills/` (`*.mjs`) |
@@ -51,6 +55,8 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Newer-deployed-build detection + reload banner (web) | `app` | `app/lib/services/deploy_version.dart` (`DeployVersionWatcher`); reload via `link_bridge.dart` (`reloadPage`); deploy stamp in `app/deploy.sh` (version.json) |
 | Server queue parked on stop → restored into composer | `server`, `app` | `server/src/pending-queue.ts` (`HostPendingQueue.park`), `queue_parked` in `protocol.ts`; `AgentService.parkedFor` + restore in `chat_screen.dart` |
 | AgentService per-session transient state + eviction | `app` | `app/lib/services/session_cache.dart` (`SessionCache`) |
+| Unconfirmed-send visibility + reload durability (text-only replay) | `app` | `app/lib/services/outgoing_queue.dart` (`OutgoingQueue`), `AgentService.sendMessage`/`outgoingFor`/`restoreOutgoing`, bubbles in `chat_screen.dart` |
+| Presentational transcript bubbles (message/system/streaming) | `app` | `app/lib/screens/message_bubbles.dart` (`MessageBubble`, `SystemBubble`, `StreamingBubble`) |
 | Correlated WebSocket request/reply lifecycle | `app` | `app/lib/services/correlated_request_broker.dart` (`CorrelatedRequestBroker`) |
 | Web client local deploy + Hosting-site routing | `app` | `app/deploy.sh`, `app/firebase.json`, `app/.firebaserc` (`pinest` canonical; `pinest-app` legacy redirect) |
 | Canonical Hosting bundle + legacy-redirect verifier | repo root | `tools/verify_hosting.py` |

@@ -3,9 +3,10 @@
  * unit-tested without Firebase or the Pi SDK. Used by supervisor.ts / index.ts.
  */
 import { readdirSync, existsSync, statSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { resolve as resolvePath, isAbsolute, dirname, join } from "node:path";
-import type { HistoryItem, ModelInfo } from "./protocol.ts";
+import type { HistoryImage, HistoryItem, ModelInfo } from "./protocol.ts";
 
 /** Project a Pi SDK Model onto the wire shape (vision inferred from input). */
 export function mapModel(m: {
@@ -112,21 +113,71 @@ export function popPending(
   return list;
 }
 
-/** Images a single tool result may contribute to history. */
-const MAX_IMAGES_PER_RESULT = 2;
-/** Images carried by ONE history payload, newest first. Transcripts can hold
- * dozens of image reads; sending every one on every history push would put
- * tens of MB through the tunnel per refresh. Whatever is dropped is REPORTED
- * per tool (`imagesOmitted`) — a card that just shows nothing is a lie. */
-const MAX_IMAGES_PER_HISTORY = 8;
+/** Base64 payload size in bytes, without decoding it. */
+export function base64Bytes(data: string): number {
+  const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((data.length * 3) / 4) - padding);
+}
 
-function extractImages(content: unknown): Array<{ data: string; mimeType: string }> {
+/** Bytes of image data retained for on-demand fetch before the oldest go. */
+const IMAGE_STORE_MAX_BYTES = 96 * 1024 * 1024;
+
+const imageStore = new Map<string, { data: string; mimeType: string; bytes: number }>();
+let imageStoreBytes = 0;
+
+/**
+ * Images are served ON DEMAND: history carries a reference (id, mime, size) and
+ * the app fetches the bytes only for an image the user actually opens.
+ *
+ * Why: history is re-sent on every push and after every reload. Measured on a
+ * real transcript, eight 4K screenshots were 19.36 MB of a 19.7 MB history
+ * payload — more than the server's entire outbound allowance, so the transcript
+ * could never be delivered and the client reconnect-looped instead. The same
+ * payload is now kilobytes.
+ */
+export function registerImage(data: string, mimeType: string): HistoryImage {
+  const id = createHash("sha1").update(mimeType).update("\0").update(data).digest("hex").slice(0, 20);
+  const existing = imageStore.get(id);
+  if (existing) {
+    imageStore.delete(id); // touch for LRU order
+    imageStore.set(id, existing);
+  } else {
+    const entry = { data, mimeType, bytes: base64Bytes(data) };
+    imageStore.set(id, entry);
+    imageStoreBytes += entry.bytes;
+    while (imageStoreBytes > IMAGE_STORE_MAX_BYTES && imageStore.size > 1) {
+      const oldest = imageStore.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      imageStoreBytes -= imageStore.get(oldest)?.bytes ?? 0;
+      imageStore.delete(oldest);
+    }
+  }
+  const entry = imageStore.get(id)!;
+  return { id, mimeType: entry.mimeType, bytes: entry.bytes };
+}
+
+/** The bytes behind a reference. `undefined` means the server no longer has
+ * them (evicted, or a reference from another process) — callers must say so
+ * rather than render a blank card. */
+export function lookupImage(id: string): { data: string; mimeType: string } | undefined {
+  const entry = imageStore.get(id);
+  if (!entry) return undefined;
+  imageStore.delete(id); // touch for LRU order
+  imageStore.set(id, entry);
+  return { data: entry.data, mimeType: entry.mimeType };
+}
+
+/** Registered image count — diagnostics and tests. */
+export function imageStoreSize(): number {
+  return imageStore.size;
+}
+
+function extractImages(content: unknown): HistoryImage[] {
   if (!Array.isArray(content)) return [];
-  const out: Array<{ data: string; mimeType: string }> = [];
+  const out: HistoryImage[] = [];
   for (const p of content as any[]) {
     if (p?.type === "image" && typeof p.data === "string" && p.data) {
-      out.push({ data: p.data, mimeType: p.mimeType || "image/png" });
-      if (out.length >= MAX_IMAGES_PER_RESULT) break;
+      out.push(registerImage(p.data, p.mimeType || "image/png"));
     }
   }
   return out;
@@ -139,7 +190,7 @@ export function messagesToHistory(messages: unknown): HistoryItem[] {
   // toolCallId) so history cards match what live cards showed — INCLUDING the
   // images a result carried (an image `read` is a text note plus an image
   // part; dropping the part made the picture vanish on the next refresh).
-  const results = new Map<string, { result: string; isError: boolean; images: Array<{ data: string; mimeType: string }>; timestamp?: number }>();
+  const results = new Map<string, { result: string; isError: boolean; images: HistoryImage[]; timestamp?: number }>();
   for (const m of messages as any[]) {
     if (m?.role === "toolResult" && m.toolCallId) {
       const rawResTs = m.timestamp;
@@ -224,7 +275,7 @@ export function messagesToHistory(messages: unknown): HistoryItem[] {
       };
     })
     .filter((m) => m.text.length > 0 || m.tools.length > 0 || (m.images?.length ?? 0) > 0 || !!m.thinking);
-  return budgetHistoryImages(items);
+  return items;
 }
 
 /** Build the history payload for a session: the simple items PLUS assistant
@@ -338,30 +389,6 @@ export function embedImages(text: string): string {
       } catch { return match; }
     });
   } catch { return text; }
-}
-
-/** Keep the newest images within the payload budget; older tool cards keep a
- * COUNT of what was dropped so the app can say "2 images not shown" instead of
- * rendering an empty card. */
-function budgetHistoryImages(items: HistoryItem[]): HistoryItem[] {
-  let budget = MAX_IMAGES_PER_HISTORY;
-  for (let i = items.length - 1; i >= 0; i--) {
-    // The item's OWN images (a user message's attachments) budget like tool
-    // images — newest wins, older ones report a count instead of vanishing.
-    for (const holder of [items[i], ...(items[i]?.tools ?? [])]) {
-      if (!holder) continue;
-      const have = holder.images?.length ?? 0;
-      if (!have) continue;
-      if (budget >= have) {
-        budget -= have;
-      } else {
-        holder.imagesOmitted = have - budget;
-        holder.images = budget > 0 ? holder.images!.slice(0, budget) : [];
-        budget = 0;
-      }
-    }
-  }
-  return items;
 }
 
 /** Default page size for history: the client loads the LAST page first and

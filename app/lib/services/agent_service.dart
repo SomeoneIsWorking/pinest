@@ -6,11 +6,14 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import 'auth_service.dart';
 import 'correlated_request_broker.dart';
 import 'notification_bridge.dart';
+import 'image_store.dart';
+import 'outgoing_queue.dart';
 import 'session_cache.dart';
 import 'user_preferences.dart';
 import '../models/session.dart';
 export '../models/session.dart' show PendingImage;
 import '../models/chat_item.dart';
+import '../models/stream_segment.dart';
 import '../models/session_tree.dart';
 import '../models/background_job.dart';
 
@@ -198,7 +201,7 @@ class AgentService extends ChangeNotifier {
     return (thinking != null && thinking.isNotEmpty) ? thinking : null;
   }
 
-  List<String> streamingSegmentsFor(String id) =>
+  List<StreamSegment> streamingSegmentsFor(String id) =>
       _cache.streamingSegments[id] ?? const [];
 
   List<PinestModel> modelsFor(String id) => _cache.models[id] ?? [];
@@ -369,7 +372,10 @@ class AgentService extends ChangeNotifier {
     final uid = _boundUid;
     _reconnectTimer = Timer(Duration(seconds: _reconnectDelay), () {
       _reconnectTimer = null;
-      _reconnectDelay = (_reconnectDelay * 2).clamp(2, 30);
+      // Capped at 8s: a server reload tears the tunnel down and rebuilds it, so
+      // a 30s cap left the app staring at "reconnecting…" for half a minute
+      // after every reload.
+      _reconnectDelay = (_reconnectDelay * 2).clamp(2, 8);
       final endpoint = _lastEndpoint;
       if (_ws == null && endpoint != null && uid != null && _boundUid == uid) {
         _dial(endpoint);
@@ -382,13 +388,7 @@ class AgentService extends ChangeNotifier {
       case 'authed':
         _connected = true;
         _reconnectDelay = 2; // backoff satisfied — reset
-        if (_outbox.isNotEmpty) {
-          final pending = List<Map<String, dynamic>>.from(_outbox);
-          _outbox.clear();
-          for (final cmd in pending) {
-            _ws?.send({'type': 'command', 'cmd': cmd});
-          }
-        }
+        _flushOutbox();
         break;
       case 'state':
         _online = msg['online'] ?? false;
@@ -433,6 +433,21 @@ class AgentService extends ChangeNotifier {
           _registry.add(session);
         }
         break;
+      case 'image':
+        // The bytes for one history image reference.
+        images.received(
+          msg['imageId'] as String? ?? '',
+          msg['data'] as String? ?? '',
+        );
+        notifyListeners();
+        break;
+      case 'image_missing':
+        images.missing(
+          msg['imageId'] as String? ?? '',
+          msg['reason'] as String? ?? 'unavailable',
+        );
+        notifyListeners();
+        break;
       case 'session_deleted':
         final sid = msg['sessionId'] as String? ?? '';
         _sessions.removeWhere((s) => s.id == sid);
@@ -454,6 +469,21 @@ class AgentService extends ChangeNotifier {
           cursor: cursor,
           reset: reset,
         );
+        // Anything the server now reports in history is confirmed.
+        final confirmedHistory =
+            _cache.history[sid] ?? const <Map<String, dynamic>>[];
+        _outgoing.reconcile(
+          sid,
+          historyTexts: [
+            for (final item in confirmedHistory)
+              if (item['role'] == 'user') (item['text'] as String?) ?? '',
+          ],
+          parkedTexts: [
+            for (final m in _parked[sid] ?? const <Map<String, dynamic>>[])
+              (m['text'] as String?) ?? '',
+          ],
+        );
+        unawaited(_outgoing.persist());
         // History carries the tool calls inline — only clear live tool calls
         // when the session is idle and we received a replacement page. Loading
         // older history or receiving updates during a live run must never wipe
@@ -509,9 +539,19 @@ class AgentService extends ChangeNotifier {
         } else {
           _cache.streamingThinking.remove(sid);
         }
-        final segments = (msg['segments'] as List? ?? const [])
-            .map((x) => x as String)
-            .toList();
+        final segments = <StreamSegment>[];
+        var segIndex = 0;
+        for (final raw in (msg['segments'] as List? ?? const [])) {
+          if (raw is String) {
+            // Older server: text only, so the position is the best we know.
+            segments.add(StreamSegment(text: raw, atTool: segIndex));
+          } else if (raw is Map) {
+            segments.add(
+              StreamSegment.fromJson(Map<String, dynamic>.from(raw), segIndex),
+            );
+          }
+          segIndex++;
+        }
         if (segments.isNotEmpty) {
           _cache.streamingSegments[sid] = segments;
         } else {
@@ -590,6 +630,12 @@ class AgentService extends ChangeNotifier {
               ],
             },
         ];
+        // Parked messages returned to the composer — they are no longer sends.
+        _outgoing.reconcile(
+          sid,
+          parkedTexts: [for (final m in _parked[sid]!) m['text'] as String],
+        );
+        unawaited(_outgoing.persist());
         notifyListeners();
         break;
       }
@@ -675,6 +721,14 @@ class AgentService extends ChangeNotifier {
   /// Flushed in order on reconnect ('authed').
   final List<Map<String, dynamic>> _outbox = [];
 
+  /// Unconfirmed sends, so the UI can show them and a reload can replay them.
+  final OutgoingQueue _outgoing = OutgoingQueue();
+
+  /// History images, fetched on demand (never shipped as base64 with history).
+  late final ImageStore images = ImageStore(
+    (imageId) => _send({'type': 'get_image', 'imageId': imageId}),
+  );
+
   void _send(Map<String, dynamic> cmd) {
     if (cmd['type'] == 'user_message' && !_connected) {
       if (_outbox.length < 50) _outbox.add(cmd);
@@ -722,9 +776,10 @@ class AgentService extends ChangeNotifier {
       _cache.streamingText.remove(s.id);
       _cache.streamingThinking.remove(s.id);
     }
-    // No client-side queue bookkeeping: the server tracks pending messages
-    // and reports them in the session snapshot. This app is a terminal.
-    _send({
+    // The server tracks the queue, but the words are the user's: track them
+    // locally too, so a send is VISIBLE while unconfirmed and survives a
+    // reload instead of dying in the in-memory transport outbox.
+    final cmd = <String, dynamic>{
       'type': 'user_message',
       'sessionId': s.id,
       'text': text,
@@ -734,7 +789,36 @@ class AgentService extends ChangeNotifier {
             {'mimeType': img.mimeType, 'data': img.base64},
         ],
       'deliverAs': steer ? 'steer' : 'followUp',
-    });
+    };
+    _outgoing.track(s.id, cmd, text: text, imageCount: images.length);
+    unawaited(_outgoing.persist());
+    notifyListeners();
+    _send(cmd);
+  }
+
+  /// Messages sent but not yet confirmed by the server (queued or in history).
+  List<OutgoingMessage> outgoingFor(String sessionId) =>
+      _outgoing.forSession(sessionId);
+
+  /// Replays messages restored from storage after a reload.
+  Future<void> restoreOutgoing() async {
+    final commands = await _outgoing.restore();
+    for (final cmd in commands) {
+      if (_outbox.length < 50) _outbox.add(cmd);
+    }
+    if (commands.isNotEmpty) {
+      notifyListeners();
+      if (_connected) _flushOutbox();
+    }
+  }
+
+  void _flushOutbox() {
+    if (_outbox.isEmpty) return;
+    final pending = List<Map<String, dynamic>>.from(_outbox);
+    _outbox.clear();
+    for (final cmd in pending) {
+      _ws?.send({'type': 'command', 'cmd': cmd});
+    }
   }
 
   void cancel(Session s) => _send({'type': 'cancel', 'sessionId': s.id});

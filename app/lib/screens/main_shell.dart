@@ -57,6 +57,10 @@ class _MainShellState extends State<MainShell> {
       );
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      // Messages accepted before a reload are replayed, not forgotten: the
+      // transport outbox is memory-only, so a page reload used to destroy the
+      // user's words silently.
+      svc.restoreOutgoing();
       _checkUpdateOnAndroid();
     });
     // Web: detect a newer deployed build and offer a reload.
