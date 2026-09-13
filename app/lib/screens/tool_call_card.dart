@@ -12,6 +12,8 @@ class ToolCallCard extends StatefulWidget {
   final bool isError;
   final bool running;
   final int? timestamp;
+  /// Long-press action: rewind the conversation to this call.
+  final VoidCallback? onLongPress;
 
   const ToolCallCard({
     super.key,
@@ -22,6 +24,7 @@ class ToolCallCard extends StatefulWidget {
     required this.isError,
     required this.running,
     this.timestamp,
+    this.onLongPress,
   });
 
   @override
@@ -59,6 +62,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
           children: [
             InkWell(
               onTap: () => setState(() => _expanded = !_expanded),
+              onLongPress: widget.onLongPress,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [

@@ -10,6 +10,7 @@ import { DEFAULT_MODEL } from "./product-defaults.ts";
 import { reauthenticateRemoteOwner } from "./owner-runtime.ts";
 import { pendingReloadState, queueReload } from "./reload-manager.ts";
 import { Type } from "typebox";
+import { registerSessionMessaging } from "./session-messaging.ts";
 import debug from "./log.ts";
 
 function statSyncSafe(p: string): boolean {
@@ -373,6 +374,37 @@ export function registerHostCommands(pi: ExtensionAPI, deps: () => HostCommandDe
     const { sessionId, sessions } = deps();
     return sessions?.get(sessionId)?.status === "working";
   };
+
+  registerSessionMessaging(pi, () => {
+    const d = deps();
+    return {
+      hostSessionId: () => d.sessionId,
+      sessions: () => {
+        const rows = new Map<string, { id: string; name?: string; running?: boolean }>();
+        for (const [id, snap] of d.sessions) {
+          rows.set(id, { id, name: (snap as { name?: string })?.name, running: true });
+        }
+        return rows;
+      },
+      // Delivering through the supervisor means a message from an agent and a
+      // message from the app take exactly the same path, including the
+      // streaming/idle handling and the queue mirror.
+      deliverToSpawned: async (id, text, deliverAs) => {
+        const handled = await d.supervisor?.handleSessionCommand({
+          type: "user_message",
+          sessionId: id,
+          text,
+          deliverAs,
+          id: randomUUID(),
+        });
+        if (!handled) throw new Error(`session ${id} is no longer running`);
+      },
+      deliverToHost: (text, deliverAs) => {
+        pi.sendUserMessage(text, { deliverAs });
+      },
+      notify: (message) => d.say(undefined, message),
+    };
+  });
 
   // ── reload_runtime — LLM-callable; lets the agent apply its own edits ──
   pi.registerTool({

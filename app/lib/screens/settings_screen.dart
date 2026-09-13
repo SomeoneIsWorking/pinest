@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import '../logic/byte_format.dart';
 import '../logic/token_format.dart';
 import '../services/auth_service.dart';
 import '../services/agent_service.dart';
@@ -22,6 +23,7 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   final _threshold = TextEditingController();
+  final _imageCap = TextEditingController();
   bool _steerByDefault = false;
   bool _showThinking = true;
   bool _collapseToolCalls = true;
@@ -145,6 +147,74 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         showAppToast(context, 'Tunnel URL copied');
                       },
                     ),
+            ),
+          ),
+          const SizedBox(height: 24),
+
+          // ── Image cap ─────────────────────────────────────────────────────
+          const Text('Images sent to the model',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 8),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Larger images are scaled down before the model sees them. '
+                    'A provider that refuses an oversized request rejects every '
+                    'later request too, which is why this is capped well under '
+                    'the provider limit.',
+                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _imageCap,
+                          keyboardType: TextInputType.text,
+                          decoration: const InputDecoration(
+                            labelText: 'Max image size (e.g. 1MB)',
+                            hintText: '1MB',
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      FilledButton(
+                        onPressed: () {
+                          final bytes = parseByteSize(_imageCap.text);
+                          if (bytes == null || bytes < 64 * 1024) {
+                            showAppToast(
+                              context,
+                              'Enter at least 64KB, e.g. 1MB',
+                              isError: true,
+                            );
+                            return;
+                          }
+                          if (!svc.anyMachineOnline) {
+                            showAppToast(
+                              context,
+                              'No machine online',
+                              isError: true,
+                            );
+                            return;
+                          }
+                          svc.setMaxImageBytes(bytes);
+                          showAppToast(
+                            context,
+                            'Images above ${formatByteSize(bytes)} are scaled down',
+                          );
+                        },
+                        child: const Text('Save'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
           const SizedBox(height: 24),

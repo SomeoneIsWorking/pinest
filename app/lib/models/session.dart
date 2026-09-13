@@ -25,6 +25,38 @@ class PendingImage {
   String get base64 => base64Encode(bytes);
 }
 
+/// An in-flight provider retry reported by the agent.
+class RetryState {
+  final int attempt;
+  final int maxAttempts;
+  final int delayMs;
+  final String errorMessage;
+
+  const RetryState({
+    required this.attempt,
+    required this.maxAttempts,
+    required this.delayMs,
+    required this.errorMessage,
+  });
+
+  static RetryState? fromMap(Object? raw) {
+    if (raw is! Map) return null;
+    return RetryState(
+      attempt: (raw['attempt'] as num?)?.toInt() ?? 0,
+      maxAttempts: (raw['maxAttempts'] as num?)?.toInt() ?? 0,
+      delayMs: (raw['delayMs'] as num?)?.toInt() ?? 0,
+      errorMessage: raw['errorMessage'] as String? ?? 'provider error',
+    );
+  }
+
+  /// "2/3 in 50s" — what the user needs to decide whether to wait or stop.
+  String get describe {
+    final seconds = (delayMs / 1000).round();
+    final attemptText = maxAttempts > 0 ? '$attempt/$maxAttempts' : '$attempt';
+    return seconds > 0 ? 'retrying $attemptText in ${seconds}s' : 'retrying $attemptText';
+  }
+}
+
 class Session {
   final String id;
   final String name;
@@ -41,6 +73,11 @@ class Session {
 
   /// True while the server is actively running compact() for this session.
   final bool isCompacting;
+
+  /// The provider error the agent is retrying on its own, if any. The retry
+  /// loop belongs to the agent, so stopping it means aborting THIS session —
+  /// which is why the state has to be visible rather than only an error toast.
+  final RetryState? retry;
   final String status; // idle | working | error
   final bool isInteractive;
   final bool isHost; // the interactive session hosting the server
@@ -76,6 +113,7 @@ class Session {
     this.contextPercent,
     this.contextCompactAt,
     this.isCompacting = false,
+    this.retry,
     this.status = 'idle',
     this.isInteractive = false,
     this.isHost = false,
@@ -128,6 +166,7 @@ class Session {
       contextPercent: (context?['percent'] as num?)?.toDouble(),
       contextCompactAt: context?['compactAt'] as int?,
       isCompacting: map['isCompacting'] == true,
+      retry: registry ? null : RetryState.fromMap(map['retry']),
       status: registry && rawStatus == 'running' ? 'idle' : rawStatus,
       isInteractive: map['isInteractive'] == true,
       isHost: map['isHost'] == true,

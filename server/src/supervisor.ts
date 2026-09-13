@@ -744,6 +744,24 @@ export class Supervisor {
         });
         return;
       }
+      if (event.type === "auto_retry_start") {
+        // Surface pi's own retry so the app can offer a stop that works: the
+        // loop lives in the agent, and `cancel` on this session aborts it.
+        this.callbacks.upsertSession(id, {
+          status: "working",
+          retry: {
+            attempt: Number(event.attempt ?? 0),
+            maxAttempts: Number(event.maxAttempts ?? 0),
+            delayMs: Number(event.delayMs ?? 0),
+            errorMessage: String(event.errorMessage ?? "provider error"),
+          },
+        }, true);
+        return;
+      }
+      if (event.type === "auto_retry_end") {
+        this.callbacks.upsertSession(id, { retry: null }, true);
+        return;
+      }
       if (event.type === "message_start") {
         s.turnStarted = true;
         if (event.message?.role === "user") {
