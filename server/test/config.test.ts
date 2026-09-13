@@ -77,3 +77,31 @@ test("saveConfig: writes readable JSON to the configured path", () => {
   const parsed = JSON.parse(raw);
   assert.equal(parsed.tunnelProvider, "tailscale");
 });
+
+test("a test process cannot write the real user config (guard fires)", async () => {
+  // A guard that never fires is decoration: run the real writer in a child that
+  // looks exactly like a test process with no RC_CONFIG_PATH, and require the
+  // refusal to name the path. Without the guard this child overwrote the user's
+  // saved settings with defaults.
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const configTs = fileURLToPath(new URL("../src/config.ts", import.meta.url));
+  const child = spawnSync(
+    process.execPath,
+    [
+      "--experimental-strip-types",
+      "--input-type=module",
+      "-e",
+      `const { saveConfig } = await import(${JSON.stringify(configTs)});\n`
+        + "try { saveConfig({ tunnelProvider: \"ngrok\" }); console.log(\"NO-REFUSAL\"); }\n"
+        + "catch (error) { console.log(\"REFUSED: \" + error.message); }",
+    ],
+    {
+      env: { ...process.env, NODE_TEST_CONTEXT: "child-v8", RC_CONFIG_PATH: "" },
+      encoding: "utf-8",
+    },
+  );
+  const out = `${child.stdout}${child.stderr}`;
+  assert.match(out, /REFUSED: refusing to write the user's real config/);
+  assert.doesNotMatch(out, /NO-REFUSAL/);
+});
