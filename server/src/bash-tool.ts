@@ -156,9 +156,12 @@ export interface BackgroundProcessManagerOptions {
 export class BackgroundProcessManager {
   private readonly tasks = new Map<string, BackgroundTask>();
   private readonly autoBgTimeoutMs: number;
-  private readonly notifyCompletion?: (task: BackgroundTask) => void | Promise<void>;
-  private readonly hostSessionId?: string;
+  /** Re-armed by every extension (re)load via createDefaultBackgroundManager,
+   * so a manager that survived a runtime reload adopts the CURRENT delivery
+   * policy instead of the stale closure it was created with. */
+  public notifyCompletion?: (task: BackgroundTask) => void | Promise<void>;
   public onTaskUpdate?: (task: BackgroundTask) => void;
+  private readonly hostSessionId?: string;
 
   constructor(options: BackgroundProcessManagerOptions = {}) {
     this.autoBgTimeoutMs = options.autoBgTimeoutMs ??
@@ -727,13 +730,17 @@ export interface DefaultBackgroundManagerDeps {
   autoBgTimeoutMs?: number;
 }
 
+/** One BackgroundProcessManager per PROCESS. Sessions and bg tools capture
+ * the manager instance at registration; a runtime reload must not leave them
+ * holding a manager with the previous (stale) delivery closure. The singleton
+ * is adopted and re-armed with the current policy on every extension load. */
+const BG_MANAGER_SINGLETON = Symbol.for("pinest.background-manager");
+
 export function createDefaultBackgroundManager(
   deps: DefaultBackgroundManagerDeps
 ): BackgroundProcessManager {
-  return new BackgroundProcessManager({
-    autoBgTimeoutMs: deps.autoBgTimeoutMs,
-    hostSessionId: deps.getSessionId(),
-    notifyCompletion: async (task) => {
+  const arm = (mgr: BackgroundProcessManager): BackgroundProcessManager => {
+    mgr.notifyCompletion = async (task) => {
       const targetSessionId = task.sessionId || deps.getSessionId();
       const content = formatTaskNotificationXml(task);
       const details = {
@@ -788,16 +795,26 @@ export function createDefaultBackgroundManager(
         sessionId: targetSessionId,
         message: `Background command "${task.command.slice(0, 60)}" ${task.status} (exit ${task.exitCode ?? 0})`,
       });
-    },
-    onTaskUpdate: (task) => {
+    };
+    mgr.onTaskUpdate = (task) => {
       const targetSessionId = task.sessionId || deps.getSessionId();
       deps.broadcast({
         type: "job_update",
         sessionId: targetSessionId,
         job: toJobSummary(task),
       });
-    },
+    };
+    return mgr;
+  };
+
+  const existing = (globalThis as any)[BG_MANAGER_SINGLETON] as BackgroundProcessManager | undefined;
+  if (existing) return arm(existing);
+  const fresh = new BackgroundProcessManager({
+    autoBgTimeoutMs: deps.autoBgTimeoutMs,
+    hostSessionId: deps.getSessionId(),
   });
+  (globalThis as any)[BG_MANAGER_SINGLETON] = fresh;
+  return arm(fresh);
 }
 
 export function registerBashIntegration(
