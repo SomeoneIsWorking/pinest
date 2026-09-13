@@ -157,4 +157,34 @@ void main() {
     q.reconcile('s1', parkedTexts: ['undelivered']);
     expect(q.forSession('s1'), isEmpty);
   });
+
+test('discarding an unconfirmed send removes exactly that one', () {
+  final q = OutgoingQueue();
+  q.track('s1', {'type': 'user_message', 'text': 'stuck'}, text: 'stuck', imageCount: 0);
+  q.track('s1', {'type': 'user_message', 'text': 'also stuck'}, text: 'also stuck', imageCount: 0);
+  final first = q.forSession('s1').first;
+
+  q.remove('s1', first);
+
+  expect(q.forSession('s1').map((m) => m.text), ['also stuck'],
+      reason: 'the user discards the bubble they pressed, not the queue');
+});
+
+test('discarding the last one leaves the session empty', () {
+  final q = OutgoingQueue();
+  q.track('s1', {'type': 'user_message', 'text': 'only'}, text: 'only', imageCount: 0);
+  q.remove('s1', q.forSession('s1').single);
+  expect(q.forSession('s1'), isEmpty);
+});
+
+test('a resumed send keeps the steer/follow-up choice it was sent with', () {
+  // Re-sending must not silently change WHEN pi delivers it: a steer lands at
+  // the end of the current step, a follow-up at the end of the turn.
+  final q = OutgoingQueue();
+  q.track('s1', {'type': 'user_message', 'text': 'steered', 'deliverAs': 'steer'},
+      text: 'steered', imageCount: 0);
+  final msg = q.forSession('s1').single;
+  expect(msg.steer, isTrue);
+  expect(msg.command['text'], 'steered', reason: 'retry replays the original command');
+});
 }
