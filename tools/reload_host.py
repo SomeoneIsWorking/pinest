@@ -324,6 +324,25 @@ def recv_json(ws: WebSocket, wait: float) -> dict[str, Any] | None:
     return None
 
 
+def format_close(ws: "WebSocket") -> str:
+    """The close code AND the reason: the reason is the string that names the
+    rule the host refused us under, so dropping it drops the diagnosis."""
+    code = f"code {ws.close_code}" if ws.close_code else "no close code"
+    reason = f": {ws.close_reason!r}" if ws.close_reason else " (no reason given)"
+    return code + reason
+
+
+def reload_command() -> dict[str, Any]:
+    """The reload request, in the envelope the host's dispatcher accepts.
+
+    The WS server routes only three top-level types — `auth`, `command`, and
+    `ping` — and answers anything else with `1008 unknown message type`. The
+    reload therefore travels inside `cmd`, exactly as the app sends it. Sending
+    a bare `{"type":"reload"}` is rejected by the host, not by the reload guard.
+    """
+    return {"type": "command", "cmd": {"type": "reload"}}
+
+
 def describe_frame(text: str) -> str:
     """A frame's type, for reporting what the host actually said back."""
     try:
@@ -378,7 +397,7 @@ def ask_repeatedly(token: str, port: int, deadline: float, interval: float) -> N
             while time.time() < deadline:
                 attempts += 1
                 try:
-                    ws.send_text('{"type":"reload"}')
+                    ws.send_text(json.dumps(reload_command()))
                 except OSError as error:
                     print(f"ask {attempts}: socket write failed ({error}); reconnecting", flush=True)
                     break
@@ -397,7 +416,7 @@ def ask_repeatedly(token: str, port: int, deadline: float, interval: float) -> N
                         print(f"ask {attempts}: host replied with {kind}", flush=True)
                     frame = ws.recv_text(ASK_READ_WINDOW_S)
                 if ws.closed:
-                    detail = f"code {ws.close_code}" if ws.close_code else ws.close_reason
+                    detail = format_close(ws)
                     print(f"ask {attempts}: host closed the connection ({detail}); reconnecting", flush=True)
                     break
                 if attempts == 1 or attempts % 20 == 0:
@@ -412,9 +431,36 @@ def ask_repeatedly(token: str, port: int, deadline: float, interval: float) -> N
                 ws.close()
 
 
+def selftest() -> int:
+    """Prove the outbound request matches the host's dispatcher contract.
+
+    The host routes `auth`, `command`, and `ping`; every other top-level type is
+    closed with 1008. A reload sent as `{"type":"reload"}` looks like a working
+    request from inside this tool and is a protocol error on the wire, so the
+    shape itself has to be checked.
+    """
+    message = reload_command()
+    failures: list[str] = []
+    if message.get("type") != "command":
+        failures.append(f"top-level type must be 'command', got {message.get('type')!r}")
+    cmd = message.get("cmd")
+    if not isinstance(cmd, dict) or cmd.get("type") != "reload":
+        failures.append(f"reload must travel as cmd.type, got {cmd!r}")
+    encoded = json.dumps(message)
+    if encoded != '{"type": "command", "cmd": {"type": "reload"}}':
+        failures.append(f"wire form changed: {encoded}")
+    for failure in failures:
+        print(f"selftest FAIL: {failure}")
+    if failures:
+        return 1
+    print(f"selftest OK: sends {encoded}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--status", action="store_true", help="report the loaded build and exit")
+    parser.add_argument("--selftest", action="store_true", help="check the outbound request shape and exit")
     parser.add_argument(
         "--watch-status",
         type=float,
@@ -454,6 +500,8 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if args.selftest:
+        return selftest()
     before = read_runtime_record()
     print(f"before: {describe_record(before)}", flush=True)
     if args.status:
