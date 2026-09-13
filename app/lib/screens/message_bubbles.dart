@@ -37,7 +37,11 @@ void showImageDialog(BuildContext context, String b64) {
   required bool connected,
   required bool queuedSeen,
   required bool steer,
+  String? failure,
 }) {
+  if (failure != null && failure.isNotEmpty) {
+    return (icon: Icons.error_outline, label: 'not delivered — $failure');
+  }
   if (!connected) {
     return (icon: Icons.cloud_off, label: 'waiting for connection');
   }

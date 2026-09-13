@@ -853,6 +853,7 @@ class _ChatScreenState extends State<ChatScreen> {
         connected: sendingNow,
         queuedSeen: delivered || out.queuedSeen,
         steer: steering,
+        failure: out.failure,
       );
       items.add(
         MessageBubble(

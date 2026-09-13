@@ -28,6 +28,10 @@ class OutgoingMessage {
   /// (sending → queued → sending → processed, as observed).
   bool queuedSeen = false;
 
+  /// Why this send was refused, when the server said so. A refused send must
+  /// not keep claiming it is on its way.
+  String? failure;
+
   OutgoingMessage({
     required this.sessionId,
     required this.text,
@@ -121,6 +125,16 @@ class OutgoingQueue {
           (text.isEmpty && queued.contains('[image]'))) {
         message.queuedSeen = true;
       }
+    }
+  }
+
+  /// The server refused this session's pending sends (e.g. it is no longer
+  /// running). They stay visible WITH the reason instead of vanishing.
+  void markFailed(String sessionId, String reason) {
+    final list = _bySession[sessionId];
+    if (list == null || list.isEmpty) return;
+    for (final message in list) {
+      message.failure = reason;
     }
   }
 

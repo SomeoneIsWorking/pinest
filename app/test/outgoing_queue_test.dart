@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pinest_app/screens/message_bubbles.dart';
 import 'package:pinest_app/services/outgoing_queue.dart';
@@ -118,6 +119,26 @@ void main() {
   test('an offline send says so instead of pretending it was sent', () {
     final status = sendStatusFor(connected: false, queuedSeen: false, steer: true);
     expect(status.label, 'waiting for connection');
+  });
+
+  test('a refused send says so instead of claiming it is on its way', () {
+    final q = OutgoingQueue();
+    q.track('s1', cmd('s1', 'never lands'), text: 'never lands', imageCount: 0);
+    q.markFailed('s1', 'session s1 is no longer running');
+
+    final message = q.forSession('s1').single;
+    final status = sendStatusFor(
+      connected: true,
+      queuedSeen: message.queuedSeen,
+      steer: message.steer,
+      failure: message.failure,
+    );
+    expect(status.label, 'not delivered — session s1 is no longer running');
+    expect(status.icon, Icons.error_outline);
+    // It stays visible with the reason until the record clears.
+    expect(q.forSession('s1').length, 1);
+    q.reconcile('s1', historyTexts: ['never lands']);
+    expect(q.forSession('s1'), isEmpty);
   });
 
   test('confirming clears the persisted entry too', () async {
