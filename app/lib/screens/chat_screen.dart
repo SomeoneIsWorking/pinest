@@ -17,6 +17,7 @@ import 'session_actions.dart';
 import 'tool_call_card.dart';
 import 'tool_call_group.dart';
 import 'thinking_card.dart';
+import 'task_notification_card.dart';
 import 'message_options_sheet.dart';
 import 'background_jobs_sheet.dart';
 import '../logic/time_format.dart';
@@ -97,8 +98,11 @@ class _ChatScreenState extends State<ChatScreen> {
   void _onScroll() {
     if (_scroll.hasClients) {
       // Considered "at bottom" if within 80px of the max scroll extent
-      _atBottom =
+      final atBottom =
           _scroll.position.pixels >= _scroll.position.maxScrollExtent - 80;
+      if (atBottom != _atBottom) {
+        setState(() => _atBottom = atBottom);
+      }
       // Scrolled to the top with older history available → pull the previous
       // page (server-side cursor pagination, HISTORY_PAGE_SIZE at a time).
       if (_scroll.position.pixels <= 0 &&
@@ -189,6 +193,16 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  void _scrollToBottom() {
+    if (_scroll.hasClients) {
+      _scroll.animateTo(
+        _scroll.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 250),
+        curve: Curves.easeOutCubic,
+      );
+    }
+  }
+
   /// A paste that carried an image we could not read must SAY so — an empty
   /// attachment strip looks identical to "the listener never fired".
   void _onPasteWithoutImage(String detail) {
@@ -233,7 +247,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (files.isEmpty && mounted) {
       showAppToast(
         context,
-        'No image read from clipboard. On Firefox/Zen use ⌘V in the message field instead.',
+        'No image found on clipboard',
       );
       return;
     }
@@ -358,7 +372,43 @@ class _ChatScreenState extends State<ChatScreen> {
         if (MediaQuery.of(context).size.width >= wideBarMinWidth)
           _toolbar(context, svc, s, working, models),
         BackgroundJobsBanner(svc: svc, sessionId: widget.sessionId),
-        Expanded(child: _messageList(history, streaming, streamingThinking, toolCalls, svc, s, prefs)),
+        Expanded(
+          child: Stack(
+            children: [
+              _messageList(
+                history,
+                streaming,
+                streamingThinking,
+                toolCalls,
+                svc,
+                s,
+                prefs,
+              ),
+              Positioned(
+                right: 16,
+                bottom: 16,
+                child: AnimatedOpacity(
+                  opacity: _atBottom ? 0.0 : 1.0,
+                  duration: const Duration(milliseconds: 180),
+                  child: IgnorePointer(
+                    ignoring: _atBottom,
+                    child: FloatingActionButton.small(
+                      heroTag: null,
+                      onPressed: _scrollToBottom,
+                      tooltip: 'Scroll to bottom',
+                      backgroundColor:
+                          Theme.of(context).colorScheme.surfaceContainerHigh,
+                      foregroundColor:
+                          Theme.of(context).colorScheme.primary,
+                      elevation: 3,
+                      child: const Icon(Icons.keyboard_arrow_down, size: 22),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
         if (history.isEmpty && streaming == null && streamingThinking == null)
           const Padding(
             padding: EdgeInsets.all(16),
@@ -450,7 +500,15 @@ class _ChatScreenState extends State<ChatScreen> {
       final text = msg['text'] as String? ?? '';
       final tools = msg['tools'] as List?;
       final timestamp = (msg['timestamp'] as num?)?.toInt() ?? (msg['ts'] as num?)?.toInt();
-      if (role == 'user') {
+      final isTaskNotification = (msg['customType'] == 'background-task-notification') ||
+          text.trim().startsWith('<background-task-notification>');
+      if (isTaskNotification) {
+        flushTools();
+        items.add(TaskNotificationCard(text: text, timestamp: timestamp));
+      } else if (role == 'system') {
+        flushTools();
+        items.add(_systemBubble(text, timestamp: timestamp));
+      } else if (role == 'user') {
         flushTools();
         final historyImgs = [
           for (final img in (msg['images'] as List? ?? const []))
@@ -859,6 +917,52 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 ),
               ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _systemBubble(String text, {int? timestamp}) {
+    return Align(
+      alignment: Alignment.center,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surfaceContainerHighest.withAlpha(90),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width * 0.85,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.info_outline, size: 13, color: Colors.grey.shade600),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                text,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: Colors.grey.shade800,
+                ),
+              ),
+            ),
+            if (timestamp != null && timestamp > 0) ...[
+              const SizedBox(width: 6),
+              Tooltip(
+                message: formatExactTime(timestamp),
+                child: Text(
+                  formatRelativeTime(timestamp),
+                  style: TextStyle(
+                    fontSize: 9,
+                    color: Colors.grey.shade500,
+                  ),
+                ),
+              ),
+            ],
           ],
         ),
       ),
