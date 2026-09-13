@@ -148,9 +148,19 @@ test("isHostOwnedTask: only the host's own tasks pass; foreign and unknown are r
   const rLegacy = await manager.executeCommand("sleep 10"); // session-less legacy
 
   assert.equal(manager.isHostOwnedTask(rHost.task!.id), true, "host-owned task passes");
-  assert.equal(manager.isHostOwnedTask(rLegacy.task!.id), true, "session-less task belongs to the host");
   assert.equal(manager.isHostOwnedTask(rForeign.task!.id), false, "foreign task refused");
   assert.equal(manager.isHostOwnedTask("bg_nonexistent"), false, "unknown task refused");
+  // The host stamps EVERY task it starts, so a task with no id is not the
+  // host's by assumption — that assumption leaked other projects' completions
+  // into the host transcript (bg_4b7a536e).
+  assert.equal(
+    manager.isHostOwnedTask(rLegacy.task!.id),
+    false,
+    "a session-less task is not assumed to be the host's",
+  );
+  // With evidence that it ran in the host's own directory, it is.
+  manager.resolveOrphan = () => ({ kind: "host" });
+  assert.equal(manager.isHostOwnedTask(rLegacy.task!.id), true);
 
   manager.dispose();
 });
