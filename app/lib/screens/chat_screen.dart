@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import './retry_banner.dart';
 import '../services/agent_service.dart';
 import '../services/attachment_selection.dart';
 import '../services/paste_bridge.dart';
@@ -445,6 +446,8 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         if (MediaQuery.of(context).size.width >= wideBarMinWidth)
           _toolbar(context, svc, s, working, models),
+        if (s != null)
+          RetryBanner(session: s, onStop: () => svc.cancel(s)),
         BackgroundJobsBanner(svc: svc, sessionId: widget.sessionId),
         Expanded(
           child: Stack(
@@ -667,17 +670,21 @@ class _ChatScreenState extends State<ChatScreen> {
               ToolCallView.fromPayload(
                 Map<String, dynamic>.from(t as Map),
                 source: ToolCallSource.history,
-              ),
+              ).atEntry(msg['id'] as String?),
             );
           }
         }
         if (text.isNotEmpty) {
           flushTools();
+          final assistantEntry = msg['id'] as String?;
           items.add(MessageBubble(
             text: text,
             align: Alignment.centerLeft,
             markdown: true,
             timestamp: timestamp,
+            onLongPress: (s == null || assistantEntry == null || assistantEntry.isEmpty)
+                ? null
+                : () => _confirmRewind(s, assistantEntry),
           ));
         }
       }
@@ -887,15 +894,55 @@ class _ChatScreenState extends State<ChatScreen> {
     return true;
   }
 
-  Widget _toolCallCard(ToolCallView tool) => ToolCallCard(
-    name: tool.name,
-    args: tool.args,
-    result: tool.result,
-    images: tool.images,
-    isError: tool.isError,
-    running: tool.running,
-    timestamp: tool.timestamp,
-  );
+  Widget _toolCallCard(ToolCallView tool) {
+    final s = _session(context.read<AgentService>());
+    final entry = tool.entryId;
+    return ToolCallCard(
+      name: tool.name,
+      args: tool.args,
+      result: tool.result,
+      images: tool.images,
+      isError: tool.isError,
+      running: tool.running,
+      timestamp: tool.timestamp,
+      onLongPress: (s == null || entry == null || entry.isEmpty)
+          ? null
+          : () => _confirmRewind(s, entry),
+    );
+  }
+
+  /// Rewind the branch to [entryId] after saying what that costs.
+  ///
+  /// This is the only way to drop a message that makes every later request fail
+  /// (a 4K screenshot that the provider refuses), and it discards the messages
+  /// after the point — recoverable through the tree, but not silently.
+  Future<void> _confirmRewind(Session s, String entryId) async {
+    final svc = context.read<AgentService>();
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Rewind to this point?'),
+        content: const Text(
+          'Everything after this point leaves the branch. It stays recoverable '
+          'from the conversation tree.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Rewind'),
+          ),
+        ],
+      ),
+    );
+    if (go != true || !mounted) return;
+    await svc.rewindSession(s, entryId);
+    if (!mounted) return;
+    showAppToast(context, 'Rewound the conversation to that point');
+  }
 
   Widget _toolbar(
     BuildContext context,
