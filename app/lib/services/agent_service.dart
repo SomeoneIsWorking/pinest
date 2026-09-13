@@ -255,6 +255,10 @@ class AgentService extends ChangeNotifier {
   }) {
     if (source != null && !identical(_ws, source)) return;
 
+    // A send in flight when the socket dies is unconfirmed until the server
+    // tells us what it holds, so ask for one re-offer after the next state.
+    if (reconnect) _resyncNeeded = true;
+
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     if (stopDiscovery) {
@@ -367,6 +371,29 @@ class AgentService extends ChangeNotifier {
     );
   }
 
+  /// Set when the socket was lost with sends possibly unconfirmed.
+  bool _resyncNeeded = false;
+
+  /// Sends that were in flight when the socket died are re-offered once, after
+  /// the server has reported what it actually holds.
+  ///
+  /// A socket close used to strand them: the app reconnected, but only a page
+  /// reload replayed the outbox — so the bubble read "sending…" forever and the
+  /// words were gone. Re-offering only what the server does NOT already report
+  /// (queue or transcript) keeps a message that did arrive from being sent twice.
+  void _reflushUnconfirmed() {
+    if (_outbox.isNotEmpty) return;      // a replay is already waiting to go out
+    var restored = 0;
+    for (final session in _sessions) {
+      for (final msg in _outgoing.forSession(session.id)) {
+        if (msg.queuedSeen || msg.failure != null) continue;
+        _outbox.add(msg.command);
+        restored += 1;
+      }
+    }
+    if (restored > 0 && _connected) _flushOutbox();
+  }
+
   void _scheduleReconnect() {
     _reconnectTimer?.cancel();
     final uid = _boundUid;
@@ -435,6 +462,12 @@ class AgentService extends ChangeNotifier {
           final session = Session.fromRegistryMap(m);
           if (session.id.isEmpty) continue;
           _registry.add(session);
+        }
+        // Now that the server has said what it holds, a send stranded by a lost
+        // socket can be honestly re-offered (or shown as not delivered).
+        if (_resyncNeeded) {
+          _resyncNeeded = false;
+          _reflushUnconfirmed();
         }
         break;
       case 'image':
