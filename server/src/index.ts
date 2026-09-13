@@ -534,7 +534,14 @@ async function handleCommand(input: unknown): Promise<void> {
       isSessionIdInUse: (id) => _sessions.has(id) || !!_supervisor?.sessions.has(id) || !!_registry?.get(id),
       newSessionId: randomUUID,
       host: handleInteractiveCommand,
-      spawned: (cmd) => _supervisor!.handleSessionCommand(cmd).then(() => undefined),
+      spawned: async (cmd) => {
+        // The session was live when the command was routed; if it closed in
+        // between, the command is refused LOUDLY instead of vanishing.
+        const handled = await _supervisor!.handleSessionCommand(cmd);
+        if (!handled) {
+          throw new Error(`session ${cmd.sessionId} is no longer running`);
+        }
+      },
       spawn: spawnSession, despawn: despawnSession,
       sessionList: () => broadcast({ type: "session_list", sessions: mergedRegistryRows() }),
       resume: resumeSession, rename: renameSession, select: selectSession, delete: deleteSession,
@@ -549,7 +556,15 @@ async function handleCommand(input: unknown): Promise<void> {
     });
   } catch (e) {
     debug("[remote-code] command error:", (e as Error).message);
-    broadcast({ type: "error", message: String((e as Error).message || e) });
+    // Attribute the failure to its session when the command had one: without
+    // it the client cannot tell that ITS message was refused, and a refused
+    // send sat at "sending…" forever.
+    const sessionId = (input as { sessionId?: string } | null)?.sessionId;
+    broadcast({
+      type: "error",
+      message: String((e as Error).message || e),
+      ...(sessionId ? { sessionId } : {}),
+    });
   }
 }
 
