@@ -193,5 +193,5 @@ export type ClientCommand =
   | { type: "set_compact_threshold"; thresholdTokens: number }
   | { type: "jobs_list"; sessionId?: string }
   | { type: "job_kill"; jobId: string; sessionId?: string }
-  | { type: "job_logs"; jobId: string; maxBytes?: number; tail?: boolean; id?: string }
+  | { type: "job_logs"; jobId: string; maxBytes?: number; tail?: boolean; id?: string; sessionId?: string }
   | { type: "reload" };

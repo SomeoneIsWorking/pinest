@@ -864,12 +864,14 @@ class AgentService extends ChangeNotifier {
     String jobId, {
     int? maxBytes,
     bool? tail,
+    String? sessionId,
   }) => _requests.request<Map<String, dynamic>?>(
     send: (id) => _send({
       'type': 'job_logs',
       'jobId': jobId,
       ...?maxBytes == null ? null : {'maxBytes': maxBytes},
       ...?tail == null ? null : {'tail': tail},
+      ...?sessionId == null ? null : {'sessionId': sessionId},
       'id': id,
     }),
     decode: (message) => message,
