@@ -854,6 +854,19 @@ class _ChatScreenState extends State<ChatScreen> {
         steer: steering,
         failure: out.failure,
       );
+      // An unconfirmed send can be discarded or retried: waiting is not the
+      // only answer to "sending…", and a message stuck in a dead socket must be
+      // something the user can end.
+      void openSendOptions() {
+        if (s == null) return;
+        showOutgoingSendOptions(
+          context: context,
+          svc: svc,
+          session: s,
+          message: out,
+        );
+      }
+
       items.add(
         MessageBubble(
           text: out.text.isEmpty ? '[image]' : out.text,
@@ -862,6 +875,8 @@ class _ChatScreenState extends State<ChatScreen> {
           images: _pendingImagesByText[out.text] ?? const <PendingImage>[],
           statusIcon: status.icon,
           statusLabel: status.label,
+          onTap: (s == null) ? null : openSendOptions,
+          onLongPress: (s == null) ? null : openSendOptions,
         ),
       );
     }

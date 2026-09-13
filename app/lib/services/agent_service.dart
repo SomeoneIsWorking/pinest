@@ -374,6 +374,30 @@ class AgentService extends ChangeNotifier {
   /// Set when the socket was lost with sends possibly unconfirmed.
   bool _resyncNeeded = false;
 
+  /// Forget an unconfirmed send because the user said so.
+  ///
+  /// This drops the LOCAL record, which is what makes the bubble disappear. If
+  /// the message did reach pi meanwhile it remains in that session's queue,
+  /// where the queue chips can still delete it — this erases the bubble, not a
+  /// delivery that already happened.
+  void discardOutgoing(Session s, OutgoingMessage message) {
+    _outgoing.remove(s.id, message);
+    unawaited(_outgoing.persist());
+    notifyListeners();
+  }
+
+  /// Put an unconfirmed send back on the wire, for the user who would rather
+  /// retry it than lose it.
+  void resendOutgoing(Session s, OutgoingMessage message) {
+    _outbox.add(message.command);
+    if (_connected) {
+      _flushOutbox();
+    } else {
+      _scheduleReconnect();
+    }
+    notifyListeners();
+  }
+
   /// Sends that were in flight when the socket died are re-offered once, after
   /// the server has reported what it actually holds.
   ///
