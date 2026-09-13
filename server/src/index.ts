@@ -1122,6 +1122,29 @@ const remoteCode = (pi: ExtensionAPI): void => {
   registerBashIntegration(pi, { bgManager: _bgManager, sessionId: _sessionId });
   registerBackgroundTools(pi, _bgManager, _sessionId);
 
+  // Chokepoint on HOST message delivery: stale tool closures from before a
+  // reload (orphaned managers whose delivery code never updates) still call
+  // pi.sendMessage with background-task-notifications for tasks they hold.
+  // The pi object survives reloads, so this wrapper — installed once — sees
+  // every delivery and refuses notifications for tasks the CURRENT manager
+  // does not own. Without it, each pre-reload task leaks into the host turn
+  // exactly once, no matter how correct the new routing code is.
+  const CHOKE_KEY = Symbol.for("pinest.host-send-choke");
+  if (typeof pi.sendMessage === "function" && !(pi as any)[CHOKE_KEY]) {
+    (pi as any)[CHOKE_KEY] = true;
+    const rawSendMessage = pi.sendMessage.bind(pi);
+    (pi as any).sendMessage = (message: any, options?: unknown) => {
+      if (message?.customType === "background-task-notification") {
+        const taskId = String(message?.details?.taskId ?? "");
+        if (!taskId || !_bgManager?.isHostOwnedTask(taskId)) {
+          debug(`[pinest] host send choke: dropped background notification ${taskId || "(no task id)"} — not owned by this session`);
+          return;
+        }
+      }
+      return rawSendMessage(message, options as any);
+    };
+  }
+
   _hostCommandDeps = () => ({
     sessionId: _sessionId,
     sessions: _sessions,
