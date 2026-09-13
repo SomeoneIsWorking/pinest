@@ -11,12 +11,11 @@ import debug from "./log.ts";
  * is real-time WebSocket messages.
  */
 
-import { existsSync, statSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
-import { resolve as resolvePath, isAbsolute, join, dirname as dirnamePath, basename } from "node:path";
-import { spawnSync } from "node:child_process";
+import { existsSync, statSync, mkdirSync } from "node:fs";
+import { join, dirname as dirnamePath } from "node:path";
 import { randomUUID } from "node:crypto";
 import { hostname, homedir } from "node:os";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { extractUserText, extractText } from "./logic.ts";
 import { HostPendingQueue } from "./pending-queue.ts";
@@ -31,8 +30,6 @@ import { createDefaultBackgroundManager, registerBashIntegration, toJobSummary, 
 import { registerBackgroundTools, handleJobCommand } from "./background-tools.ts";
 import { StreamSegmenter } from "./stream.ts";
 import { loadConfig, saveConfig } from "./config.ts";
-import { PROVIDERS } from "./tunnel.ts";
-import { createAttachView } from "./attach-view.ts";
 import { registerHostCommands, showSessionsFlow, type HostCommandDeps } from "./host-commands.ts";
 import { PinestCustomEditor } from "./editor.ts";
 import { FooterManager } from "./footer.ts";
@@ -52,18 +49,18 @@ export {
 } from "./reload-manager.ts";
 export { firstSyntaxError } from "./watch.ts";
 import { resolveThinkingLevel, reportThinkingLevel } from "./thinking.ts";
-import { Type } from "typebox";
 import type { SessionRow, SessionSnapshot, ClientCommand, ServerMessage, ModelInfo } from "./protocol.ts";
 import { installCrashReporter } from "./crash.ts";
-import { DEFAULT_MODEL } from "./product-defaults.ts";
 import { HostContextController } from "./host-context.ts";
 import { dispatchClientCommand } from "./command-validation.ts";
-import { applyCompactThreshold, applyCompactThresholdCommand, reconcileStoredThreshold } from "./compaction-settings.ts";
+import { imageBudgetExtension } from "./image-budget.ts";
+import { imageBytesLimit, setImageBytesLimit } from "./config.ts";
+import { applyCompactThresholdCommand, reconcileStoredThreshold } from "./compaction-settings.ts";
 import { mergeRegistryRows } from "./state-message.ts";
 import { publishPresence } from "./presence.ts";
 import { StatePublisher } from "./state-publisher.ts";
 import { recordFactoryEntry, recordLoadOutcome } from "./runtime-record.ts";
-import { reauthenticateRemoteOwner, verifiedOwnerToken } from "./owner-runtime.ts";
+import { verifiedOwnerToken } from "./owner-runtime.ts";
 
 const REGISTRY_PATH = process.env.RC_REGISTRY_PATH
   || join(homedir(), ".pi", "agent", "remote-code", "sessions.json");
@@ -512,6 +509,7 @@ async function handleCommand(input: unknown): Promise<void> {
       sessionList: () => broadcast({ type: "session_list", sessions: mergedRegistryRows() }),
       resume: resumeSession, rename: renameSession, select: selectSession, delete: deleteSession,
       pathCheck: checkPath, folderCreate: createFolder, compactThreshold: setCompactThreshold,
+      imageBudget: (cmd) => uiNotify(setImageBytesLimit(cmd.maxBytes)),
       jobsList: (cmd) => handleJobCommand(cmd, _supervisor?.bgManager ?? _bgManager, broadcast),
       jobKill: (cmd) => handleJobCommand(cmd, _supervisor?.bgManager ?? _bgManager, broadcast),
       jobLogs: (cmd) => handleJobCommand(cmd, _supervisor?.bgManager ?? _bgManager, broadcast),
@@ -1104,6 +1102,8 @@ function bridge(pi: ExtensionAPI): void {
   // Reload tears this instance down; the re-imported instance bootstraps
   // fresh (ws server, tunnel, registry reload). Spawned sessions were parked
   // idle in the registry by teardownRemote → resumable from the app.
+  imageBudgetExtension(imageBytesLimit)(pi);
+
   pi.on("session_shutdown", (event: any) => {
     try {
       const wired = (globalThis as any)[Symbol.for("remote-code.extension.wired")];

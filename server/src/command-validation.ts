@@ -407,6 +407,18 @@ export function parseClientCommand(input: unknown): ClientCommand {
         path: pathField(command, "path", { required: true })!,
         id: commandId(command),
       };
+    case "set_max_image_bytes": {
+      const maxBytes = command["maxBytes"];
+      if (typeof maxBytes !== "number" || !Number.isInteger(maxBytes)) {
+        fail("maxBytes must be an integer number of bytes");
+      }
+      // Below this, screenshots become unreadable; above pi's own 4.5 MiB cap the
+      // setting would be a lie.
+      if (maxBytes < 64 * 1024 || maxBytes > 4 * 1024 * 1024) {
+        fail("maxBytes must be between 65536 and 4194304");
+      }
+      return { type: "set_max_image_bytes", maxBytes, id: commandId(command) };
+    }
     case "set_compact_threshold":
       rejectUnknownFields(command, ["type", "thresholdTokens"]);
       return {
@@ -594,6 +606,7 @@ export interface ClientCommandDispatcherDeps {
   pathCheck: (command: Extract<ClientCommand, { type: "path_check" }>) => void | Promise<void>;
   folderCreate: (command: Extract<ClientCommand, { type: "folder_create" }>) => void | Promise<void>;
   compactThreshold: (command: Extract<ClientCommand, { type: "set_compact_threshold" }>) => void | Promise<void>;
+  imageBudget: (command: Extract<ClientCommand, { type: "set_max_image_bytes" }>) => void | Promise<void>;
   jobsList?: (command: Extract<ClientCommand, { type: "jobs_list" }>) => void | Promise<void>;
   jobKill?: (command: Extract<ClientCommand, { type: "job_kill" }>) => void | Promise<void>;
   jobLogs?: (command: Extract<ClientCommand, { type: "job_logs" }>) => void | Promise<void>;
@@ -647,6 +660,7 @@ export async function dispatchClientCommand(
     case "path_check": return void await deps.pathCheck(command);
     case "folder_create": return void await deps.folderCreate(command);
     case "set_compact_threshold": return void await deps.compactThreshold(command);
+    case "set_max_image_bytes": return void await deps.imageBudget(command);
     case "jobs_list": return void await deps.jobsList?.(command);
     case "job_kill": return void await deps.jobKill?.(command);
     case "job_logs": return void await deps.jobLogs?.(command);
