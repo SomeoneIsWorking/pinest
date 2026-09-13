@@ -148,12 +148,16 @@ export interface BackgroundProcessManagerOptions {
   autoBgTimeoutMs?: number;
   notifyCompletion?: (task: BackgroundTask) => void | Promise<void>;
   onTaskUpdate?: (task: BackgroundTask) => void;
+  /** The session that owns this manager (host app session id). Tasks with no
+   * sessionId belong to it — and to it ONLY, never to other sessions. */
+  hostSessionId?: string;
 }
 
 export class BackgroundProcessManager {
   private readonly tasks = new Map<string, BackgroundTask>();
   private readonly autoBgTimeoutMs: number;
   private readonly notifyCompletion?: (task: BackgroundTask) => void | Promise<void>;
+  private readonly hostSessionId?: string;
   public onTaskUpdate?: (task: BackgroundTask) => void;
 
   constructor(options: BackgroundProcessManagerOptions = {}) {
@@ -161,10 +165,25 @@ export class BackgroundProcessManager {
       (Number(process.env.PI_AUTO_BG_TIMEOUT_MS) || DEFAULT_AUTO_BG_TIMEOUT_MS);
     this.notifyCompletion = options.notifyCompletion;
     this.onTaskUpdate = options.onTaskUpdate;
+    this.hostSessionId = options.hostSessionId;
+  }
+
+  /** A task is visible to a session only when it belongs to that session;
+   * session-less tasks belong to the manager's own (host) session alone —
+   * they must never leak into other sessions' job lists. */
+  private ownedBy(task: BackgroundTask, sessionId: string | undefined): boolean {
+    if (!sessionId) return true;
+    return task.sessionId ? task.sessionId === sessionId : sessionId === this.hostSessionId;
   }
 
   getTask(id: string): BackgroundTask | undefined {
     return this.tasks.get(id);
+  }
+
+  /** Public ownership check for tool call sites: a session may only see,
+   * log, or kill its own tasks (session-less tasks belong to the host). */
+  isOwned(task: BackgroundTask, sessionId: string | undefined): boolean {
+    return this.ownedBy(task, sessionId);
   }
 
   resolveTask(idOrPrefix: string): BackgroundTask {
@@ -181,7 +200,7 @@ export class BackgroundProcessManager {
   listTasks(sessionId?: string): BackgroundTask[] {
     const all = Array.from(this.tasks.values());
     if (!sessionId) return all;
-    return all.filter((t) => !t.sessionId || t.sessionId === sessionId);
+    return all.filter((t) => this.ownedBy(t, sessionId));
   }
 
   killTask(idOrPrefix: string): boolean {
@@ -658,6 +677,11 @@ export class BackgroundProcessManager {
 export function createAutoBackgroundBashTool(options: {
   bgManager: BackgroundProcessManager;
   cwd?: string;
+  /** Ownership identity for this session's tasks. When set (the host
+   * registers it as the app session id) it wins over the ctx's pi session-file
+   * id, so host tasks carry the SAME id its bg tools and notification routing
+   * use — one identity per session. */
+  sessionId?: string;
 }): ToolDefinition {
   const { bgManager } = options;
 
@@ -675,7 +699,7 @@ export function createAutoBackgroundBashTool(options: {
     }),
     async execute(_toolCallId, { command, timeout }, signal, onUpdate, ctx) {
       const targetCwd = ctx?.cwd || options.cwd || process.cwd();
-      const sessionId = ctx?.sessionManager?.getSessionId?.();
+      const sessionId = options.sessionId ?? ctx?.sessionManager?.getSessionId?.();
 
       const result = await bgManager.executeCommand(command, {
         cwd: targetCwd,
@@ -708,6 +732,7 @@ export function createDefaultBackgroundManager(
 ): BackgroundProcessManager {
   return new BackgroundProcessManager({
     autoBgTimeoutMs: deps.autoBgTimeoutMs,
+    hostSessionId: deps.getSessionId(),
     notifyCompletion: async (task) => {
       const targetSessionId = task.sessionId || deps.getSessionId();
       const content = formatTaskNotificationXml(task);
@@ -779,8 +804,9 @@ export function registerBashIntegration(
   pi: any,
   deps: {
     bgManager: BackgroundProcessManager;
+    sessionId?: string;
   }
 ): void {
-  pi.registerTool(createAutoBackgroundBashTool({ bgManager: deps.bgManager }));
+  pi.registerTool(createAutoBackgroundBashTool({ bgManager: deps.bgManager, sessionId: deps.sessionId }));
 }
 

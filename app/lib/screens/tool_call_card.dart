@@ -120,16 +120,42 @@ class _ToolCallCardState extends State<ToolCallCard> {
                   if (argStr.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(left: 20),
-                      child: Text(
-                        _argSummary(widget.name, widget.args),
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontFamily: 'monospace',
-                          color: Theme.of(context).colorScheme.onSurface.withAlpha(140),
-                        ),
-                        maxLines: 1,
-                        softWrap: false,
-                        overflow: TextOverflow.ellipsis,
+                      child: Row(
+                        children: [
+                          // This tool RETURNED images — say so right on the
+                          // collapsed summary line instead of hiding it in
+                          // the expandable body.
+                          if (_returnsImages) ...[
+                            Icon(
+                              Icons.image_outlined,
+                              size: 13,
+                              color: Theme.of(context).colorScheme.primary,
+                            ),
+                            const SizedBox(width: 3),
+                            Text(
+                              'image',
+                              style: TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold,
+                                color: Theme.of(context).colorScheme.primary,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                          ],
+                          Expanded(
+                            child: Text(
+                              _argSummary(widget.name, widget.args),
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontFamily: 'monospace',
+                                color: Theme.of(context).colorScheme.onSurface.withAlpha(140),
+                              ),
+                              maxLines: 1,
+                              softWrap: false,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                 ],
@@ -179,6 +205,11 @@ class _ToolCallCardState extends State<ToolCallCard> {
   /// Full-size view of a tool-returned image (tap the thumbnail).
   void _showImage(BuildContext context, String b64) =>
       showImageDialog(context, b64);
+
+  /// True when this tool's result carried images (or had them omitted from
+  /// the history payload) — the collapsed card labels that with an image
+  /// badge so an image `read` is obvious before expanding.
+  bool get _returnsImages => widget.images.isNotEmpty || widget.imagesOmitted > 0;
 
   /// A tool-returned image framed as an image: border, size label, and a
   /// zoom affordance so it reads as tappable rather than as stray content.

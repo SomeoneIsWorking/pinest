@@ -295,7 +295,12 @@ class _JobLogsDialogState extends State<_JobLogsDialog> {
       _error = null;
     });
     try {
-      final res = await widget.svc.fetchJobLogs(widget.job.id, maxBytes: 50 * 1024, tail: true);
+      final res = await widget.svc.fetchJobLogs(
+        widget.job.id,
+        maxBytes: 50 * 1024,
+        tail: true,
+        sessionId: widget.sessionId,
+      );
       if (mounted) {
         setState(() {
           _loading = false;

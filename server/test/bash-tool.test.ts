@@ -121,3 +121,22 @@ test("createAutoBackgroundBashTool: wraps executeCommand as a tool definition", 
 
   manager.dispose();
 });
+
+test("listTasks scopes tasks to their owning session; session-less tasks belong only to the host", async () => {
+  const manager = new BackgroundProcessManager({ autoBgTimeoutMs: 100, hostSessionId: "host-app" });
+  const r1 = await manager.executeCommand("sleep 10", { sessionId: "host-app" });
+  const r2 = await manager.executeCommand("sleep 10", { sessionId: "spawned-pi-id" });
+  const r3 = await manager.executeCommand("sleep 10"); // no sessionId (legacy ctx)
+
+  assert.equal(manager.listTasks("host-app").length, 2, "host sees its own + session-less tasks");
+  assert.equal(manager.listTasks("spawned-pi-id").length, 1, "spawned session sees only its own task");
+  assert.equal(manager.listTasks("spawned-pi-id")[0]!.id, r2.task!.id);
+  assert.equal(manager.listTasks("someone-else").length, 0, "foreign sessions see nothing");
+
+  assert.equal(manager.isOwned(r1.task!, "spawned-pi-id"), false, "spawned session cannot touch a host task");
+  assert.equal(manager.isOwned(r2.task!, "host-app"), false, "host cannot touch a spawned task via isOwned");
+  assert.equal(manager.isOwned(r3.task!, "host-app"), true, "session-less task belongs to the host");
+  assert.equal(manager.isOwned(r3.task!, "spawned-pi-id"), false, "session-less task is not everyone's");
+
+  manager.dispose();
+});
