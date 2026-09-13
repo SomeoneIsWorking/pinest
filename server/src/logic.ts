@@ -42,6 +42,25 @@ export function extractText(content: unknown): string {
   return "";
 }
 
+/** Extract thinking text from a pi message's content (array of parts or string), or a message object. */
+export function extractThinking(content: unknown): string {
+  if (content && typeof content === "object") {
+    if ("thinking" in content && typeof (content as any).thinking === "string") {
+      return (content as any).thinking;
+    }
+    if ("content" in content && (content as any).content !== undefined) {
+      return extractThinking((content as any).content);
+    }
+  }
+  if (Array.isArray(content)) {
+    return content
+      .filter((p: any) => p?.type === "thinking" && p.thinking)
+      .map((p: any) => p.thinking)
+      .join("\n");
+  }
+  return "";
+}
+
 /** Extract the text of a user message for pending-queue matching. */
 export function extractUserText(m: unknown): string {
   if (typeof m === "string") return m;
@@ -120,13 +139,21 @@ export function messagesToHistory(messages: unknown): HistoryItem[] {
   // toolCallId) so history cards match what live cards showed — INCLUDING the
   // images a result carried (an image `read` is a text note plus an image
   // part; dropping the part made the picture vanish on the next refresh).
-  const results = new Map<string, { result: string; isError: boolean; images: Array<{ data: string; mimeType: string }> }>();
+  const results = new Map<string, { result: string; isError: boolean; images: Array<{ data: string; mimeType: string }>; timestamp?: number }>();
   for (const m of messages as any[]) {
     if (m?.role === "toolResult" && m.toolCallId) {
+      const rawResTs = m.timestamp;
+      const parsedResTs = typeof rawResTs === "number"
+        ? rawResTs
+        : typeof rawResTs === "string"
+          ? Date.parse(rawResTs)
+          : undefined;
+      const validResTs = (parsedResTs !== undefined && !isNaN(parsedResTs)) ? parsedResTs : undefined;
       results.set(m.toolCallId, {
         result: extractText(m.content).slice(0, 10_000),
         isError: !!m.isError,
         images: extractImages(m.content),
+        timestamp: validResTs,
       });
     }
   }
@@ -145,19 +172,6 @@ export function messagesToHistory(messages: unknown): HistoryItem[] {
       const images = isImageMessage
         ? m.role === "user" ? extractImages(m.content) : []
         : [];
-      const tools: HistoryItem["tools"] = [];
-      if (Array.isArray(m.content)) {
-        for (const p of m.content) {
-          if (p.type === "toolCall") {
-            const r = results.get(p.id);
-            tools.push({
-              name: p.name, args: p.arguments, id: p.id,
-              result: r?.result, isError: r?.isError,
-              images: r?.images ?? [],
-            });
-          }
-        }
-      }
       const rawTs = m.timestamp;
       const parsedTs = typeof rawTs === "number"
         ? rawTs
@@ -165,17 +179,35 @@ export function messagesToHistory(messages: unknown): HistoryItem[] {
           ? Date.parse(rawTs)
           : undefined;
       const validTs = (parsedTs !== undefined && !isNaN(parsedTs)) ? parsedTs : undefined;
+      const tools: HistoryItem["tools"] = [];
+      if (Array.isArray(m.content)) {
+        for (const p of m.content) {
+          if (p.type === "toolCall") {
+            const r = results.get(p.id);
+            const toolTs = r?.timestamp ?? validTs;
+            tools.push({
+              name: p.name, args: p.arguments, id: p.id,
+              result: r?.result, isError: r?.isError,
+              images: r?.images ?? [],
+              ...(toolTs !== undefined ? { timestamp: toolTs } : {}),
+            });
+          }
+        }
+      }
+      const rawThinking = extractThinking(m.content) || (typeof (m as any).thinking === "string" ? (m as any).thinking : "");
+      const thinking = rawThinking.trim().length > 0 ? rawThinking : undefined;
       const id = typeof m.id === "string" ? m.id : typeof m.entryId === "string" ? m.entryId : undefined;
       return {
         ...(id ? { id } : {}),
         role: m.role as "user" | "assistant",
         text,
+        ...(thinking ? { thinking } : {}),
         tools,
         images,
         ...(validTs !== undefined ? { timestamp: validTs } : {}),
       };
     })
-    .filter((m) => m.text.length > 0 || m.tools.length > 0 || (m.images?.length ?? 0) > 0);
+    .filter((m) => m.text.length > 0 || m.tools.length > 0 || (m.images?.length ?? 0) > 0 || !!m.thinking);
   return budgetHistoryImages(items);
 }
 

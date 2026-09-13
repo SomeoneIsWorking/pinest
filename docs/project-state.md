@@ -513,8 +513,9 @@ PiNest natively owns background process execution, auto-backgrounding, and UI ma
 3. Terminal notifications (`<background-task-notification>`) wake up follow-up agent turns with command status, exit codes, and output summaries.
 4. The Flutter client provides real-time visibility and control via `BackgroundJobsBanner` in the chat screen and `_JobsListSheet` with live log inspection and job termination.
 5. Message history and bubbles carry relative timestamps (`3m ago`) and full datetime tooltips.
+6. Model reasoning/thinking processes stream and display in a collapsible card (`ThinkingCard`), tool calls carry and display execution timestamps with relative format and datetime tooltips, and multiple sequential tool calls automatically collapse into an expandable group (`ToolCallGroup`) with configurable defaults.
 
-Evidence: Node suite (`npm test`) passes with 290 tests and 0 failures; `npm run typecheck` and `tools/check_structure.py` pass clean; Flutter test suite passes with 68/68 tests; Flutter analyze clean (0 issues).
+Evidence: Node suite (`npm test`) passes with 298 tests and 0 failures; `npm run typecheck` and `tools/check_structure.py` pass clean; Flutter test suite passes with 72/72 tests; Flutter analyze clean (0 issues).
 
 ## Current focus
 

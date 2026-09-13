@@ -9,6 +9,7 @@ class ToolCallView {
   final int imagesOmitted;
   final bool isError;
   final bool running;
+  final int? timestamp;
 
   const ToolCallView({
     required this.name,
@@ -18,12 +19,19 @@ class ToolCallView {
     required this.imagesOmitted,
     required this.isError,
     required this.running,
+    this.timestamp,
   });
 
   factory ToolCallView.fromPayload(
     Map<String, dynamic> payload, {
     required ToolCallSource source,
   }) {
+    final rawTs = payload['timestamp'];
+    final ts = rawTs is num
+        ? rawTs.toInt()
+        : rawTs is String
+            ? int.tryParse(rawTs)
+            : null;
     return ToolCallView(
       name: payload['name'] as String? ?? 'tool',
       args: payload['args'],
@@ -39,6 +47,7 @@ class ToolCallView {
       running: source == ToolCallSource.live
           ? payload['running'] as bool? ?? false
           : false,
+      timestamp: ts,
     );
   }
 }

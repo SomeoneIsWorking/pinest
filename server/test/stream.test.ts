@@ -40,3 +40,22 @@ test("segmenter: startMessage clears current text but keeps segments", () => {
   const snap = seg.startMessage();
   assert.deepEqual(snap, { text: "", segments: ["first message text"] });
 });
+
+test("segmenter: thinking deltas stream and are cleared on reset", () => {
+  const seg = new StreamSegmenter();
+  seg.onThinkingDelta("Thinking ");
+  seg.onThinkingDelta("about the approach...");
+  assert.deepEqual(seg.snapshot(), {
+    text: "",
+    segments: [],
+    thinking: "Thinking about the approach...",
+  });
+  seg.onTextDelta("Here is the answer");
+  assert.deepEqual(seg.snapshot(), {
+    text: "Here is the answer",
+    segments: [],
+    thinking: "Thinking about the approach...",
+  });
+  seg.reset();
+  assert.deepEqual(seg.snapshot(), { text: "", segments: [] });
+});
