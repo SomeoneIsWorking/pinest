@@ -166,7 +166,7 @@ test("showSessionsFlow: maps live supervisor sessions with exact IDs and allows 
     sessions: new Map<string, any>([
       ["sess-child-123", {
         name: "test-child",
-        cwd: "/tmp/test-child",
+        cwd: "/srv/test-child",
         status: "idle",
         model: "antigravity/gemini-3.8-flash",
         modelName: "Gemini 3.8 Flash",
@@ -181,7 +181,7 @@ test("showSessionsFlow: maps live supervisor sessions with exact IDs and allows 
   const sessions = new Map<string, any>([
     ["host-session-id", {
       name: "host",
-      cwd: "/tmp/host",
+      cwd: "/srv/host",
       status: "idle",
     }],
   ]);
