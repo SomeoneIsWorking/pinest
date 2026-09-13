@@ -140,3 +140,17 @@ test("listTasks scopes tasks to their owning session; session-less tasks belong 
 
   manager.dispose();
 });
+
+test("isHostOwnedTask: only the host's own tasks pass; foreign and unknown are refused", async () => {
+  const manager = new BackgroundProcessManager({ autoBgTimeoutMs: 100, hostSessionId: "host-app" });
+  const rHost = await manager.executeCommand("sleep 10", { sessionId: "host-app" });
+  const rForeign = await manager.executeCommand("sleep 10", { sessionId: "spawned-pi-id" });
+  const rLegacy = await manager.executeCommand("sleep 10"); // session-less legacy
+
+  assert.equal(manager.isHostOwnedTask(rHost.task!.id), true, "host-owned task passes");
+  assert.equal(manager.isHostOwnedTask(rLegacy.task!.id), true, "session-less task belongs to the host");
+  assert.equal(manager.isHostOwnedTask(rForeign.task!.id), false, "foreign task refused");
+  assert.equal(manager.isHostOwnedTask("bg_nonexistent"), false, "unknown task refused");
+
+  manager.dispose();
+});
