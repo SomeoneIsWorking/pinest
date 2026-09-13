@@ -720,7 +720,16 @@ export function createDefaultBackgroundManager(
       };
 
       const supervisor = deps.getSupervisor?.();
-      const supSession = supervisor?.sessions?.get(targetSessionId);
+      let supSession = supervisor?.sessions?.get(targetSessionId);
+      if (!supSession && supervisor?.sessions) {
+        for (const s of supervisor.sessions.values()) {
+          if ((s.session as any)?.sessionManager?.getSessionId?.() === targetSessionId) {
+            supSession = s;
+            break;
+          }
+        }
+      }
+
       if (supSession?.session?.sendCustomMessage) {
         try {
           await supSession.session.sendCustomMessage(
@@ -731,14 +740,21 @@ export function createDefaultBackgroundManager(
           debug("[pinest] bg notify supervisor session failed:", e);
         }
       } else {
-        const pi = deps.getPi();
-        try {
-          pi?.sendMessage?.(
-            { customType: "background-task-notification", content, details, display: true },
-            { deliverAs: "followUp", triggerTurn: true }
-          );
-        } catch (e) {
-          debug("[pinest] bg notify host session failed:", e);
+        const hostSessionId = deps.getSessionId();
+        const piSessionId = (deps.getPi() as any)?.sessionManager?.getSessionId?.();
+        const isHostTask = !task.sessionId || task.sessionId === hostSessionId || (piSessionId && task.sessionId === piSessionId);
+        if (isHostTask) {
+          const pi = deps.getPi();
+          try {
+            pi?.sendMessage?.(
+              { customType: "background-task-notification", content, details, display: true },
+              { deliverAs: "followUp", triggerTurn: true }
+            );
+          } catch (e) {
+            debug("[pinest] bg notify host session failed:", e);
+          }
+        } else {
+          debug(`[pinest] bg task ${task.id} belongs to session ${task.sessionId}; not delivering to host session`);
         }
       }
 

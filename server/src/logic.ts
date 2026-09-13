@@ -240,33 +240,61 @@ export function historyWithEmbeds(
   }));
 }
 
+function entriesToSessionMessages(entries: any[]): any[] {
+  const msgs: any[] = [];
+  for (const entry of entries) {
+    const rawTs = entry.message?.timestamp ?? entry.timestamp;
+    const parsedTs = typeof rawTs === "number"
+      ? rawTs
+      : typeof rawTs === "string"
+        ? Date.parse(rawTs)
+        : undefined;
+    const validTs = (parsedTs !== undefined && !isNaN(parsedTs)) ? parsedTs : undefined;
+    if (entry.type === "message" && entry.message) {
+      msgs.push({ ...entry.message, id: entry.id, ...(validTs !== undefined ? { timestamp: validTs } : {}) });
+    } else if (entry.type === "custom_message") {
+      msgs.push({
+        role: "custom",
+        customType: entry.customType,
+        content: entry.content,
+        id: entry.id,
+        ...(validTs !== undefined ? { timestamp: validTs } : {}),
+      });
+    } else if (entry.type === "compaction") {
+      msgs.push({
+        role: "custom",
+        customType: "compaction",
+        content: entry.summary || "Conversation compacted",
+        id: entry.id,
+        ...(validTs !== undefined ? { timestamp: validTs } : {}),
+      });
+    }
+  }
+  return msgs;
+}
+
 /** Embed markdown image links as base64 data URIs when local files exist and are within size limits. */
 export function extractSessionMessages(sm: any): any[] {
   if (!sm) return [];
+  // Use getBranch() or getEntries() first so earlier messages before a compaction are preserved in chat history.
+  if (typeof sm.getBranch === "function") {
+    try {
+      const entries = sm.getBranch() ?? [];
+      const msgs = entriesToSessionMessages(entries);
+      if (msgs.length > 0) return msgs;
+    } catch { /* fall through to getEntries / buildContextEntries */ }
+  }
+  if (typeof sm.getEntries === "function") {
+    try {
+      const entries = sm.getEntries() ?? [];
+      const msgs = entriesToSessionMessages(entries);
+      if (msgs.length > 0) return msgs;
+    } catch { /* fall through */ }
+  }
   if (typeof sm.buildContextEntries === "function") {
     try {
       const entries = sm.buildContextEntries() ?? [];
-      const msgs: any[] = [];
-      for (const entry of entries) {
-        const rawTs = entry.message?.timestamp ?? entry.timestamp;
-        const parsedTs = typeof rawTs === "number"
-          ? rawTs
-          : typeof rawTs === "string"
-            ? Date.parse(rawTs)
-            : undefined;
-        const validTs = (parsedTs !== undefined && !isNaN(parsedTs)) ? parsedTs : undefined;
-        if (entry.type === "message" && entry.message) {
-          msgs.push({ ...entry.message, id: entry.id, ...(validTs !== undefined ? { timestamp: validTs } : {}) });
-        } else if (entry.type === "custom_message") {
-          msgs.push({
-            role: "custom",
-            customType: entry.customType,
-            content: entry.content,
-            id: entry.id,
-            ...(validTs !== undefined ? { timestamp: validTs } : {}),
-          });
-        }
-      }
+      const msgs = entriesToSessionMessages(entries);
       if (msgs.length > 0) return msgs;
     } catch { /* fall back to buildSessionContext */ }
   }
