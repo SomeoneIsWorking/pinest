@@ -196,7 +196,7 @@ export type ClientCommand =
        * page BEFORE it (scroll-back pagination). */
       cursor?: number }
   | { type: "queue_clear"; sessionId?: string }
-  | { type: "queue_delete"; sessionId?: string; text: string }
+  | { type: "queue_delete"; sessionId?: string; index: number }
   | { type: "session_tree_get"; sessionId?: string; id?: string }
   | { type: "session_tree_navigate"; sessionId?: string; entryId: string; summarize?: boolean; id?: string }
   | { type: "session_rewind"; sessionId?: string; entryId: string; id?: string }
