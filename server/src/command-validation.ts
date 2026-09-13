@@ -45,6 +45,7 @@ const SESSION_COMMAND_TYPES = new Set<ClientCommand["type"]>([
   "session_tree_get",
   "session_tree_navigate",
   "session_rewind",
+  "get_image",
 ]);
 
 export class CommandValidationError extends Error {}
@@ -435,6 +436,14 @@ export function parseClientCommand(input: unknown): ClientCommand {
         type: "jobs_list",
         sessionId: sessionId(command, false),
       };
+    case "get_image": {
+      rejectUnknownFields(command, ["type", "imageId", "id"]);
+      return {
+        type: "get_image",
+        imageId: requiredString(command, "imageId", { maxCharacters: 128, trim: true }),
+        id: commandId(command),
+      };
+    }
     case "job_kill":
       rejectUnknownFields(command, ["type", "jobId", "sessionId"]);
       return {
