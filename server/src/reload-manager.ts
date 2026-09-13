@@ -81,6 +81,21 @@ export function reloadDeferred(): boolean {
   return _deferredReload;
 }
 
+/**
+ * How to ask whether the host session is mid-response.
+ *
+ * Set once at wiring time, because this question has exactly one answer and
+ * every caller needs it: pi's TUI refuses a reload while streaming and only
+ * warns there, so a reload started mid-turn is silently dropped. One call site
+ * passing `working` and another forgetting it produced a notice with no reload
+ * behind it — the flag belonged here, not at each caller.
+ */
+let _isWorking: () => boolean = () => false;
+
+export function setIsWorkingProbe(probe: () => boolean): void {
+  _isWorking = probe;
+}
+
 /** Queue explicit reload.
  *
  * `working` must say whether the session is mid-response. pi's TUI REFUSES to
@@ -95,6 +110,7 @@ export function queueReload(
   options: { working?: boolean } = {},
 ): { ok: boolean; message: string } {
   if (!pi) return { ok: false, message: "reload unavailable: extension not wired to a pi host" };
+  const working = options.working ?? _isWorking();
   try {
     const t = watcherTargets(ctx);
     const broken = firstSyntaxError(t.dirs, t.files);
@@ -105,7 +121,7 @@ export function queueReload(
       return { ok: false, message: msg };
     }
     const pending = pendingReloadState();
-    if (options.working) {
+    if (working) {
       _deferredReload = true;
       const message =
         `reload deferred: the session is mid-response, and pi refuses a reload while streaming. `
