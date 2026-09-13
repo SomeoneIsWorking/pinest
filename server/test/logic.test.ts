@@ -311,3 +311,46 @@ test("extractSessionMessages: pulls timestamps from message or entry", () => {
   assert.equal(history[1].timestamp, Date.parse("2026-09-11T07:05:00.000Z"));
 });
 
+test("messagesToHistory: extracts thinking from assistant content and objects", () => {
+  const msgs = [
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "Consider edge cases first." },
+        { type: "text", text: "Here is the plan." },
+      ],
+      timestamp: 1789110000000,
+    },
+    {
+      role: "assistant",
+      content: [{ type: "thinking", thinking: "Only thinking, no text." }],
+      timestamp: 1789110005000,
+    },
+  ];
+  const history = messagesToHistory(msgs);
+  assert.equal(history.length, 2);
+  assert.equal(history[0].thinking, "Consider edge cases first.");
+  assert.equal(history[0].text, "Here is the plan.");
+  assert.equal(history[1].thinking, "Only thinking, no text.");
+  assert.equal(history[1].text, "");
+});
+
+test("messagesToHistory: preserves tool timestamps from toolResult or assistant message", () => {
+  const msgs = [
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "tc_1", name: "bash", arguments: { command: "ls" } }],
+      timestamp: 1789110000000,
+    },
+    {
+      role: "toolResult",
+      toolCallId: "tc_1",
+      content: [{ type: "text", text: "file.txt" }],
+      timestamp: 1789110002500,
+    },
+  ];
+  const history = messagesToHistory(msgs);
+  assert.equal(history.length, 1);
+  assert.equal(history[0].tools.length, 1);
+  assert.equal(history[0].tools[0].timestamp, 1789110002500, "tool should receive the toolResult timestamp");
+});

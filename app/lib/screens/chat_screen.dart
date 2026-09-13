@@ -15,6 +15,8 @@ import '../models/tool_call_view.dart';
 import 'app_toast.dart';
 import 'session_actions.dart';
 import 'tool_call_card.dart';
+import 'tool_call_group.dart';
+import 'thinking_card.dart';
 import 'message_options_sheet.dart';
 import 'background_jobs_sheet.dart';
 import '../logic/time_format.dart';
@@ -302,6 +304,8 @@ class _ChatScreenState extends State<ChatScreen> {
     final s = _session(svc);
     final working = svc.statusFor(widget.sessionId) == 'working';
     final streaming = svc.streamingFor(widget.sessionId);
+    final streamingThinking = svc.streamingThinkingFor(widget.sessionId);
+    final prefs = context.watch<UserPreferences>();
     final models = svc.modelsFor(widget.sessionId);
     final history = svc.historyFor(widget.sessionId);
     final toolCalls = svc.toolCallsFor(widget.sessionId);
@@ -325,7 +329,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     _prevHistoryLen[widget.sessionId] = history.length;
 
-    if (streaming != null) _scrollDown();
+    if (streaming != null || streamingThinking != null) _scrollDown();
 
     return Column(
       children: [
@@ -354,8 +358,8 @@ class _ChatScreenState extends State<ChatScreen> {
         if (MediaQuery.of(context).size.width >= wideBarMinWidth)
           _toolbar(context, svc, s, working, models),
         BackgroundJobsBanner(svc: svc, sessionId: widget.sessionId),
-        Expanded(child: _messageList(history, streaming, toolCalls, svc, s)),
-        if (history.isEmpty && streaming == null)
+        Expanded(child: _messageList(history, streaming, streamingThinking, toolCalls, svc, s, prefs)),
+        if (history.isEmpty && streaming == null && streamingThinking == null)
           const Padding(
             padding: EdgeInsets.all(16),
             child: Center(
@@ -373,13 +377,30 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget _messageList(
     List<Map<String, dynamic>> history,
     String? streaming,
+    String? streamingThinking,
     List<Map<String, dynamic>> toolCalls,
     AgentService svc,
     Session? s,
+    UserPreferences prefs,
   ) {
     // Server-authoritative queue — the client is a terminal, not the keeper.
     final queued = s?.pendingMessages ?? const <String>[];
+    final showThinking = prefs.showThinking;
+    final collapseToolCalls = prefs.collapseToolCalls;
     final items = <Widget>[];
+
+    final currentToolBatch = <ToolCallView>[];
+    void flushTools() {
+      if (currentToolBatch.isEmpty) return;
+      if (currentToolBatch.length == 1 || !collapseToolCalls) {
+        for (final t in currentToolBatch) {
+          items.add(_toolCallCard(t));
+        }
+      } else {
+        items.add(ToolCallGroup(tools: List.of(currentToolBatch)));
+      }
+      currentToolBatch.clear();
+    }
 
     final hasMore = svc.historyHasMore(widget.sessionId);
     if (_loadingOlder) {
@@ -430,6 +451,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final tools = msg['tools'] as List?;
       final timestamp = (msg['timestamp'] as num?)?.toInt() ?? (msg['ts'] as num?)?.toInt();
       if (role == 'user') {
+        flushTools();
         final historyImgs = [
           for (final img in (msg['images'] as List? ?? const []))
             Map<String, dynamic>.from(img as Map),
@@ -470,20 +492,23 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         );
       } else {
-        // Show tools from history (expandable)
+        final thinking = msg['thinking'] as String?;
+        if (showThinking && thinking != null && thinking.trim().isNotEmpty) {
+          flushTools();
+          items.add(ThinkingCard(thinking: thinking));
+        }
         if (tools != null) {
           for (final t in tools) {
-            items.add(
-              _toolCallCard(
-                ToolCallView.fromPayload(
-                  Map<String, dynamic>.from(t as Map),
-                  source: ToolCallSource.history,
-                ),
+            currentToolBatch.add(
+              ToolCallView.fromPayload(
+                Map<String, dynamic>.from(t as Map),
+                source: ToolCallSource.history,
               ),
             );
           }
         }
         if (text.isNotEmpty) {
+          flushTools();
           items.add(_bubble(text, Alignment.centerLeft, null, markdown: true, timestamp: timestamp));
         }
       }
@@ -514,15 +539,22 @@ class _ChatScreenState extends State<ChatScreen> {
         : const <String>[];
     for (var i = 0; i < liveTools.length || i < segments.length; i++) {
       if (i < segments.length) {
+        flushTools();
         items.add(_bubble(segments[i], Alignment.centerLeft, null));
       }
       if (i < liveTools.length) {
-        items.add(
-          _toolCallCard(
-            ToolCallView.fromPayload(liveTools[i], source: ToolCallSource.live),
-          ),
+        currentToolBatch.add(
+          ToolCallView.fromPayload(liveTools[i], source: ToolCallSource.live),
         );
       }
+    }
+    flushTools();
+
+    if (showThinking &&
+        streamingThinking != null &&
+        streamingThinking.trim().isNotEmpty &&
+        isWorking) {
+      items.add(ThinkingCard(thinking: streamingThinking, isStreaming: true));
     }
     if (streaming != null && isWorking) {
       items.add(_StreamingBubble(text: streaming));
@@ -611,6 +643,7 @@ class _ChatScreenState extends State<ChatScreen> {
     imagesOmitted: tool.imagesOmitted,
     isError: tool.isError,
     running: tool.running,
+    timestamp: tool.timestamp,
   );
 
   Widget _toolbar(

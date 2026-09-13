@@ -192,6 +192,12 @@ class AgentService extends ChangeNotifier {
     return (text != null && text.isNotEmpty) ? text : null;
   }
 
+  String? streamingThinkingFor(String id) {
+    if (statusFor(id) != 'working') return null;
+    final thinking = _cache.streamingThinking[id];
+    return (thinking != null && thinking.isNotEmpty) ? thinking : null;
+  }
+
   List<String> streamingSegmentsFor(String id) =>
       _cache.streamingSegments[id] ?? const [];
 
@@ -402,6 +408,12 @@ class AgentService extends ChangeNotifier {
           } else {
             _cache.streamingText.remove(id);
           }
+          final sth = m['streamingThinking'] as String?;
+          if (sth != null && sth.isNotEmpty) {
+            _cache.streamingThinking[id] = sth;
+          } else {
+            _cache.streamingThinking.remove(id);
+          }
         }
         // Durable registry rows (may include sessions not running now)
         _registry.clear();
@@ -442,6 +454,7 @@ class AgentService extends ChangeNotifier {
             _cache.toolCalls.remove(sid);
             _cache.streamingSegments.remove(sid);
             _cache.streamingText.remove(sid);
+            _cache.streamingThinking.remove(sid);
           } else {
             // Prune tool calls that have already landed in history.
             final historyCallIds = <String>{};
@@ -469,6 +482,7 @@ class AgentService extends ChangeNotifier {
         if (mode != 'older' && page.isEmpty && cursor == 0) {
           _cache.streamingText.remove(sid);
           _cache.streamingSegments.remove(sid);
+          _cache.streamingThinking.remove(sid);
         }
         notifyListeners();
         break;
@@ -479,6 +493,12 @@ class AgentService extends ChangeNotifier {
           _cache.streamingText[sid] = text;
         } else {
           _cache.streamingText.remove(sid);
+        }
+        final thinking = msg['thinking'] as String? ?? '';
+        if (thinking.isNotEmpty) {
+          _cache.streamingThinking[sid] = thinking;
+        } else {
+          _cache.streamingThinking.remove(sid);
         }
         final segments = (msg['segments'] as List? ?? const [])
             .map((x) => x as String)
@@ -675,6 +695,7 @@ class AgentService extends ChangeNotifier {
       _cache.toolCalls.remove(s.id);
       _cache.streamingSegments.remove(s.id);
       _cache.streamingText.remove(s.id);
+      _cache.streamingThinking.remove(s.id);
     }
     // No client-side queue bookkeeping: the server tracks pending messages
     // and reports them in the session snapshot. This app is a terminal.

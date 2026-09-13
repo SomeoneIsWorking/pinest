@@ -11,15 +11,23 @@
 export interface StreamSnapshot {
   text: string;
   segments: string[];
+  thinking?: string;
 }
 
 export class StreamSegmenter {
   private text = "";
   private segments: string[] = [];
+  private thinking = "";
 
   /** A text delta arrived while the assistant is talking. */
   onTextDelta(delta: string): StreamSnapshot {
     this.text += delta;
+    return this.snapshot();
+  }
+
+  /** A thinking delta arrived while the assistant is reasoning. */
+  onThinkingDelta(delta: string): StreamSnapshot {
+    this.thinking += delta;
     return this.snapshot();
   }
 
@@ -38,6 +46,7 @@ export class StreamSegmenter {
   /** A new assistant message starts: current text is gone, segments remain. */
   startMessage(): StreamSnapshot {
     this.text = "";
+    this.thinking = "";
     return this.snapshot();
   }
 
@@ -45,10 +54,15 @@ export class StreamSegmenter {
   reset(): StreamSnapshot {
     this.text = "";
     this.segments = [];
+    this.thinking = "";
     return this.snapshot();
   }
 
   snapshot(): StreamSnapshot {
-    return { text: this.text, segments: [...this.segments] };
+    return {
+      text: this.text,
+      segments: [...this.segments],
+      ...(this.thinking ? { thinking: this.thinking } : {}),
+    };
   }
 }

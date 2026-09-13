@@ -765,6 +765,8 @@ export class Supervisor {
         const ae = event.assistantMessageEvent;
         if (ae?.type === "text_delta" && s.currentTurnId) {
           this.callbacks.broadcast({ type: "stream", sessionId: id, ...s.segmenter.onTextDelta(ae.delta), status: "working" });
+        } else if (ae?.type === "thinking_delta" && s.currentTurnId) {
+          this.callbacks.broadcast({ type: "stream", sessionId: id, ...s.segmenter.onThinkingDelta(ae.delta), status: "working" });
         }
       } else if (event.type === "tool_execution_start") {
         // The assistant stopped talking to run a tool: PROMOTE the streamed
@@ -775,14 +777,14 @@ export class Supervisor {
           this.callbacks.broadcast({ type: "stream", sessionId: id, ...promoted, status: "working" });
         }
         this.callbacks.broadcast({ type: "tool", sessionId: id, tool: {
-          callId: event.toolCallId, name: event.toolName || "?", args: event.args, running: true,
+          callId: event.toolCallId, name: event.toolName || "?", args: event.args, running: true, timestamp: Date.now(),
         }});
       } else if (event.type === "tool_execution_end") {
         const r = extractToolResult(event.result);
         this.callbacks.broadcast({ type: "tool", sessionId: id, tool: {
           callId: event.toolCallId, name: event.toolName || "?",
           result: r.text, images: r.images,
-          isError: event.isError, running: false,
+          isError: event.isError, running: false, timestamp: Date.now(),
         }});
       } else if (event.type === "agent_end") {
         s.turnStarted = false;

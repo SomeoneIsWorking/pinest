@@ -348,6 +348,9 @@ class _MockAgentService extends ChangeNotifier implements AgentService {
   String? streamingFor(String id) => null;
 
   @override
+  String? streamingThinkingFor(String id) => null;
+
+  @override
   List<String> streamingSegmentsFor(String id) => const [];
 
   @override
