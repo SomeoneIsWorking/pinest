@@ -74,44 +74,81 @@ export function pendingReloadState(): { count: number; files: string[]; watching
   };
 }
 
-/** Queue explicit reload. */
+/** A reload asked for while the session is mid-response, waiting for idle. */
+let _deferredReload = false;
+
+export function reloadDeferred(): boolean {
+  return _deferredReload;
+}
+
+/** Queue explicit reload.
+ *
+ * `working` must say whether the session is mid-response. pi's TUI REFUSES to
+ * reload while streaming, and only warns in the TUI — so a request made from
+ * inside a turn used to be accepted and then do nothing at all. A request made
+ * while working is therefore deferred to the next idle moment instead of being
+ * lost, and the caller is told which happened.
+ */
 export function queueReload(
   pi: ExtensionAPI | null,
   ctx: ExtensionContext | null,
+  options: { working?: boolean } = {},
 ): { ok: boolean; message: string } {
   if (!pi) return { ok: false, message: "reload unavailable: extension not wired to a pi host" };
   try {
     const t = watcherTargets(ctx);
     const broken = firstSyntaxError(t.dirs, t.files);
     if (broken) {
+      _deferredReload = false;
       const msg = `reload REFUSED — syntax error in ${broken}; fix it and reload again (nothing was torn down)`;
       debug(`[remote-code] ${msg}`);
       return { ok: false, message: msg };
     }
+    const pending = pendingReloadState();
+    if (options.working) {
+      _deferredReload = true;
+      const message =
+        `reload deferred: the session is mid-response, and pi refuses a reload while streaming. `
+        + `It will reload as soon as this turn settles (${pending.count} changed file(s) pending).`;
+      debug(`[remote-code] ${message}`);
+      return { ok: true, message };
+    }
     if (ctx && "reload" in ctx && typeof (ctx as any).reload === "function") {
+      _deferredReload = false;
       try {
         void (ctx as any).reload();
         return {
           ok: true,
-          message: "reloaded runtime directly",
+          message: `reloading runtime now (${pending.count} changed file(s) pending)`,
         };
       } catch (err) {
         debug("[remote-code] ctx.reload failed:", err);
       }
     }
 
+    _deferredReload = false;
     pi.sendUserMessage("/pinest-reload", {
       deliverAs: "followUp",
       expandPromptTemplates: true,
     });
-    const p = pendingReloadState();
     return {
       ok: true,
-      message: `queued /pinest-reload as a follow-up command; it applies when the current turn settles (${p.count} changed file(s) pending)`,
+      message: `queued /pinest-reload; it applies when the current turn settles (${pending.count} changed file(s) pending)`,
     };
   } catch (e) {
     const msg = `reload failed to queue: ${(e as Error).message}`;
     debug(`[remote-code] ${msg}`);
     return { ok: false, message: msg };
   }
+}
+
+/** Fire a deferred reload once the session is idle. Returns true if it fired.
+ * Called from the settle event: the only moment the TUI will accept a reload
+ * that was asked for during a turn. */
+export function flushDeferredReload(pi: ExtensionAPI | null): boolean {
+  if (!_deferredReload || !pi) return false;
+  _deferredReload = false;
+  debug("[remote-code] session settled — firing the deferred reload");
+  pi.sendUserMessage("/pinest-reload", { expandPromptTemplates: true });
+  return true;
 }

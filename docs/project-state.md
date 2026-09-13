@@ -60,6 +60,13 @@ closing the socket made the app reconnect-loop and never receive the transcript.
 
 ### S10 — Context and compaction controls
 
+**Reload actually applies edits.** pi's TUI refuses to reload while a session is streaming, so a
+reload requested from inside a turn was accepted and then did nothing — and only warned in the
+TUI. A request made mid-turn is now deferred and fired when the turn settles, a refusal is
+reported instead of assumed, and the loaded build is recorded with its outcome and reason so
+"is my fix live" is answerable from outside. Verified: `tools/reload_host.py` requests a reload
+over the same authenticated channel the app uses and fails loudly if no load followed.
+
 The client displays model/context usage and exposes configured automatic compaction plus visible
 manual `/compact` and `/clear` operations. The threshold the user sets is converted once into pi's
 own `compaction.reserveTokens` for the active model's window and applied to the trigger that
