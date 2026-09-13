@@ -1,6 +1,11 @@
 // Tests that the extension loads and registers itself correctly — the failure
 // mode that actually bit us (commands not appearing after reload). These run
 // the REAL factory from the installed package path with a stub `pi`.
+//
+// FIRST import: loading the factory touches the harness's user-state files
+// (config, runtime record), so their paths must be redirected before any other
+// import is evaluated.
+import "../support/isolate-config.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
