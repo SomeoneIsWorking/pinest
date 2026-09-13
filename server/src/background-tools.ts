@@ -1,3 +1,4 @@
+import debug from "./log.ts";
 import { Type } from "typebox";
 import type { ToolDefinition, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { formatSize, DEFAULT_MAX_BYTES } from "@earendil-works/pi-coding-agent";
@@ -157,6 +158,15 @@ const BgKillParams = Type.Object({
   taskId: Type.String({ description: "Task ID or unambiguous prefix to stop" }),
 });
 
+/** A task's owning session: the id captured when the tool was created, or the
+ * live session from the tool context. A fresh session's tools were created
+ * before its pi session existed, so the captured id was undefined and the task
+ * was treated as host-owned — its completion notice then reached no session at
+ * all (the host choke dropped it). */
+function ownershipId(captured: string | undefined, ctx: any): string | undefined {
+  return captured ?? ctx?.sessionManager?.getSessionId?.();
+}
+
 export function createBackgroundTools(
   manager: BackgroundProcessManager,
   sessionId?: string
@@ -185,7 +195,7 @@ export function createBackgroundTools(
     const task = manager.startTask(p.command, {
       name: p.name ?? p.description,
       cwd: ctx?.cwd,
-      sessionId,
+      sessionId: ownershipId(sessionId, ctx),
       timeoutSeconds: p.timeoutSeconds,
       isAgent: p.isAgent ?? false,
       notifyOnCompletion: p.notifyOnCompletion ?? true,
@@ -209,12 +219,15 @@ export function createBackgroundTools(
   const bgStatusExecute = async (
     _toolCallId: string,
     params: unknown,
-    _signal?: AbortSignal
+    _signal?: AbortSignal,
+    _onUpdate?: unknown,
+    ctx?: unknown
   ) => {
     const p = (params ?? {}) as { taskId?: string };
+    const owner = ownershipId(sessionId, ctx);
     if (p.taskId && p.taskId.trim()) {
       const task = manager.resolveTask(p.taskId);
-      if (!manager.isOwned(task, sessionId)) throw new Error(`Task not found: ${p.taskId}`);
+      if (!manager.isOwned(task, owner)) throw new Error(`Task not found: ${p.taskId}`);
       const duration = Math.round(((task.finishedAt ?? Date.now()) - task.startedAt) / 1000);
       return {
         content: textContent(
@@ -236,7 +249,7 @@ export function createBackgroundTools(
       };
     }
 
-    const tasks = manager.listTasks(sessionId);
+    const tasks = manager.listTasks(owner);
     return {
       content: textContent(formatTaskList(tasks)),
       details: { tasks: tasks.map(toJobSummary) },
@@ -246,14 +259,17 @@ export function createBackgroundTools(
   const bgLogsExecute = async (
     _toolCallId: string,
     params: unknown,
-    _signal?: AbortSignal
+    _signal?: AbortSignal,
+    _onUpdate?: unknown,
+    ctx?: unknown
   ) => {
     const p = (params ?? {}) as { taskId: string; maxBytes?: number; tail?: boolean };
+    const owner = ownershipId(sessionId, ctx);
     if (!p.taskId || !p.taskId.trim()) {
       throw new Error("taskId is required");
     }
     const task = manager.resolveTask(p.taskId);
-    if (!manager.isOwned(task, sessionId)) throw new Error(`Task not found: ${p.taskId}`);
+    if (!manager.isOwned(task, owner)) throw new Error(`Task not found: ${p.taskId}`);
     const result = manager.getTaskLogs(task, {
       maxBytes: p.maxBytes,
       tail: p.tail ?? true,
@@ -272,14 +288,17 @@ export function createBackgroundTools(
   const bgKillExecute = async (
     _toolCallId: string,
     params: unknown,
-    _signal?: AbortSignal
+    _signal?: AbortSignal,
+    _onUpdate?: unknown,
+    ctx?: unknown
   ) => {
     const p = (params ?? {}) as { taskId: string };
+    const owner = ownershipId(sessionId, ctx);
     if (!p.taskId || !p.taskId.trim()) {
       throw new Error("taskId is required");
     }
     const task = manager.resolveTask(p.taskId);
-    if (!manager.isOwned(task, sessionId)) throw new Error(`Task not found: ${p.taskId}`);
+    if (!manager.isOwned(task, owner)) throw new Error(`Task not found: ${p.taskId}`);
     const killed = manager.killTask(task.id);
     const message = killed
       ? `Stopped background task ${taskDisplayName(task)} (${task.id}). Output saved to ${task.logPath}`

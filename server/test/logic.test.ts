@@ -11,6 +11,10 @@ import {
   extractText,
   extractUserText,
   messagesToHistory,
+  base64Bytes,
+  lookupImage,
+  registerImage,
+  imageStoreSize,
   extractSessionMessages,
   listPaths,
 } from "../src/logic.ts";
@@ -253,24 +257,67 @@ test("messagesToHistory carries tool-result images, and reports what it drops", 
   const one = messagesToHistory([call("a"), result("a", [img("1")])]);
   const tool = one[0]!.tools[0]!;
   assert.equal(tool.images?.length, 1, "the image part must reach the app");
-  assert.equal(tool.images?.[0]?.data, "AAA1");
-  assert.equal(tool.imagesOmitted, undefined, "nothing was dropped, so nothing may be claimed dropped");
+  assert.equal(tool.images?.[0]?.mimeType, "image/png");
+  assert.ok(tool.images?.[0]?.id, "history carries a reference the client can fetch");
+  assert.equal((tool.images?.[0] as any).data, undefined, "base64 must never travel in history");
+  assert.equal(tool.images?.[0]?.bytes, base64Bytes("AAA1"));
+  // ...and that reference resolves to the real bytes on demand.
+  assert.deepEqual(lookupImage(tool.images![0]!.id), { data: "AAA1", mimeType: "image/png" });
 
   // A text-only result must not sprout an images array with content.
   const plain = messagesToHistory([call("b"), result("b", [])]);
   assert.deepEqual(plain[0]!.tools[0]!.images, [], "no images means no images");
 
-  // Over budget: newest kept, older ones REPORT their omission.
+  // Every image is referenced — a large transcript is not silently truncated.
   const many: unknown[] = [];
   for (let i = 0; i < 12; i++) many.push(call(`c${i}`), result(`c${i}`, [img(String(i))]));
-  const big = messagesToHistory(many);
-  const carried = big.flatMap((h) => h.tools).reduce((n, t) => n + (t.images?.length ?? 0), 0);
-  const omitted = big.flatMap((h) => h.tools).reduce((n, t) => n + (t.imagesOmitted ?? 0), 0);
-  assert.equal(carried, 8, `budget is 8 images per payload, got ${carried}`);
-  assert.equal(carried + omitted, 12, "every image is either carried or counted as omitted");
-  // The NEWEST cards are the ones that keep their image.
-  const last = big[big.length - 1]!.tools[0]!;
-  assert.equal(last.images?.length, 1, "the most recent image must be the one kept");
+  const all = messagesToHistory(many);
+  const refs = all.flatMap((h) => h.tools).flatMap((t) => t.images ?? []);
+  assert.equal(refs.length, 12, "all 12 images are referenced, none dropped");
+  assert.equal(new Set(refs.map((r) => r.id)).size, 12, "distinct images get distinct ids");
+  const lastRef = all[all.length - 1]!.tools[0]!.images![0]!;
+  assert.deepEqual(lookupImage(lastRef.id), { data: "AAA11", mimeType: "image/png" });
+});
+
+test("images are fetched on demand, and a missing one is reported not blank", () => {
+  assert.equal(lookupImage("ffffffffffffffffffff"), undefined, "an unknown id must not resolve to empty bytes");
+
+  // Identical bytes are referenced through ONE registry entry.
+  const before = imageStoreSize();
+  const a = registerImage("SAME", "image/png");
+  const b = registerImage("SAME", "image/png");
+  assert.equal(a.id, b.id, "the same bytes must not be stored twice");
+  assert.equal(imageStoreSize(), before + 1);
+});
+
+test("a screenshot-heavy transcript stays small, because images are references", () => {
+  // The real regression: eight 4K screenshots measured 19.36 MB of a 19.7 MB
+  // history payload — above the server\'s whole 16 MiB outbound allowance, so
+  // the transcript could never be delivered and the app reconnect-looped.
+  const screenshot = "A".repeat(Math.ceil(2_500_000 / 3) * 4);
+  const call = (id: string) => ({
+    role: "assistant",
+    content: [{ type: "toolCall", id, name: "read", arguments: { path: `/p/${id}.png` } }],
+  });
+  const result = (id: string, data: string) => ({
+    role: "toolResult", toolCallId: id,
+    content: [{ type: "text", text: "Read image file [image/png]" }, { type: "image", data, mimeType: "image/png" }],
+  });
+
+  const messages: unknown[] = [];
+  for (let i = 0; i < 8; i++) messages.push(call(`s${i}`), result(`s${i}`, screenshot));
+  const history = messagesToHistory(messages);
+  const wire = Buffer.byteLength(JSON.stringify(history));
+
+  assert.ok(
+    wire < 100_000,
+    `history must stay kilobytes with 20MB of screenshots, got ${(wire / 1048576).toFixed(2)}MB`,
+  );
+  assert.equal(
+    history.flatMap((h) => h.tools).flatMap((t) => t.images ?? []).length,
+    8,
+    "every screenshot is still referenced",
+  );
 });
 
 test("messagesToHistory: preserves numeric and ISO string timestamps", () => {

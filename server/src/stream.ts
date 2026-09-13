@@ -8,16 +8,26 @@
  * call, the text streamed so far is PROMOTED into a finished segment so it
  * stays visible while the tool runs, and streaming resumes fresh afterwards.
  */
+export interface StreamSegment {
+  text: string;
+  /** How many tool calls had started when this segment was promoted — i.e. the
+   * index of the tool call this speech preceded. Clients need it to interleave
+   * speech and tools in real order; pairing by position guessed wrong and put
+   * a paragraph ABOVE tools that had already run. */
+  atTool: number;
+}
+
 export interface StreamSnapshot {
   text: string;
-  segments: string[];
+  segments: StreamSegment[];
   thinking?: string;
 }
 
 export class StreamSegmenter {
   private text = "";
-  private segments: string[] = [];
+  private segments: StreamSegment[] = [];
   private thinking = "";
+  private toolCount = 0;
 
   /** A text delta arrived while the assistant is talking. */
   onTextDelta(delta: string): StreamSnapshot {
@@ -37,8 +47,10 @@ export class StreamSegmenter {
    * when nothing was streaming so callers can skip the broadcast.
    */
   onToolStart(): StreamSnapshot | null {
+    const atTool = this.toolCount;
+    this.toolCount += 1;
     if (this.text.trim().length === 0) return null;
-    this.segments = [...this.segments, this.text];
+    this.segments = [...this.segments, { text: this.text, atTool }];
     this.text = "";
     return this.snapshot();
   }
@@ -55,6 +67,7 @@ export class StreamSegmenter {
     this.text = "";
     this.segments = [];
     this.thinking = "";
+    this.toolCount = 0;
     return this.snapshot();
   }
 

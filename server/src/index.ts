@@ -25,7 +25,7 @@ import type { FirebaseAuth } from "./auth.ts";
 import { WSServer } from "./wsserver.ts";
 import { Supervisor } from "./supervisor.ts";
 import { SessionRegistry } from "./registry.ts";
-import { mapModel, deriveSessionName, historyWithEmbeds, embedImages, extractSessionMessages, extractToolResult, listPaths, resolvePathInput, pageHistory } from "./logic.ts";
+import { mapModel, deriveSessionName, historyWithEmbeds, embedImages, extractSessionMessages, extractToolResult, listPaths, resolvePathInput, pageHistory, lookupImage } from "./logic.ts";
 import { createDefaultBackgroundManager, registerBashIntegration, toJobSummary, type BackgroundProcessManager } from "./bash-tool.ts";
 import { registerBackgroundTools, handleJobCommand } from "./background-tools.ts";
 import { StreamSegmenter } from "./stream.ts";
@@ -747,6 +747,16 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
     case "get_history": {
       const paged = pageHistory(await getInteractiveHistory(), { limit: cmd.limit, cursor: cmd.cursor });
       broadcast({ type: "history", sessionId: _sessionId, ...paged });
+      break;
+    }
+    case "get_image": {
+      // Images are fetched on demand, never shipped in history.
+      const found = lookupImage(cmd.imageId);
+      broadcast(
+        found
+          ? { type: "image", imageId: cmd.imageId, mimeType: found.mimeType, data: found.data }
+          : { type: "image_missing", imageId: cmd.imageId, reason: "the server no longer holds this image" },
+      );
       break;
     }
     case "queue_clear":

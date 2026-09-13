@@ -11,7 +11,6 @@ import {
   createAgentSession,
   SessionManager,
   ModelRuntime,
-  ModelRegistry,
   DefaultResourceLoader,
   SettingsManager,
   getAgentDir,
@@ -20,14 +19,15 @@ import type { AgentSession, ResourceLoader } from "@earendil-works/pi-coding-age
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
-import { mapModel, deriveSessionName, messagesToHistory, pageHistory, historyWithEmbeds, extractSessionMessages, extractUserText, extractText, extractToolResult, popPending } from "./logic.ts";
+import { mapModel, deriveSessionName, messagesToHistory, pageHistory, historyWithEmbeds, extractSessionMessages, extractUserText, extractText, extractToolResult, popPending, lookupImage } from "./logic.ts";
 import { createAutoBackgroundBashTool, type BackgroundProcessManager } from "./bash-tool.ts";
 import { createBackgroundTools } from "./background-tools.ts";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { StreamSegmenter } from "./stream.ts";
 import { createMessageSubmitter, type MessageSubmitter } from "./submit.ts";
-import { resolveThinkingLevel, reportThinkingLevel } from "./thinking.ts";
+import { resolveThinkingLevel } from "./thinking.ts";
 import type { SessionRegistry } from "./registry.ts";
+import { SessionModelService } from "./session-models.ts";
 import type { SessionSnapshot, SessionRow, UserImage } from "./protocol.ts";
 
 function isPinestExtension(path: string, resolvedPath?: string): boolean {
@@ -141,73 +141,32 @@ export class Supervisor {
   registry: SessionRegistry | null;
   agentDir: string | undefined;
   sessions = new Map<string, LiveSession>();
-  private _modelRegistry: ModelRegistry | null = null;
 
-  /**
-   * Registry for model lookups. NOTE: pi's SDK AgentSession does NOT expose
-   * modelRegistry (that lives on ExtensionContext) — pinest's spawn-time
-   * setModel was a silent no-op because of that. Build our own from a
-   * ModelRuntime, exactly like pi's agent-session-services does.
-   */
-  private async modelRegistry(): Promise<ModelRegistry> {
-    if (!this._modelRegistry) {
-      const runtime = await ModelRuntime.create({
-        authPath: this.agentDir ? join(this.agentDir, "auth.json") : undefined,
-        modelsPath: this.agentDir ? join(this.agentDir, "models.json") : undefined,
-      });
-      this._modelRegistry = new ModelRegistry(runtime);
-    }
-    return this._modelRegistry;
-  }
-
-  private async findModel(spec: string): Promise<ReturnType<ModelRegistry["find"]> | null> {
-    for (const s of this.sessions.values()) {
-      const sessionRuntime = (s.session as any)?.modelRuntime ?? (s.session as any)?._modelRuntime;
-      if (sessionRuntime) {
-        let snap = sessionRuntime.getAvailableSnapshot();
-        const slash = spec.indexOf("/");
-        const provider = slash !== -1 ? spec.slice(0, slash) : null;
-        const id = slash !== -1 ? spec.slice(slash + 1) : null;
-        let match = (provider && id)
-          ? snap.find((m: any) => m.provider === provider && m.id === id)
-          : snap.find((m: any) => m.id === spec || m.name?.toLowerCase() === spec.toLowerCase() || `${m.provider}/${m.id}` === spec);
-        if (!match) {
-          await sessionRuntime.getAvailable?.().catch(() => undefined);
-          snap = sessionRuntime.getAvailableSnapshot();
-          match = (provider && id)
-            ? snap.find((m: any) => m.provider === provider && m.id === id)
-            : snap.find((m: any) => m.id === spec || m.name?.toLowerCase() === spec.toLowerCase() || `${m.provider}/${m.id}` === spec);
-        }
-        if (match) return match;
-      }
-    }
-    const reg = await this.modelRegistry();
-    await ((reg as any).runtime?.getAvailable?.() ?? reg.refresh?.())?.catch(() => undefined);
-    const slash = spec.indexOf("/");
-    if (slash !== -1) {
-      const provider = spec.slice(0, slash);
-      const id = spec.slice(slash + 1);
-      const exact = reg.find(provider, id);
-      if (exact) return exact;
-    }
-    const available = reg.getAvailable();
-    return available.find(
-      (m) => m.id === spec || m.name.toLowerCase() === spec.toLowerCase() || `${m.provider}/${m.id}` === spec,
-    ) ?? null;
-  }
-
+  /** Model lookup/switching — one owner for "what models exist and which one
+   * each session is on" (see session-models.ts). Built in the constructor:
+   * a field initializer would run before `agentDir` is assigned. */
+  private readonly modelService: SessionModelService;
   constructor(ownerUid: string, callbacks: SupervisorCallbacks, registry: SessionRegistry | null = null, opts: SupervisorOptions = {}) {
     this.ownerUid = ownerUid;
     this.callbacks = callbacks;
     this.registry = registry;
     this.agentDir = opts.agentDir;
+    this.modelService = new SessionModelService(this.agentDir);
   }
 
   get bgManager(): BackgroundProcessManager | undefined {
     return this.callbacks.bgManager;
   }
 
-  private async createSessionOpts(cwd: string, sessionManager?: SessionManager): Promise<{
+  private async createSessionOpts(
+    cwd: string,
+    sessionManager?: SessionManager,
+    /** This session's identity, stamped on every task its tools start. Without
+     * it a fresh session's background tools had no owner: the task looked
+     * host-owned, got routed to the host, and the host choke dropped it — the
+     * completion notice was invisible everywhere. */
+    ownershipId?: string,
+  ): Promise<{
     cwd: string; agentDir?: string; sessionManager?: SessionManager; resourceLoader?: ResourceLoader;
     modelRuntime?: ModelRuntime; customTools?: any[];
   }> {
@@ -243,8 +202,8 @@ export class Supervisor {
     if (sessionManager) opts.sessionManager = sessionManager;
     if (this.callbacks.bgManager) {
       opts.customTools = [
-        createAutoBackgroundBashTool({ bgManager: this.callbacks.bgManager, cwd }),
-        ...createBackgroundTools(this.callbacks.bgManager, sessionManager?.getSessionId?.()),
+        createAutoBackgroundBashTool({ bgManager: this.callbacks.bgManager, cwd, sessionId: ownershipId }),
+        ...createBackgroundTools(this.callbacks.bgManager, ownershipId),
       ];
     }
     return opts;
@@ -310,7 +269,7 @@ export class Supervisor {
     Supervisor.activeSpawning = true;
     let session: AgentSession;
     try {
-      const opts = await this.createSessionOpts(cwd);
+      const opts = await this.createSessionOpts(cwd, undefined, id);
       const res = await createAgentSession(opts);
       session = res.session;
     } finally {
@@ -332,7 +291,7 @@ export class Supervisor {
 
     if (cmd.model) {
       try {
-        const mdl = await this.findModel(cmd.model);
+        const mdl = await this.modelService.find(cmd.model, this.sessions.values());
         if (mdl) {
           await session.setModel(mdl);
           s.model = `${mdl.provider}/${mdl.id}`;
@@ -374,7 +333,7 @@ export class Supervisor {
     Supervisor.activeSpawning = true;
     let session: AgentSession;
     try {
-      const opts = await this.createSessionOpts(cwd, sessionManager);
+      const opts = await this.createSessionOpts(cwd, sessionManager, id);
       const res = await createAgentSession(opts);
       session = res.session;
     } finally {
@@ -394,7 +353,7 @@ export class Supervisor {
     const savedModel = this.registry?.get(id)?.model;
     if (savedModel && s.model !== savedModel) {
       try {
-        const smdl = await this.findModel(savedModel);
+        const smdl = await this.modelService.find(savedModel, this.sessions.values());
         if (smdl) {
           await session.setModel(smdl);
           s.model = `${smdl.provider}/${smdl.id}`;
@@ -569,6 +528,16 @@ export class Supervisor {
           const full = await this.getHistory(s);
           const paged = pageHistory(full, { limit: cmd.limit, cursor: cmd.cursor });
           this.callbacks.broadcast({ type: "history", sessionId: cmd.sessionId, ...paged });
+          break;
+        }
+        case "get_image": {
+          // Images are fetched on demand, never shipped in history.
+          const found = lookupImage(cmd.imageId);
+          this.callbacks.broadcast(
+            found
+              ? { type: "image", imageId: cmd.imageId, mimeType: found.mimeType, data: found.data }
+              : { type: "image_missing", imageId: cmd.imageId, reason: "the server no longer holds this image" },
+          );
           break;
         }
         case "queue_clear": {
@@ -892,25 +861,17 @@ export class Supervisor {
   }
 
   private async setModel(cmd: any, s: LiveSession): Promise<void> {
-    const m = await this.findModel(`${cmd.provider}/${cmd.modelId}`);
-    if (!m) throw new Error(`model ${cmd.provider}/${cmd.modelId} not found`);
-    await s.session.setModel(m);
-    // Read back what the session ACTUALLY holds — a switch that silently
-    // no-ops must not let the label drift from reality.
-    const actual = (s.session as any).model;
-    if (actual && `${actual.provider}/${actual.id}` !== `${cmd.provider}/${cmd.modelId}`) {
-      throw new Error(
-        `host switched to ${actual.provider}/${actual.id}, not ${cmd.provider}/${cmd.modelId}`,
-      );
-    }
-    s.model = `${cmd.provider}/${cmd.modelId}`; s.modelName = m.name;
-    this.persistRow(cmd.sessionId, { model: s.model, modelName: m.name });
+    const switched = await this.modelService.set(
+      s, { provider: cmd.provider, modelId: cmd.modelId }, this.sessions.values(),
+    );
+    s.model = switched.model; s.modelName = switched.modelName;
+    this.persistRow(cmd.sessionId, { model: switched.model, modelName: switched.modelName });
     // Refresh the context usage NOW so the app's context badge reflects the
     // new model's window immediately (it used to lag until the next turn).
     // "off" may also change meaning with the model — re-report the level.
     this.callbacks.upsertSession(cmd.sessionId, {
-      model: s.model, modelName: m.name, contextUsage: this.usageWithCompactAt(s),
-      thinkingLevel: reportThinkingLevel(m, (s.session as any).thinkingLevel),
+      model: switched.model, modelName: switched.modelName, contextUsage: this.usageWithCompactAt(s),
+      thinkingLevel: switched.thinkingLevel,
     });
   }
 
@@ -992,26 +953,7 @@ export class Supervisor {
   }
 
   private async models(s: LiveSession) {
-    const sessionRuntime = (s.session as any)?.modelRuntime ?? (s.session as any)?._modelRuntime;
-    if (sessionRuntime) {
-      const avail = await sessionRuntime.getAvailable?.().catch(() => undefined);
-      if (Array.isArray(avail) && avail.length > 0) {
-        return avail.map(mapModel);
-      }
-      const snap = sessionRuntime.getAvailableSnapshot();
-      if (Array.isArray(snap) && snap.length > 0) {
-        return snap.map(mapModel);
-      }
-    }
-    const reg = await this.modelRegistry();
-    const runtime = (reg as any)?.runtime;
-    if (runtime) {
-      const avail = await runtime.getAvailable?.().catch(() => undefined);
-      if (Array.isArray(avail) && avail.length > 0) {
-        return avail.map(mapModel);
-      }
-    }
-    return reg.getAvailable().map(mapModel);
+    return this.modelService.list(s);
   }
 
   private async getHistory(s: LiveSession) {

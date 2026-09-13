@@ -105,3 +105,53 @@ test("handleJobCommand: handles jobs_list, job_logs, and job_kill", async () => 
 
   manager.dispose();
 });
+
+test("a task started before the session's pi id existed is still owned by it", async () => {
+  // Real regression (Kenji-NX): the supervisor builds a fresh session's tools
+  // BEFORE createAgentSession, so the captured ownership id was undefined. The
+  // task then looked host-owned, the host choke dropped its completion notice,
+  // and the transcript showed no completion card anywhere.
+  const manager = new BackgroundProcessManager({ hostSessionId: "host-app-id" });
+  const tools = createBackgroundTools(manager, undefined);
+  const bgRun = tools.find((t) => t.name === "bg_run")!;
+  const ctx = { sessionManager: { getSessionId: () => "session-pi-id" } };
+
+  const started = await bgRun.execute(
+    "call_1",
+    { command: "echo owned" },
+    undefined,
+    undefined,
+    ctx,
+  );
+  const taskId = started.details.task.id;
+  await new Promise((r) => setTimeout(r, 100));
+
+  const owned = manager.listTasks("session-pi-id").find((t) => t.id === taskId);
+  assert.ok(owned, "the live session owns the task it started");
+  assert.equal(owned!.sessionId, "session-pi-id", "the task records the live session id");
+  assert.equal(
+    manager.isHostOwnedTask(taskId),
+    false,
+    "it must NOT look host-owned — that is what silently killed the notice",
+  );
+  assert.deepEqual(manager.listTasks("host-app-id"), [], "the host owns none of it");
+
+  // Query tools resolve ownership the same way, so a session cannot see (or
+  // kill) another session's jobs just because its captured id was undefined.
+  const statusTool = tools.find((t) => t.name === "bg_status")!;
+  const status = await statusTool.execute("call_2", { taskId }, undefined, undefined, ctx);
+  assert.ok(status.content[0].text.includes("owned"));
+  await assert.rejects(
+    statusTool.execute(
+      "call_3",
+      { taskId },
+      undefined,
+      undefined,
+      { sessionManager: { getSessionId: () => "someone-else" } },
+    ),
+    /Task not found/,
+    "another session must not see (or act on) this task",
+  );
+
+  manager.dispose();
+});
