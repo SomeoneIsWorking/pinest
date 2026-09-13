@@ -208,6 +208,15 @@ class AgentService extends ChangeNotifier {
   List<Map<String, dynamic>> toolCallsFor(String id) =>
       _cache.toolCalls[id] ?? [];
 
+  /// Messages the server parked when a run was stopped (undelivered steers
+  /// and follow-ups), keyed by session. The chat screen restores them into
+  /// the composer and then calls [clearParked].
+  final Map<String, List<Map<String, dynamic>>> _parked = {};
+  List<Map<String, dynamic>> parkedFor(String id) => _parked[id] ?? const [];
+  void clearParked(String id) {
+    if (_parked.remove(id) != null) notifyListeners();
+  }
+
   void updateAuth(AuthService auth) {
     if (identical(_auth, auth)) return;
     _auth?.removeListener(_onAuthChanged);
@@ -566,6 +575,22 @@ class AgentService extends ChangeNotifier {
         if (cmdId.isNotEmpty) {
           _requests.complete(cmdId, msg);
         }
+        break;
+      }
+      case 'queue_parked': {
+        final sid = msg['sessionId'] as String? ?? '';
+        final raw = msg['messages'] as List? ?? const [];
+        _parked[sid] = [
+          for (final m in raw)
+            {
+              'text': ((m as Map)['text'] as String?) ?? '',
+              'images': [
+                for (final img in (m['images'] as List? ?? const []))
+                  Map<String, dynamic>.from(img as Map),
+              ],
+            },
+        ];
+        notifyListeners();
         break;
       }
       case 'jobs_list': {

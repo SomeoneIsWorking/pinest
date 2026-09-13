@@ -22,6 +22,10 @@ flutter build web --release --pwa-strategy=none --no-tree-shake-icons \
   --dart-define=FIREBASE_WEB_API_KEY="$FIREBASE_WEB_API_KEY" \
   --dart-define=FIREBASE_ANDROID_API_KEY="${FIREBASE_ANDROID_API_KEY:-$FIREBASE_WEB_API_KEY}"
 
+# Stamp the build so clients can detect a newer deployment and offer a reload.
+BUILD_ID="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)-$(date +%s)"
+printf '{"id": "%s"}\n' "$BUILD_ID" > build/web/version.json
+
 # If a release APK was built locally, stage it into hosting so it's downloadable directly
 if [ -f "build/app/outputs/flutter-apk/app-release.apk" ]; then
   echo "Staging release APK into web build..."

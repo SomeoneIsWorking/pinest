@@ -369,5 +369,8 @@ class _MockAgentService extends ChangeNotifier implements AgentService {
   Future<Map<String, dynamic>?> fetchJobLogs(String jobId, {int? maxBytes, bool? tail}) async => null;
 
   @override
+  List<Map<String, dynamic>> parkedFor(String id) => [];
+
+  @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

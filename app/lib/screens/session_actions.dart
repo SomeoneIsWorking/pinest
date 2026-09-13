@@ -1,10 +1,12 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../logic/token_format.dart';
 import '../models/chat_item.dart';
 import '../models/session.dart';
 import '../services/agent_service.dart';
 import '../services/user_preferences.dart';
+import 'app_toast.dart';
 import 'model_sheet.dart';
 
 /// Below this width the action labels cannot all fit inline, so they move into
@@ -431,6 +433,82 @@ void confirmRemoveSession(
       ],
     ),
   );
+}
+
+/// Executes a typed slash command from the chat composer. Returns true when
+/// [text] was a slash command this app consumed (including unknown ones —
+/// those get an error toast instead of reaching the agent as a prompt).
+Future<bool> runSlashCommand(
+  BuildContext context, {
+  required AgentService svc,
+  required Session? s,
+  required String text,
+}) async {
+  if (!text.startsWith('/')) return false;
+  final parts = text.split(RegExp(r'\s+'));
+  final name = parts.first.toLowerCase();
+
+  Future<void> guard(VoidCallback action, {bool requireIdle = true}) async {
+    if (s == null) {
+      showAppToast(context, 'No active session for /${name.substring(1)}', isError: true);
+      return;
+    }
+    if (requireIdle && svc.statusFor(s.id) == 'working') {
+      showAppToast(context, 'Agent is working — stop it first', isError: true);
+      return;
+    }
+    action();
+  }
+
+  switch (name) {
+    case '/compact':
+      await guard(() => confirmContextAction(
+        context,
+        title: 'Compact context?',
+        body: 'The conversation so far is replaced by a summary. '
+            'The full transcript is not recoverable from the app.',
+        action: 'Compact',
+        onConfirm: () => svc.compact(s!),
+      ));
+      return true;
+    case '/clear':
+      await guard(() => confirmContextAction(
+        context,
+        title: 'Clear session?',
+        body: 'Starts a fresh session with an empty context. '
+            'The current conversation is dropped from this session.',
+        action: 'Clear',
+        onConfirm: () => svc.newSession(s!),
+      ));
+      return true;
+    case '/model':
+      await guard(() => showModelsSheet(context, svc, s!, models: svc.modelsFor(s.id)), requireIdle: false);
+      return true;
+    case '/thinking':
+      await guard(() => showThinkingSheet(context, svc, s!), requireIdle: false);
+      return true;
+    case '/autocompact':
+      final value = text.substring('/autocompact'.length).trim();
+      final tokens = parseTokenCount(value);
+      if (tokens == null || tokens < 1000) {
+        showAppToast(
+          context,
+          'Usage: /autocompact 300k (a value >= 1000 tokens)',
+          isError: true,
+        );
+        return true;
+      }
+      if (!svc.anyMachineOnline) {
+        showAppToast(context, 'No machine online', isError: true);
+        return true;
+      }
+      svc.setCompactThreshold(tokens);
+      showAppToast(context, 'Auto-compact set to ${formatTokenCount(tokens)} tokens');
+      return true;
+    default:
+      showAppToast(context, 'Unknown command: $name', isError: true);
+      return true;
+  }
 }
 
 List<BarAction> buildSessionBarActions({

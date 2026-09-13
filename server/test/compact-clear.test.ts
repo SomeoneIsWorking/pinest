@@ -216,3 +216,49 @@ test("session_new drops the old queue and pushes the empty transcript", async ()
 
   await sup.shutdownAll();
 });
+
+test("cancel parks queued prompts instead of destroying them", async () => {
+  const sent: any[] = [];
+  const sup = makeSupervisor(sent);
+  let aborted = 0;
+  const s = liveSession({ abort: async () => { aborted++; } });
+  s.pending = ["the prompt I wanted", "second steer"];
+  s.pendingSteering = ["the prompt I wanted"];
+  s.pendingImagesByText = { "second steer": [{ mimeType: "image/png", data: "CC" }] };
+  (sup as any).sessions.set("s1", s);
+
+  await sup.handleSessionCommand({ type: "cancel", sessionId: "s1" } as any);
+  await new Promise((r) => setTimeout(r, 20));
+
+  assert.equal(aborted, 1, "abort() was not called");
+  const live = (sup as any).sessions.get("s1");
+  assert.deepEqual(live.pending, [], "agent queue must still drain on stop");
+  assert.deepEqual(live.pendingSteering, [], "steer queue must still drain on stop");
+  const parkedMsg = sent.find((m) => m.type === "queue_parked");
+  assert.ok(parkedMsg, `no queue_parked broadcast; sent=${JSON.stringify(sent.map((m) => m.type))}`);
+  assert.equal(parkedMsg.sessionId, "s1");
+  assert.deepEqual(parkedMsg.messages, [
+    { text: "the prompt I wanted", images: [] },
+    { text: "second steer", images: [{ mimeType: "image/png", data: "CC" }] },
+  ]);
+  assert.ok(
+    sent.some((m) => m.type === "upsert" && m.patch?.pendingMessages?.length === 0),
+    "session snapshot still reports the drained queue",
+  );
+
+  await sup.shutdownAll();
+});
+
+test("cancel with an empty queue aborts without a park broadcast", async () => {
+  const sent: any[] = [];
+  const sup = makeSupervisor(sent);
+  const s = liveSession({ abort: async () => {} });
+  (sup as any).sessions.set("s1", s);
+
+  await sup.handleSessionCommand({ type: "cancel", sessionId: "s1" } as any);
+  await new Promise((r) => setTimeout(r, 20));
+
+  assert.ok(!sent.some((m) => m.type === "queue_parked"), "no park event for an empty queue");
+
+  await sup.shutdownAll();
+});

@@ -6,3 +6,9 @@ import 'dart:html' as html;
 void openExternalUrl(String url) {
   html.window.open(url, '_blank');
 }
+
+/// Reloads the app page so a freshly deployed build takes over.
+void reloadPage() {
+  html.window.location.reload();
+}
+
