@@ -26,11 +26,11 @@ class ToolCallView {
     Map<String, dynamic> payload, {
     required ToolCallSource source,
   }) {
-    final rawTs = payload['timestamp'];
+    final rawTs = payload['timestamp'] ?? payload['ts'];
     final ts = rawTs is num
         ? rawTs.toInt()
         : rawTs is String
-            ? int.tryParse(rawTs)
+            ? (int.tryParse(rawTs) ?? DateTime.tryParse(rawTs)?.millisecondsSinceEpoch)
             : null;
     return ToolCallView(
       name: payload['name'] as String? ?? 'tool',

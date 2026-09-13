@@ -509,6 +509,9 @@ class _ChatScreenState extends State<ChatScreen> {
       if (isTaskNotification) {
         flushTools();
         items.add(TaskNotificationCard(text: text, timestamp: timestamp));
+      } else if (msg['customType'] == 'compaction') {
+        flushTools();
+        items.add(_systemBubble('Conversation compacted', timestamp: timestamp));
       } else if (role == 'system') {
         flushTools();
         items.add(_systemBubble(text, timestamp: timestamp));

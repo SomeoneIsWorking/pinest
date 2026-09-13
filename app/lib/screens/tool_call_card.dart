@@ -98,14 +98,14 @@ class _ToolCallCardState extends State<ToolCallCard> {
                         color: Colors.grey,
                       ),
                       if (widget.timestamp != null && widget.timestamp! > 0) ...[
-                        const Spacer(),
+                        const SizedBox(width: 8),
                         Tooltip(
                           message: formatExactTime(widget.timestamp!),
                           child: Text(
                             formatRelativeTime(widget.timestamp!),
                             style: TextStyle(
                               fontSize: 10,
-                              color: Theme.of(context).colorScheme.onSurface.withAlpha(102),
+                              color: Theme.of(context).colorScheme.onSurface.withAlpha(128),
                             ),
                           ),
                         ),
