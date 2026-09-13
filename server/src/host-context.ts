@@ -130,8 +130,13 @@ export class HostContextController {
     return historyPush;
   }
 
-  onCompactFailed(event: { aborted?: unknown; error?: unknown } | undefined): void {
-    const why = event?.aborted ? "cancelled" : (event?.error || "unknown error");
+  onCompactFailed(event: { aborted?: unknown; error?: unknown; errorMessage?: unknown } | undefined): void {
+    // pi's session_compact_failed carries `errorMessage` (already prefixed
+    // "Compaction failed: …" for non-abort failures); `error` is never set.
+    const raw = event?.errorMessage ?? event?.error;
+    const text = raw == null ? "unknown error" : String(raw);
+    const cause = text.startsWith("Compaction failed: ") ? text.slice("Compaction failed: ".length) : text;
+    const why = event?.aborted ? "cancelled" : cause;
     const usage = this.contextUsage();
     const tokens = typeof usage?.tokens === "number" ? usage.tokens : 0;
     if (tokens) this.lastFailedCompactTokens = tokens;
@@ -139,7 +144,7 @@ export class HostContextController {
     this.deps.broadcast({
       type: "error",
       sessionId: this.deps.getSessionId(),
-      message: `Compaction failed: ${String(why)}`,
+      message: `Compaction failed: ${why}`,
     });
   }
 
