@@ -1119,7 +1119,7 @@ const remoteCode = (pi: ExtensionAPI): void => {
     getSupervisor: () => _supervisor,
     broadcast,
   });
-  registerBashIntegration(pi, { bgManager: _bgManager });
+  registerBashIntegration(pi, { bgManager: _bgManager, sessionId: _sessionId });
   registerBackgroundTools(pi, _bgManager, _sessionId);
 
   _hostCommandDeps = () => ({

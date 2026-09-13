@@ -28,17 +28,27 @@ export function handleJobCommand(
       break;
     }
     case "job_kill": {
-      const killed = mgr.killTask(cmd.jobId);
-      if (!killed) {
+      let task: BackgroundTask | undefined;
+      try {
+        task = mgr.resolveTask(cmd.jobId);
+      } catch { /* not found below */ }
+      if (!task || !mgr.isOwned(task, cmd.sessionId)) {
         broadcast({ type: "error", message: `Job not found or already stopped: ${cmd.jobId}` });
       } else {
-        broadcast({ type: "notice", message: `Stopped background job ${cmd.jobId}` });
+        const killed = mgr.killTask(task.id);
+        if (!killed) {
+          broadcast({ type: "error", message: `Job not found or already stopped: ${cmd.jobId}` });
+        } else {
+          broadcast({ type: "notice", message: `Stopped background job ${cmd.jobId}` });
+        }
       }
       break;
     }
     case "job_logs": {
       try {
-        const res = mgr.getTaskLogs(cmd.jobId, { maxBytes: cmd.maxBytes, tail: cmd.tail });
+        const owned = mgr.resolveTask(cmd.jobId);
+        if (!mgr.isOwned(owned, cmd.sessionId)) throw new Error(`Job not found: ${cmd.jobId}`);
+        const res = mgr.getTaskLogs(owned, { maxBytes: cmd.maxBytes, tail: cmd.tail });
         broadcast({
           type: "job_logs",
           jobId: cmd.jobId,
@@ -204,6 +214,7 @@ export function createBackgroundTools(
     const p = (params ?? {}) as { taskId?: string };
     if (p.taskId && p.taskId.trim()) {
       const task = manager.resolveTask(p.taskId);
+      if (!manager.isOwned(task, sessionId)) throw new Error(`Task not found: ${p.taskId}`);
       const duration = Math.round(((task.finishedAt ?? Date.now()) - task.startedAt) / 1000);
       return {
         content: textContent(
@@ -241,7 +252,9 @@ export function createBackgroundTools(
     if (!p.taskId || !p.taskId.trim()) {
       throw new Error("taskId is required");
     }
-    const result = manager.getTaskLogs(p.taskId, {
+    const task = manager.resolveTask(p.taskId);
+    if (!manager.isOwned(task, sessionId)) throw new Error(`Task not found: ${p.taskId}`);
+    const result = manager.getTaskLogs(task, {
       maxBytes: p.maxBytes,
       tail: p.tail ?? true,
     });
@@ -266,6 +279,7 @@ export function createBackgroundTools(
       throw new Error("taskId is required");
     }
     const task = manager.resolveTask(p.taskId);
+    if (!manager.isOwned(task, sessionId)) throw new Error(`Task not found: ${p.taskId}`);
     const killed = manager.killTask(task.id);
     const message = killed
       ? `Stopped background task ${taskDisplayName(task)} (${task.id}). Output saved to ${task.logPath}`
