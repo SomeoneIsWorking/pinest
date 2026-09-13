@@ -10,11 +10,15 @@
  */
 export interface StreamSegment {
   text: string;
-  /** How many tool calls had started when this segment was promoted — i.e. the
-   * index of the tool call this speech preceded. Clients need it to interleave
-   * speech and tools in real order; pairing by position guessed wrong and put
-   * a paragraph ABOVE tools that had already run. */
-  atTool: number;
+  /**
+   * Identity of the tool call this speech immediately preceded.
+   *
+   * It must be the call's identity and not its list index: the client renders
+   * live tools minus the ones history has since absorbed, so that list shrinks
+   * under the segment and every index silently points one tool earlier. Tools
+   * and speech then traded places, one absorption at a time.
+   */
+  afterToolId: string;
 }
 
 export interface StreamSnapshot {
@@ -28,14 +32,12 @@ export interface StreamSegmenterState {
   text: string;
   segments: StreamSegment[];
   thinking: string;
-  toolCount: number;
 }
 
 export class StreamSegmenter {
   private text = "";
   private segments: StreamSegment[] = [];
   private thinking = "";
-  private toolCount = 0;
 
   /** A text delta arrived while the assistant is talking. */
   onTextDelta(delta: string): StreamSnapshot {
@@ -54,11 +56,9 @@ export class StreamSegmenter {
    * a segment (if any) and returns the snapshot to broadcast; returns null
    * when nothing was streaming so callers can skip the broadcast.
    */
-  onToolStart(): StreamSnapshot | null {
-    const atTool = this.toolCount;
-    this.toolCount += 1;
+  onToolStart(toolCallId?: string): StreamSnapshot | null {
     if (this.text.trim().length === 0) return null;
-    this.segments = [...this.segments, { text: this.text, atTool }];
+    this.segments = [...this.segments, { text: this.text, afterToolId: toolCallId ?? "" }];
     this.text = "";
     return this.snapshot();
   }
@@ -75,7 +75,6 @@ export class StreamSegmenter {
     this.text = "";
     this.segments = [];
     this.thinking = "";
-    this.toolCount = 0;
     return this.snapshot();
   }
 
@@ -98,7 +97,6 @@ export class StreamSegmenter {
       text: this.text,
       segments: [...this.segments],
       thinking: this.thinking,
-      toolCount: this.toolCount,
     };
   }
 
@@ -110,7 +108,6 @@ export class StreamSegmenter {
     segmenter.text = state.text;
     segmenter.segments = [...state.segments];
     segmenter.thinking = state.thinking;
-    segmenter.toolCount = state.toolCount;
     return segmenter;
   }
 }

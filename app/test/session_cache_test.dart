@@ -10,7 +10,7 @@ void main() {
 
     for (final id in ['deleted', 'kept']) {
       cache.streamingText[id] = 'text';
-      cache.streamingSegments[id] = const [StreamSegment(text: 'segment', atTool: 0)];
+      cache.streamingSegments[id] = const [StreamSegment(text: 'segment', afterToolId: 'call-a')];
       cache.models[id] = [model];
       cache.history[id] = [
         {'text': 'history'},

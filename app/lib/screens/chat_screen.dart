@@ -9,6 +9,7 @@ import '../services/attachment_selection.dart';
 import '../services/paste_bridge.dart';
 import '../services/user_preferences.dart';
 import '../models/session.dart';
+import '../logic/transcript_order.dart';
 import '../models/chat_item.dart';
 import '../models/tool_call_view.dart';
 import 'app_toast.dart';
@@ -717,42 +718,27 @@ class _ChatScreenState extends State<ChatScreen> {
     final segments = isWorking
         ? svc.streamingSegmentsFor(widget.sessionId)
         : const <StreamSegment>[];
-    // Speech goes where it happened: each segment records the tool index it
-    // preceded, so a paragraph written after the 8th tool call lands after
-    // those cards instead of on top of the whole batch.
-    var nextSegment = 0;
-    void flushSegmentsUpTo(int toolIndex) {
-      while (nextSegment < segments.length &&
-          segments[nextSegment].atTool <= toolIndex) {
+    // Speech goes where it happened, decided by the segment's own anchor rather
+    // than by a position in a list that shrinks as the turn is recorded. See
+    // orderStreamAndTools: misplacing this was why cards and paragraphs traded
+    // places while a session streamed.
+    for (final step in orderStreamAndTools(
+      segments: segments,
+      liveTools: liveTools,
+      historyToolIds: historyToolIds,
+    )) {
+      if (step.isSpeech) {
         flushTools();
-        items.add(
-          MessageBubble(
-            text: segments[nextSegment].text,
-            align: Alignment.centerLeft,
-            markdown: true,
-          ),
+        items.add(MessageBubble(
+          text: step.speech!,
+          align: Alignment.centerLeft,
+          markdown: true,
+        ));
+      } else {
+        currentToolBatch.add(
+          ToolCallView.fromPayload(step.tool!, source: ToolCallSource.live),
         );
-        nextSegment++;
       }
-    }
-
-    for (var i = 0; i < liveTools.length; i++) {
-      flushSegmentsUpTo(i);
-      currentToolBatch.add(
-        ToolCallView.fromPayload(liveTools[i], source: ToolCallSource.live),
-      );
-    }
-    // Any speech after the last tool call.
-    while (nextSegment < segments.length) {
-      flushTools();
-      items.add(
-        MessageBubble(
-            text: segments[nextSegment].text,
-            align: Alignment.centerLeft,
-            markdown: true,
-          ),
-      );
-      nextSegment++;
     }
     flushTools();
 

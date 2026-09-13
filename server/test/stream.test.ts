@@ -11,22 +11,25 @@ test("segmenter: tool start promotes streamed text into a visible segment", () =
   seg.onTextDelta("Looking ");
   seg.onTextDelta("at the file.");
   // Nothing streamed → no promotion, no broadcast needed.
-  assert.equal(new StreamSegmenter().onToolStart(), null);
+  assert.equal(new StreamSegmenter().onToolStart("call-1"), null);
   // Text streamed → promoted; the streaming bubble clears.
-  const snap = seg.onToolStart();
-  assert.deepEqual(snap, { text: "", segments: [{ text: "Looking at the file.", atTool: 0 }] });
+  const snap = seg.onToolStart("call-1");
+  assert.deepEqual(snap, {
+    text: "",
+    segments: [{ text: "Looking at the file.", afterToolId: "call-1" }],
+  });
   // Streaming resumes fresh after the tool.
   seg.onTextDelta("Now the result: ");
   assert.deepEqual(seg.snapshot(), {
     text: "Now the result: ",
-    segments: [{ text: "Looking at the file.", atTool: 0 }],
+    segments: [{ text: "Looking at the file.", afterToolId: "call-1" }],
   });
 });
 
 test("segmenter: reset clears both text and segments at turn end", () => {
   const seg = new StreamSegmenter();
   seg.onTextDelta("text before tool");
-  seg.onToolStart();
+  seg.onToolStart("call-1");
   seg.onTextDelta("more text");
   seg.reset();
   assert.deepEqual(seg.snapshot(), { text: "", segments: [] });
@@ -35,10 +38,13 @@ test("segmenter: reset clears both text and segments at turn end", () => {
 test("segmenter: startMessage clears current text but keeps segments", () => {
   const seg = new StreamSegmenter();
   seg.onTextDelta("first message text");
-  seg.onToolStart();
+  seg.onToolStart("call-1");
   seg.onTextDelta("second message so far");
   const snap = seg.startMessage();
-  assert.deepEqual(snap, { text: "", segments: [{ text: "first message text", atTool: 0 }] });
+  assert.deepEqual(snap, {
+    text: "",
+    segments: [{ text: "first message text", afterToolId: "call-1" }],
+  });
 });
 
 test("segmenter: thinking deltas stream and are cleared on reset", () => {
@@ -60,17 +66,42 @@ test("segmenter: thinking deltas stream and are cleared on reset", () => {
   assert.deepEqual(seg.snapshot(), { text: "", segments: [] });
 });
 
-test("segments record WHICH tool call they preceded", () => {
-  // The app pairs speech with tools by this index. Positional pairing put a
-  // paragraph written after the 8th tool call above the whole batch.
+test("segments name the tool call they preceded, by identity", () => {
+  // The app places speech before the card of the tool it preceded. It must key
+  // on the call's identity: the list it renders is "live tools minus the ones
+  // history has absorbed", which shrinks as the turn is recorded, so an index
+  // silently comes to mean a different tool.
   const seg = new StreamSegmenter();
-  seg.onToolStart(); // tool 0, nothing streamed
-  seg.onToolStart(); // tool 1
+  seg.onToolStart("call-a"); // nothing streamed
+  seg.onToolStart("call-b");
   seg.onTextDelta("spoken after two tools");
-  const snap = seg.onToolStart(); // tool 2
-  assert.deepEqual(snap?.segments, [{ text: "spoken after two tools", atTool: 2 }]);
-  // A new turn resets the tool count with the segments.
+  const snap = seg.onToolStart("call-c");
+  assert.deepEqual(snap?.segments, [{ text: "spoken after two tools", afterToolId: "call-c" }]);
+  // A new turn starts fresh with the segments.
   seg.reset();
   seg.onTextDelta("fresh turn");
-  assert.deepEqual(seg.onToolStart()?.segments, [{ text: "fresh turn", atTool: 0 }]);
+  assert.deepEqual(seg.onToolStart("call-d")?.segments, [{ text: "fresh turn", afterToolId: "call-d" }]);
+});
+
+test("a tool call pi did not name still yields a matchable anchor", () => {
+  // An unnamed call must not borrow another tool's identity: it anchors to the
+  // empty id, which the app renders after the batch rather than in the wrong
+  // place between two real cards.
+  const seg = new StreamSegmenter();
+  seg.onTextDelta("unnamed tool follows");
+  assert.deepEqual(seg.onToolStart()?.segments, [
+    { text: "unnamed tool follows", afterToolId: "" },
+  ]);
+});
+
+test("captured state carries identity anchors, not a counter", () => {
+  // A parked session hands its state to the reloaded build; the anchors must
+  // survive verbatim or the adopted stream re-orders the visible batch.
+  const seg = new StreamSegmenter();
+  seg.onTextDelta("before the tool");
+  seg.onToolStart("call-x");
+  const state = seg.captureState();
+  assert.deepEqual(state.segments, [{ text: "before the tool", afterToolId: "call-x" }]);
+  const revived = StreamSegmenter.fromState(state);
+  assert.deepEqual(revived.snapshot().segments, [{ text: "before the tool", afterToolId: "call-x" }]);
 });
