@@ -577,17 +577,14 @@ class AgentService extends ChangeNotifier {
           _cache.streamingThinking.remove(sid);
         }
         final segments = <StreamSegment>[];
-        var segIndex = 0;
         for (final raw in (msg['segments'] as List? ?? const [])) {
           if (raw is String) {
-            // Older server: text only, so the position is the best we know.
-            segments.add(StreamSegment(text: raw, atTool: segIndex));
+            // A bare string carries no anchor; it renders after the batch
+            // rather than between two cards it cannot name.
+            segments.add(StreamSegment(text: raw, afterToolId: ''));
           } else if (raw is Map) {
-            segments.add(
-              StreamSegment.fromJson(Map<String, dynamic>.from(raw), segIndex),
-            );
+            segments.add(StreamSegment.fromJson(Map<String, dynamic>.from(raw)));
           }
-          segIndex++;
         }
         if (segments.isNotEmpty) {
           _cache.streamingSegments[sid] = segments;
