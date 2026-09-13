@@ -18,12 +18,16 @@ if [ -z "${FIREBASE_ANDROID_API_KEY:-}" ]; then
   FIREBASE_ANDROID_API_KEY="$(firebase apps:sdkconfig ANDROID 1:271491621267:android:e30a5fa653b8872b7b8866 -P pinest-app 2>&1 | python3 -c 'import sys, re; text=sys.stdin.read(); m=re.search(r"\"apiKey\":\s*\"([^\"]+)\"", text); print(m.group(1) if m else "")' || true)"
 fi
 
+# One build id baked into the bundle AND stamped into version.json: the app
+# flags a refresh when the served id differs from its own, and after a reload
+# the new bundle matches — the banner goes away instead of sticking forever.
+BUILD_ID="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)-$(date +%s)"
+
 flutter build web --release --pwa-strategy=none --no-tree-shake-icons \
   --dart-define=FIREBASE_WEB_API_KEY="$FIREBASE_WEB_API_KEY" \
-  --dart-define=FIREBASE_ANDROID_API_KEY="${FIREBASE_ANDROID_API_KEY:-$FIREBASE_WEB_API_KEY}"
+  --dart-define=FIREBASE_ANDROID_API_KEY="${FIREBASE_ANDROID_API_KEY:-$FIREBASE_WEB_API_KEY}" \
+  --dart-define=WEB_BUILD_ID="$BUILD_ID"
 
-# Stamp the build so clients can detect a newer deployment and offer a reload.
-BUILD_ID="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)-$(date +%s)"
 printf '{"id": "%s"}\n' "$BUILD_ID" > build/web/version.json
 
 # If a release APK was built locally, stage it into hosting so it's downloadable directly
