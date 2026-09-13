@@ -23,6 +23,7 @@ import { statSync } from "node:fs";
 import { mapModel, deriveSessionName, messagesToHistory, pageHistory, historyWithEmbeds, extractSessionMessages, extractUserText, extractText, extractToolResult, popPending } from "./logic.ts";
 import { createAutoBackgroundBashTool, type BackgroundProcessManager } from "./bash-tool.ts";
 import { createBackgroundTools } from "./background-tools.ts";
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { StreamSegmenter } from "./stream.ts";
 import { createMessageSubmitter, type MessageSubmitter } from "./submit.ts";
 import { resolveThinkingLevel, reportThinkingLevel } from "./thinking.ts";
@@ -247,6 +248,39 @@ export class Supervisor {
       ];
     }
     return opts;
+  }
+
+  /** Adopted sessions keep tool definitions created by the PREVIOUS build,
+   * whose closures hold that build's bg manager — an orphan whose delivery
+   * code never updates (pre-reload tasks kept notifying the host session).
+   * Re-arm the definitions' execute closures onto THIS instance's manager —
+   * same object identity, then refresh the registry so the wrappers
+   * re-capture — and the ownership id these tools stamp on new tasks. */
+  private rearmSessionTools(id: string, s: LiveSession): void {
+    const manager = this.callbacks.bgManager;
+    if (!manager) return;
+    const session = s.session as any;
+    const customTools = session?._customTools as ToolDefinition[] | undefined;
+    if (!Array.isArray(customTools) || customTools.length === 0) return;
+    const sessionId = session?.sessionManager?.getSessionId?.();
+    const fresh = [
+      createAutoBackgroundBashTool({ bgManager: manager, cwd: s.cwd, sessionId }),
+      ...createBackgroundTools(manager, sessionId),
+    ];
+    const freshByName = new Map(fresh.map((tool) => [tool.name, tool]));
+    let reamed = 0;
+    for (const def of customTools) {
+      const replacement = freshByName.get(def.name);
+      if (!replacement) continue;
+      Object.assign(def, { execute: replacement.execute });
+      reamed += 1;
+    }
+    if (reamed > 0) {
+      try { session._refreshToolRegistry?.(); } catch (e) {
+        debug(`[remote-code] reload: tool registry refresh failed on ${id}:`, (e as Error).message);
+      }
+      debug(`[remote-code] reload: re-armed ${reamed} background tool(s) on adopted session ${id} (${s.name})`);
+    }
   }
 
   private persistRow(id: string, patch: Partial<SessionRow>): void {
@@ -1123,6 +1157,7 @@ export class Supervisor {
       s.status = working ? "working" : "idle";
       // A session still mid-run keeps its submission gate closed.
       this.wire(id, s, { resumeTurn: working });
+      this.rearmSessionTools(id, s);
       // The new instance starts with an EMPTY snapshot map, so this must carry
       // the session's IDENTITY too. Reporting only status/model is what made
       // adopted sessions show up as "session" with a blank workspace.
