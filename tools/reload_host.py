@@ -29,6 +29,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -268,53 +269,67 @@ def recv_json(ws: WebSocket, deadline: float) -> dict[str, Any] | None:
     return None
 
 
-def request_reload(token: str, ports: list[int], deadline: float, interval: float) -> str:
-    """Ask until it takes, on one authenticated connection.
+def host_status_from_state(state: dict[str, Any]) -> str:
+    """The TUI session's own status, from a state frame.
 
-    Authentication is a Firebase round trip, so reconnecting per attempt spent
-    ~20s of dead time between requests. The socket is kept open and the same
-    command re-sent until the host tears it down (which is what a reload does) or
-    no load appears before the deadline.
+    The reload is refused while that session is streaming, so "what did the host
+    think it was doing when we asked" is the whole diagnosis.
     """
-    failures: list[str] = []
-    for port in ports:
-        try:
-            ws = WebSocket(port, AUTH_TIMEOUT_S)
-        except (OSError, WebSocketError) as error:
-            failures.append(f"{port}: {error}")
-            continue
-        try:
-            ws.send_text(json.dumps({"type": "auth", "token": token}))
-            reply = recv_json(ws, time.time() + AUTH_TIMEOUT_S)
-            if reply is None:
-                failures.append(f"{port}: closed without answering authentication")
-                continue
-            if reply.get("type") != "authed":
-                failures.append(f"{port}: authentication refused ({reply.get('message', reply.get('type'))})")
-                continue
-            print(f"authenticated on {port}; asking until it takes", flush=True)
-            return _ask_until(ws, port, deadline, interval)
-        finally:
-            ws.close()
-    raise ReloadError("no host control channel accepted the request — " + "; ".join(failures))
+    sessions = state.get("sessions")
+    if not isinstance(sessions, list):
+        return "unknown"
+    for row in sessions:
+        if isinstance(row, dict) and row.get("isHost"):
+            return str(row.get("status", "unknown"))
+    return "no host row"
 
 
-def _ask_until(ws: WebSocket, port: int, deadline: float, interval: float) -> str:
-    """Send the command on an open socket until the socket dies."""
+def ask_repeatedly(token: str, port: int, deadline: float, interval: float) -> None:
+    """Hold a connection open and re-ask until the deadline.
+
+    Asking a handful of times and stopping lands every attempt inside the turn
+    that launched this tool — precisely when the reload is refused. A refusal is
+    instant and silent, so the only thing that works is asking continuously
+    until one lands in an idle moment.
+    """
     attempts = 0
     while time.time() < deadline:
-        attempts += 1
+        ws: WebSocket | None = None
         try:
-            ws.send_text('{"type":"reload"}')
-        except OSError as error:
-            return f"{port} (socket closed after {attempts} request(s): {error})"
-        if attempts % 10 == 1:
-            print(f"asked {attempts} time(s) on {port}", flush=True)
-        # A reload tears this socket down; the caller verifies from the record.
-        reply = ws.recv_text(time.time() + interval)
-        if reply is None and ws.closed:
-            return f"{port} (host closed the socket after {attempts} request(s))"
-    return f"{port} ({attempts} request(s), socket still open)"
+            ws = WebSocket(port, AUTH_TIMEOUT_S)
+            ws.send_text(json.dumps({"type": "auth", "token": token}))
+            reply = recv_json(ws, time.time() + AUTH_TIMEOUT_S)
+            if reply is None or reply.get("type") != "authed":
+                print(f"authentication failed: {reply}", flush=True)
+                time.sleep(2)
+                continue
+            status = "unknown"
+            while time.time() < deadline:
+                attempts += 1
+                if attempts == 1 or attempts % 20 == 0:
+                    print(f"ask {attempts} (host session status: {status})", flush=True)
+                try:
+                    ws.send_text('{"type":"reload"}')
+                except OSError as error:
+                    print(f"ask {attempts}: socket write failed ({error}); reconnecting", flush=True)
+                    break
+                # The state frame arrives after auth; keep the latest status.
+                frame = ws.recv_text(time.time() + 0.05)
+                if frame and '"type":"state"' in frame:
+                    try:
+                        status = host_status_from_state(json.loads(frame))
+                    except json.JSONDecodeError:
+                        pass
+                if ws.closed:
+                    print(f"ask {attempts}: host closed the socket; reconnecting", flush=True)
+                    break
+                time.sleep(interval)
+        except (OSError, WebSocketError) as error:
+            print(f"connection error: {error}", flush=True)
+            time.sleep(2)
+        finally:
+            if ws is not None:
+                ws.close()
 
 
 def main() -> int:
@@ -368,12 +383,12 @@ def main() -> int:
 
     deadline = time.time() + args.deadline
     print(f"asking the host to reload until a load is observed (deadline {args.deadline:g}s)", flush=True)
-    try:
-        detail = request_reload(token, ports, deadline, args.retry_interval)
-        print(f"request ended: {detail}", flush=True)
-    except ReloadError as error:
-        print(f"request failed: {error}", flush=True)
-
+    # Ask in the background while this loop watches the record: a successful
+    # reload writes it from the fresh instance, so the record is the signal.
+    asker = threading.Thread(
+        target=ask_repeatedly, args=(token, ports[0], deadline, args.retry_interval), daemon=True
+    )
+    asker.start()
     while time.time() < deadline:
         now = read_runtime_record()
         if now is not None:
@@ -381,14 +396,16 @@ def main() -> int:
                 now.get("at") != (before or {}).get("at")
                 or now.get("factoryEntries", 0) > (before or {}).get("factoryEntries", 0)
             )
-            if changed and now.get("load") == "ok":
+            if changed and now.get("load") in ("ok", "pending"):
+                if now.get("load") == "pending":
+                    continue  # mid-load; wait for the outcome
                 print(f"reloaded: {describe_record(now)}", flush=True)
                 print(f"status: OK — the harness re-initialized on {now.get('sourceFingerprint')}", flush=True)
                 return 0
             if changed and now.get("load") == "failed":
                 print(f"reloaded but bootstrap FAILED: {describe_record(now)}", flush=True)
                 return 2
-        time.sleep(1)
+        time.sleep(0.5)
 
     print(f"after the deadline: {describe_record(read_runtime_record())}", flush=True)
     print(
