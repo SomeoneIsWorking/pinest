@@ -58,7 +58,10 @@ import { DEFAULT_MODEL } from "./product-defaults.ts";
 import { HostContextController } from "./host-context.ts";
 import { dispatchClientCommand } from "./command-validation.ts";
 import { applyCompactThreshold, applyCompactThresholdCommand, reconcileStoredThreshold } from "./compaction-settings.ts";
-import { buildStateMessage, mergeRegistryRows, snapshotsWithJobs } from "./state-message.ts";
+import { mergeRegistryRows } from "./state-message.ts";
+import { publishPresence } from "./presence.ts";
+import { StatePublisher } from "./state-publisher.ts";
+import { recordFactoryEntry, recordLoadOutcome } from "./runtime-record.ts";
 import { reauthenticateRemoteOwner, verifiedOwnerToken } from "./owner-runtime.ts";
 
 const REGISTRY_PATH = process.env.RC_REGISTRY_PATH
@@ -128,7 +131,22 @@ const _pending = new HostPendingQueue();
 let _submitter: MessageSubmitter | null = null;
 
 // In-memory session snapshots (the live view; registry is the durable view)
-const _sessions = new Map<string, SessionSnapshot>();
+// Session state lives in the publisher, which owns the wire shape and when a
+// broadcast happens; this entry point wires it to the live pieces.
+const _publisher = new StatePublisher({
+  hostname,
+  homePath: () => homedir(),
+  activeSessionId: () => _activeSessionId ?? "",
+  registryRows: () => _registry?.all() ?? [],
+  sessionsWithJobs: () => {
+    const mgr = _supervisor?.bgManager ?? _bgManager;
+    return _publisher.withJobs((id) => (mgr ? mgr.listTasks(id).map(toJobSummary) : []));
+  },
+  tunnelUrl: () => _ws?.tunnelUrl ?? null,
+  tunnelProvider: () => _ws?.tunnel?.provider ?? null,
+  refreshUsage: () => { _supervisor?.refreshUsage?.(false); },
+  send: (msg) => broadcast(msg),
+});
 
 installCrashReporter();
 
@@ -213,64 +231,28 @@ function renderFooter(): void {
   getFooter().render();
 }
 
-// ── Session snapshot helpers ────────────────────────────────────────────────
-function upsertSession(id: string, snap: Partial<SessionSnapshot>, notify = true): void {
-  const existing = _sessions.get(id) || { id, status: "idle" as const };
-  _sessions.set(id, { ...existing, ...snap, id });
-  if (notify) broadcastState();
-}
-
-function removeSession(id: string): void {
-  _sessions.delete(id);
-  broadcastState();
-}
-
-function getSessionSnapshots(): SessionSnapshot[] {
-  const mgr = _supervisor?.bgManager ?? _bgManager;
-  return snapshotsWithJobs([..._sessions.values()], (id) =>
-    mgr ? mgr.listTasks(id).map(toJobSummary) : [],
-  );
-}
-
 // ── Broadcasting ────────────────────────────────────────────────────────────
 function broadcast(msg: ServerMessage): void {
   _ws?.broadcast(msg);
 }
 
-function stateMessage(): ServerMessage {
-  // Cheap sync overlay so every tab carries live status + context usage, not
-  // just whichever session last emitted an event. It updates the snapshots this
-  // message reads; it must not broadcast while a state message is being built.
-  _supervisor?.refreshUsage?.(false);
-  return buildStateMessage({
-    hostname: hostname(),
-    homePath: homedir(),
-    activeSessionId: _activeSessionId ?? "",
-    sessions: getSessionSnapshots(),
-    registry: _registry?.all() ?? [],
-    tunnelUrl: _ws?.tunnelUrl ?? null,
-    tunnelProvider: _ws?.tunnel?.provider ?? null,
-  });
-}
-
 function broadcastState(): void {
-  broadcast(stateMessage());
+  _publisher.broadcast();
 }
 
 function publishCurrentPresence(online: boolean): Promise<void> {
-  if (!_fb || !_ownerUid) return Promise.resolve();
-  return _fb.publishPresence(_ownerUid, {
-    url: _ws?.tunnelUrl ?? null,
-    online,
-    ownerEmail: _ownerEmail ?? undefined,
-    hostname: hostname(),
-    ts: Date.now(),
-  });
+  return publishPresence({
+    fb: _fb,
+    ownerUid: _ownerUid,
+    ownerEmail: _ownerEmail,
+    tunnelUrl: () => _ws?.tunnelUrl ?? null,
+    hostname,
+  }, online);
 }
 
 /** Registry rows overlaid with live status (live: true = loaded in-process). */
 function mergedRegistryRows(): SessionRow[] {
-  return mergeRegistryRows(_registry?.all() ?? [], (id) => _sessions.get(id)?.status);
+  return mergeRegistryRows(_registry?.all() ?? [], (id) => _publisher.get(id)?.status);
 }
 
 // ── Self-modification: reload of extension code / settings ─────────────────
@@ -335,8 +317,8 @@ async function bootstrap(): Promise<void> {
 
   // Create supervisor with WebSocket callbacks
   _supervisor = new Supervisor(uid, {
-    upsertSession: (id, snap, notify) => upsertSession(id, snap, notify),
-    removeSession,
+    upsertSession: (id, snap, notify) => _publisher.upsert(id, snap, notify),
+    removeSession: (id) => _publisher.remove(id),
     broadcast: (msg) => broadcast(msg as ServerMessage),
     embedImages,
     compactAtTokens: (): number | undefined => loadConfig().compactAtTokens,
@@ -370,7 +352,7 @@ async function bootstrap(): Promise<void> {
     return verifiedOwnerToken(identity);
   });
   _ws.on("command", (cmd) => { void handleCommand(cmd); });
-  _ws.setStateProvider(stateMessage);
+  _ws.setStateProvider(() => _publisher.message());
   _ws.tunnelOnDead = () => {
     debug("[remote-code] tunnel died — restarting");
     _tunnelStarting = true;
@@ -454,7 +436,7 @@ async function bootstrap(): Promise<void> {
   const hostPiSessionPath: string | null = (_ctx?.sessionManager as any)?.getSessionFile?.()
     ?? (_ctx?.sessionManager as any)?.sessionFile ?? null;
   const hostName = deriveSessionName(process.cwd(), process.env.RC_NAME);
-  upsertSession(_sessionId, {
+  _publisher.upsert(_sessionId, {
     name: hostName,
     cwd: process.cwd(),
     status: _status,
@@ -481,7 +463,7 @@ async function bootstrap(): Promise<void> {
   });
   const configuredActive = loadConfig().activeSessionId;
   _activeSessionId = configuredActive &&
-      (_sessions.has(configuredActive) || !!_registry?.get(configuredActive))
+      (_publisher.has(configuredActive) || !!_registry?.get(configuredActive))
     ? configuredActive
     : _sessionId;
   if (_activeSessionId !== configuredActive) {
@@ -517,7 +499,7 @@ async function handleCommand(input: unknown): Promise<void> {
       isLiveSpawned: (id) => !!_supervisor?.sessions.has(id),
       isRegistered: (id) => !!_registry?.get(id),
       isRegisteredHost: (id) => !!_registry?.get(id)?.isHost,
-      isSessionIdInUse: (id) => _sessions.has(id) || !!_supervisor?.sessions.has(id) || !!_registry?.get(id),
+      isSessionIdInUse: (id) => _publisher.has(id) || !!_supervisor?.sessions.has(id) || !!_registry?.get(id),
       newSessionId: randomUUID,
       host: handleInteractiveCommand,
       spawned: async (cmd) => {
@@ -569,7 +551,7 @@ async function despawnSession(cmd: Extract<ClientCommand, { type: "session_despa
     // Not live (e.g. after host restart) — just close the registry row.
     if (!_registry?.get(cmd.sessionId)) throw new Error(`unknown session ${cmd.sessionId}`);
     _registry?.close(cmd.sessionId);
-    removeSession(cmd.sessionId);
+    _publisher.remove(cmd.sessionId);
   }
 }
 
@@ -647,13 +629,13 @@ async function renameSession(cmd: Extract<ClientCommand, { type: "session_rename
   } else {
     if (!_registry?.get(cmd.sessionId)) throw new Error(`unknown session ${cmd.sessionId}`);
     _registry.upsert({ id: cmd.sessionId, name: cmd.name });
-    upsertSession(cmd.sessionId, { name: cmd.name });
+    _publisher.upsert(cmd.sessionId, { name: cmd.name });
   }
   broadcastState();
 }
 
 function selectSession(cmd: Extract<ClientCommand, { type: "session_select" }>): void {
-  if (!_sessions.has(cmd.sessionId) && !_registry?.get(cmd.sessionId)) {
+  if (!_publisher.has(cmd.sessionId) && !_registry?.get(cmd.sessionId)) {
     throw new Error(`unknown session ${cmd.sessionId}`);
   }
   _activeSessionId = cmd.sessionId;
@@ -669,7 +651,7 @@ async function setCompactThreshold(cmd: Extract<ClientCommand, { type: "set_comp
       agentDir: getAgentDir(),
       contextWindow: () => (hostContext.contextUsage() as { contextWindow?: number } | undefined)?.contextWindow,
       broadcast: (message) => broadcast(message as ServerMessage),
-      refreshUsage: () => upsertSession(_sessionId, { contextUsage: hostContext.contextUsage() }),
+      refreshUsage: () => _publisher.upsert(_sessionId, { contextUsage: hostContext.contextUsage() }),
       hostSessionId: _sessionId,
     },
     cmd.thresholdTokens,
@@ -683,7 +665,7 @@ async function deleteSession(cmd: Extract<ClientCommand, { type: "session_delete
     await _supervisor.despawn(cmd.sessionId); // also closes the registry row
   } else {
     _registry.close(cmd.sessionId);
-    removeSession(cmd.sessionId);
+    _publisher.remove(cmd.sessionId);
   }
   const gone = _registry.remove(cmd.sessionId, { deleteHistory: !!cmd.deleteHistory });
   broadcast({ type: "session_deleted", sessionId: cmd.sessionId, deleted: gone });
@@ -707,7 +689,7 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
         broadcast({ type: "stream", sessionId: _sessionId, text: "", segments: [], status: "working" });
       }
       _status = "working";
-      upsertSession(_sessionId, { status: "working", streamingText: "" });
+      _publisher.upsert(_sessionId, { status: "working", streamingText: "" });
       // deliverAs: "steer" queues behind the current assistant segment's tool
       // calls and is delivered before the next LLM call; "followUp" waits for
       // the whole agent turn to finish. When idle both behave identically.
@@ -717,7 +699,7 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
       // history (the client clears its "queued" badge by matching text).
       const text = cmd.text.trim().length === 0 ? "[image]" : cmd.text;
       _pending.track(text, images, wasWorking && deliverAs === "steer");
-      upsertSession(_sessionId, _pending.snapshot());
+      _publisher.upsert(_sessionId, _pending.snapshot());
       _submitter?.submit(text, images, deliverAs);
       break;
     }
@@ -726,7 +708,7 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
       // must drain the agent's queue, but the user's text comes back to
       // the composer via queue_parked rather than vanishing.
       const parked = _pending.park();
-      upsertSession(_sessionId, HostPendingQueue.emptySnapshot());
+      _publisher.upsert(_sessionId, HostPendingQueue.emptySnapshot());
       // NOTE: ExtensionAPI has no abort(); it lives on ExtensionContext.
       // (pinest used _pi?.abort?.() — a silent no-op on the host.)
       (_ctx as any)?.abort?.();
@@ -741,7 +723,7 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
     case "thinking_set": {
       const r = resolveThinkingLevel((_ctx as any)?.model, cmd.level);
       _pi?.setThinkingLevel?.(r.set as any);
-      upsertSession(_sessionId, { thinkingLevel: r.report });
+      _publisher.upsert(_sessionId, { thinkingLevel: r.report });
       break;
     }
     case "session_compact": {
@@ -776,7 +758,7 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
         anySession?.clearQueue?.();
       } catch { /* getter-absent session */ }
       _pending.clear();
-      upsertSession(_sessionId, HostPendingQueue.emptySnapshot());
+      _publisher.upsert(_sessionId, HostPendingQueue.emptySnapshot());
       break;
     case "queue_delete":
       try {
@@ -795,7 +777,7 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
         }
       } catch { /* getter-absent session */ }
       _pending.delete(cmd.text);
-      upsertSession(_sessionId, _pending.snapshot());
+      _publisher.upsert(_sessionId, _pending.snapshot());
       break;
     case "session_tree_get": {
       try {
@@ -899,9 +881,9 @@ const hostContext = new HostContextController({
   getHistory: getInteractiveHistory,
   clearPending: () => {
     _pending.clear();
-    upsertSession(_sessionId, { pendingMessages: [], pendingSteering: [] });
+    _publisher.upsert(_sessionId, { pendingMessages: [], pendingSteering: [] });
   },
-  upsertSession,
+  upsertSession: (id: string, snap: Partial<SessionSnapshot>) => _publisher.upsert(id, snap),
   updateSessionPath: (id, path) => { _registry?.upsert({ id, piSessionPath: path }); },
   broadcastState,
   broadcast,
@@ -922,7 +904,7 @@ async function setModel(cmd: Extract<ClientCommand, { type: "model_set" }>): Pro
   } catch {
     // best-effort persistence
   }
-  upsertSession(_sessionId, {
+  _publisher.upsert(_sessionId, {
     model: `${cmd.provider}/${cmd.modelId}`,
     modelName: m.name,
     contextUsage: hostContext.contextUsage(),
@@ -965,7 +947,7 @@ function bridge(pi: ExtensionAPI): void {
 
   (pi as any).on?.("queue_update", (event: any) => {
     _pending.applyAgentQueue(event);
-    upsertSession(_sessionId, _pending.snapshot());
+    _publisher.upsert(_sessionId, _pending.snapshot());
   });
 
   pi.on("message_start", (event: any, ctx?: ExtensionContext) => {
@@ -975,11 +957,11 @@ function bridge(pi: ExtensionAPI): void {
       segmenter.reset();
       _status = "working";
       broadcast({ type: "stream", sessionId: _sessionId, text: "", segments: [], status: "working" });
-      upsertSession(_sessionId, { streamingText: "", status: "working" });
+      _publisher.upsert(_sessionId, { streamingText: "", status: "working" });
       const rawText = (extractUserText(event.message) || extractText(event.message?.content)).trim();
       const delivered = rawText || "[image]";
       if (_pending.delivered(delivered)) {
-        upsertSession(_sessionId, _pending.snapshot());
+        _publisher.upsert(_sessionId, _pending.snapshot());
       }
       // The message just became part of the session — push history so the
       // client can drop its "queued" badge for it NOW instead of at agent_end.
@@ -989,7 +971,7 @@ function bridge(pi: ExtensionAPI): void {
       // stay on screen for the rest of the turn.
       segmenter.startMessage();
       _status = "working";
-      upsertSession(_sessionId, { status: "working" });
+      _publisher.upsert(_sessionId, { status: "working" });
     }
   });
 
@@ -1052,7 +1034,7 @@ function bridge(pi: ExtensionAPI): void {
         broadcast({ type: "error", sessionId: _sessionId, message: last.errorMessage || "Provider error" });
       }
     }
-    upsertSession(_sessionId, {
+    _publisher.upsert(_sessionId, {
       streamingText: null,
       status: "idle",
       contextUsage: hostContext.contextUsage(),
@@ -1070,7 +1052,7 @@ function bridge(pi: ExtensionAPI): void {
 
   pi.on("model_select", (event: any) => {
     const m = event?.model;
-    if (m) upsertSession(_sessionId, { model: `${m.provider}/${m.id}`, modelName: m.name });
+    if (m) _publisher.upsert(_sessionId, { model: `${m.provider}/${m.id}`, modelName: m.name });
   });
 
   pi.on("session_start", (_event: unknown, ctx?: ExtensionContext) => {
@@ -1096,11 +1078,17 @@ function bridge(pi: ExtensionAPI): void {
     notify("[pinest] loaded — /pinest-sessions sessions · /pinest-provider tunnel · /pinest-auth sign in");
     bootstrap()
       .then(() => {
+        recordLoadOutcome("ok", {
+          wsPort: _ws?.port ?? undefined,
+          tunnelUrl: _ws?.tunnelUrl ?? null,
+          owner: _ownerEmail ?? null,
+        });
         notify(`[pinest] online as ${_ownerEmail ?? "(unknown)"} — ${_ws?.tunnelUrl ?? "tunnel still starting…"}`);
         renderFooter();
       })
       .catch((e) => {
         const reason = (e as Error)?.message?.split("\n")[0] ?? String(e);
+        recordLoadOutcome("failed", { reason });
         debug("[pinest] bootstrap failed:", reason);
         const hint = /serviceAccountKey/i.test(reason)
           ? "run /pinest-auth to sign in, or configure the Firebase service account"
@@ -1126,11 +1114,20 @@ function bridge(pi: ExtensionAPI): void {
 
 // ── Slash commands / agent tool ─────────────────────────────────────────────
 /** @type {import("@earendil-works/pi-coding-agent").ExtensionFactory} */
+const SOURCES_ROOT = dirnamePath(new URL(import.meta.url).pathname);
+
 const remoteCode = (pi: ExtensionAPI): void => {
-  if (Supervisor.activeSpawning) return void debug("[remote-code] skipping child session");
+  if (Supervisor.activeSpawning) {
+    recordFactoryEntry({ sourcesRoot: SOURCES_ROOT, outcome: "skipped", reason: "child session spawn" });
+    return void debug("[remote-code] skipping child session");
+  }
   const wired = (globalThis as any)[Symbol.for("remote-code.extension.wired")] ??= new WeakSet();
-  if (wired.has(pi)) return;
+  if (wired.has(pi)) {
+    recordFactoryEntry({ sourcesRoot: SOURCES_ROOT, outcome: "skipped", reason: "already wired to this host (guard)" });
+    return;
+  }
   wired.add(pi);
+  recordFactoryEntry({ sourcesRoot: SOURCES_ROOT, outcome: "pending" });
   debug("[remote-code] extension loaded");
   if (!_pi || _pi === pi) {
     try { bridge(pi); } catch (e) { debug("[remote-code] bridge failed:", e); }
@@ -1176,7 +1173,7 @@ const remoteCode = (pi: ExtensionAPI): void => {
 
   _hostCommandDeps = () => ({
     sessionId: _sessionId,
-    sessions: _sessions,
+    sessions: _publisher.asMap(),
     supervisor: _supervisor,
     ws: _ws,
     say,
