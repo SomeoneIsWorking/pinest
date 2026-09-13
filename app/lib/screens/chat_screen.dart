@@ -846,22 +846,22 @@ class _ChatScreenState extends State<ChatScreen> {
     for (final out in svc.outgoingFor(widget.sessionId)) {
       final delivered = queuedTexts.contains(out.text.trim()) ||
           (out.text.trim().isEmpty && queuedTexts.contains('[image]'));
+      // Keep the steer/follow-up distinction the sender chose: it says WHEN pi
+      // delivers it (end of step vs end of turn), which "queued" does not.
+      final steering = s?.pendingSteering.any((st) => st.trim() == out.text.trim()) ?? out.steer;
+      final status = sendStatusFor(
+        connected: sendingNow,
+        queuedSeen: delivered || out.queuedSeen,
+        steer: steering,
+      );
       items.add(
         MessageBubble(
           text: out.text.isEmpty ? '[image]' : out.text,
           align: Alignment.centerRight,
           background: Colors.blueGrey.withAlpha(30),
           images: _pendingImagesByText[out.text] ?? const <PendingImage>[],
-          statusIcon: !sendingNow
-              ? Icons.cloud_off
-              : delivered
-                  ? Icons.inbox
-                  : Icons.schedule,
-          statusLabel: !sendingNow
-              ? 'waiting for connection'
-              : delivered
-                  ? 'queued — will be delivered next'
-                  : 'sending…',
+          statusIcon: status.icon,
+          statusLabel: status.label,
         ),
       );
     }

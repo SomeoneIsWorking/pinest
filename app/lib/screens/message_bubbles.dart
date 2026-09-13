@@ -28,6 +28,27 @@ void showImageDialog(BuildContext context, String b64) {
   );
 }
 
+/// What to show under a send that is not in the transcript yet.
+///
+/// Pure so the state machine is testable without a widget: the sequence
+/// observed in the app was sending → queued → sending → processed, and the
+/// third step was a lie — pi dequeues the message before history records it.
+({IconData icon, String label}) sendStatusFor({
+  required bool connected,
+  required bool queuedSeen,
+  required bool steer,
+}) {
+  if (!connected) {
+    return (icon: Icons.cloud_off, label: 'waiting for connection');
+  }
+  if (!queuedSeen) {
+    return (icon: Icons.hourglass_empty, label: 'sending…');
+  }
+  return steer
+      ? (icon: Icons.bolt, label: 'steering — delivered when this step ends')
+      : (icon: Icons.schedule, label: 'follow-up — delivered when the turn ends');
+}
+
 /// One message bubble. `queued`, `steering` and the status line describe a
 /// message that has been accepted but is not in the transcript yet.
 class MessageBubble extends StatelessWidget {

@@ -16,12 +16,25 @@ class OutgoingMessage {
   final Map<String, dynamic> command;
   final int sentAt;
 
-  const OutgoingMessage({
+  /// Whether this was sent as a steer or a follow-up. pi delivers a steer when
+  /// the current step ends and a follow-up when the whole turn ends, so the
+  /// distinction is real information the sender already has — it must not be
+  /// flattened into a generic "queued".
+  final bool steer;
+
+  /// Set once the server has reported this text in its queue. It STAYS set: pi
+  /// dequeues at message_start while history lands at message_end, and without
+  /// this the bubble fell back to "sending…" for that whole window
+  /// (sending → queued → sending → processed, as observed).
+  bool queuedSeen = false;
+
+  OutgoingMessage({
     required this.sessionId,
     required this.text,
     required this.imageCount,
     required this.command,
     required this.sentAt,
+    required this.steer,
   });
 }
 
@@ -61,6 +74,7 @@ class OutgoingQueue {
         imageCount: imageCount,
         command: command,
         sentAt: DateTime.now().millisecondsSinceEpoch,
+        steer: command['deliverAs'] != 'followUp',
       ),
     );
   }
@@ -90,6 +104,24 @@ class OutgoingQueue {
 
     list.removeWhere(isConfirmed);
     if (list.isEmpty) _bySession.remove(sessionId);
+  }
+
+  /// The server accepted these texts into its queue — remember it, because the
+  /// queue drains before the transcript records the message.
+  void markQueued(String sessionId, List<String> pendingTexts) {
+    final list = _bySession[sessionId];
+    if (list == null || list.isEmpty) return;
+    final queued = {
+      ...pendingTexts.map((t) => t.trim()),
+    };
+    if (queued.isEmpty) return;
+    for (final message in list) {
+      final text = message.text.trim();
+      if (queued.contains(text) ||
+          (text.isEmpty && queued.contains('[image]'))) {
+        message.queuedSeen = true;
+      }
+    }
   }
 
   void remove(String sessionId, OutgoingMessage message) {

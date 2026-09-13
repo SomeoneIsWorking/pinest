@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pinest_app/screens/message_bubbles.dart';
 import 'package:pinest_app/services/outgoing_queue.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -74,6 +75,49 @@ void main() {
     final commands = await restored.restore();
     expect(commands.single['sessionId'], 's1');
     expect(commands.single.containsKey('id'), isFalse);
+  });
+
+  test('being queued is sticky — the bubble never falls back to "sending"', () {
+    final q = OutgoingQueue();
+    q.track('s1', cmd('s1', 'steer me'), text: 'steer me', imageCount: 0);
+
+    // 1. just sent
+    var status = sendStatusFor(connected: true, queuedSeen: q.forSession('s1').single.queuedSeen, steer: true);
+    expect(status.label, 'sending…');
+
+    // 2. the server reports it queued
+    q.markQueued('s1', ['steer me']);
+    status = sendStatusFor(connected: true, queuedSeen: q.forSession('s1').single.queuedSeen, steer: true);
+    expect(status.label, 'steering — delivered when this step ends');
+
+    // 3. pi dequeued it at message_start, history has not landed yet: the
+    //    observed regression was this step reading "sending…" again.
+    q.markQueued('s1', []);
+    status = sendStatusFor(connected: true, queuedSeen: q.forSession('s1').single.queuedSeen, steer: true);
+    expect(status.label, 'steering — delivered when this step ends',
+        reason: 'the queue draining is not the message being unsent');
+
+    // 4. only landing in history clears it
+    q.reconcile('s1', historyTexts: ['steer me']);
+    expect(q.forSession('s1'), isEmpty);
+  });
+
+  test('a follow-up says when it is delivered, not just "queued"', () {
+    final q = OutgoingQueue();
+    q.track(
+      's1',
+      cmd('s1', 'later')..['deliverAs'] = 'followUp',
+      text: 'later',
+      imageCount: 0,
+    );
+    q.markQueued('s1', ['later']);
+    final status = sendStatusFor(connected: true, queuedSeen: true, steer: q.forSession('s1').single.steer);
+    expect(status.label, 'follow-up — delivered when the turn ends');
+  });
+
+  test('an offline send says so instead of pretending it was sent', () {
+    final status = sendStatusFor(connected: false, queuedSeen: false, steer: true);
+    expect(status.label, 'waiting for connection');
   });
 
   test('confirming clears the persisted entry too', () async {
