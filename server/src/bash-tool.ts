@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, appendFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
@@ -92,6 +92,24 @@ export function killProcessTree(pid: number | undefined): void {
     } catch {
       // Ignore.
     }
+  }
+}
+
+/**
+ * Create the task's log file up front.
+ *
+ * It was created lazily on the first output chunk, so a SILENT task (every
+ * command redirected to /dev/null, or a run whose only artifact was a
+ * redirected file) produced a receipt and a completion notification naming a
+ * log path that did not exist — and an agent that trusted it wasted a turn on
+ * "No such file or directory". A path we advertise must exist.
+ */
+export function ensureLogFile(logPath: string): void {
+  try {
+    if (!existsSync(logPath)) writeFileSync(logPath, "");
+  } catch {
+    // An unwritable project directory must not stop the task; reads fall back
+    // to the in-memory chunks, and the path is reported as-is.
   }
 }
 
@@ -304,6 +322,7 @@ export class BackgroundProcessManager {
     const taskId = `bg_${randomBytes(4).toString("hex")}`;
     const logDir = resolveLogDirectory(cwd);
     const logPath = join(logDir, `${taskId}.log`);
+    ensureLogFile(logPath);
 
     const shellConfig = getShellConfig();
     const commandFromStdin = shellConfig.commandTransport === "stdin";
@@ -443,6 +462,7 @@ export class BackgroundProcessManager {
     const taskId = `bg_${randomBytes(4).toString("hex")}`;
     const logDir = resolveLogDirectory(cwd);
     const logPath = join(logDir, `${taskId}.log`);
+    ensureLogFile(logPath);
 
     const explicitTimeoutMs =
       typeof options.timeout === "number" && options.timeout > 0
