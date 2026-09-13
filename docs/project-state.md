@@ -40,8 +40,10 @@ registry. Gap: a real host-crash, reconnect, and full client lifecycle drill rem
 The clients implement streamed messages, steering and queued follow-ups, image paste, tool-call
 inspection, and remote stop. Web and mobile clients support interactive message options
 (edit/delete queued messages, copy text), conversation rewind restoring prompt and images into the
-editor (I-042), message timestamps with relative format and exact-time tooltips, and automatic
-background execution for commands running longer than 30 seconds (I-043). Gap: the complete operation set
+editor (I-042), message timestamps with relative format and exact-time tooltips, automatic
+background execution for commands running longer than 30 seconds (I-043), background task completion
+notifications rendered as dedicated system cards instead of user chat bubbles, and a scroll-to-bottom
+floating action button when scrolled up. Gap: the complete operation set
 is not yet qualified end to end on every shipping client.
 
 ### S10 — Context and compaction controls

@@ -354,3 +354,40 @@ test("messagesToHistory: preserves tool timestamps from toolResult or assistant 
   assert.equal(history[0].tools.length, 1);
   assert.equal(history[0].tools[0].timestamp, 1789110002500, "tool should receive the toolResult timestamp");
 });
+
+test("extractSessionMessages: maps custom_message entries to system role with customType", () => {
+  const fakeSessionManager = {
+    buildContextEntries: () => [
+      {
+        type: "custom_message",
+        id: "cmsg1",
+        customType: "background-task-notification",
+        timestamp: "2026-09-11T07:05:00.000Z",
+        content: "<background-task-notification><task-id>t1</task-id></background-task-notification>",
+      },
+    ],
+  };
+  const extracted = extractSessionMessages(fakeSessionManager);
+  assert.equal(extracted.length, 1);
+  assert.equal(extracted[0].role, "custom", "custom messages must have custom role, never user");
+  assert.equal(extracted[0].customType, "background-task-notification");
+
+  const history = messagesToHistory(extracted);
+  assert.equal(history.length, 1);
+  assert.equal(history[0].role, "system", "custom messages in history must map to system role");
+  assert.equal(history[0].customType, "background-task-notification");
+});
+
+test("messagesToHistory: background-task-notification text is classified as system role", () => {
+  const msgs = [
+    {
+      role: "user",
+      content: "<background-task-notification><command>./deploy.sh</command></background-task-notification>",
+      timestamp: 1789110000000,
+    },
+  ];
+  const history = messagesToHistory(msgs);
+  assert.equal(history.length, 1);
+  assert.equal(history[0].role, "system", "task notification XML must never appear as role: user");
+  assert.equal(history[0].customType, "background-task-notification");
+});

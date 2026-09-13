@@ -158,7 +158,14 @@ export function messagesToHistory(messages: unknown): HistoryItem[] {
     }
   }
   const items: HistoryItem[] = (messages as any[])
-    .filter((m) => m.role === "user" || m.role === "assistant")
+    .filter((m) =>
+      m.role === "user" ||
+      m.role === "assistant" ||
+      m.role === "custom" ||
+      m.customType !== undefined ||
+      (typeof m.content === "string" && m.content.trim().startsWith("<background-task-notification>")) ||
+      (Array.isArray(m.content) && m.content.some((p: any) => typeof p?.text === "string" && p.text.trim().startsWith("<background-task-notification>")))
+    )
     .map((m) => {
       const isImageMessage =
         Array.isArray(m.content) && m.content.some((p: any) => p?.type === "image");
@@ -197,9 +204,18 @@ export function messagesToHistory(messages: unknown): HistoryItem[] {
       const rawThinking = extractThinking(m.content) || (typeof (m as any).thinking === "string" ? (m as any).thinking : "");
       const thinking = rawThinking.trim().length > 0 ? rawThinking : undefined;
       const id = typeof m.id === "string" ? m.id : typeof m.entryId === "string" ? m.entryId : undefined;
+
+      const isCustom = m.role === "custom" || m.customType !== undefined || text.trim().startsWith("<background-task-notification>");
+      const role: "user" | "assistant" | "system" = isCustom ? "system" : (m.role as "user" | "assistant");
+      let customType: string | undefined = m.customType ?? (m.role === "custom" ? "custom" : undefined);
+      if (text.trim().startsWith("<background-task-notification>")) {
+        customType ??= "background-task-notification";
+      }
+
       return {
         ...(id ? { id } : {}),
-        role: m.role as "user" | "assistant",
+        role,
+        ...(customType ? { customType } : {}),
         text,
         ...(thinking ? { thinking } : {}),
         tools,
@@ -242,7 +258,13 @@ export function extractSessionMessages(sm: any): any[] {
         if (entry.type === "message" && entry.message) {
           msgs.push({ ...entry.message, id: entry.id, ...(validTs !== undefined ? { timestamp: validTs } : {}) });
         } else if (entry.type === "custom_message") {
-          msgs.push({ role: "user", content: entry.content, id: entry.id, ...(validTs !== undefined ? { timestamp: validTs } : {}) });
+          msgs.push({
+            role: "custom",
+            customType: entry.customType,
+            content: entry.content,
+            id: entry.id,
+            ...(validTs !== undefined ? { timestamp: validTs } : {}),
+          });
         }
       }
       if (msgs.length > 0) return msgs;

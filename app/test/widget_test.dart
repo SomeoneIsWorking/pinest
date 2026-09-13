@@ -2,13 +2,18 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:pinest_app/models/background_job.dart';
+import 'package:pinest_app/models/chat_item.dart';
 import 'package:pinest_app/models/session.dart';
 import 'package:pinest_app/models/tool_call_view.dart';
 import 'package:pinest_app/screens/chat_screen.dart';
 import 'package:pinest_app/screens/thinking_card.dart';
+import 'package:pinest_app/screens/task_notification_card.dart';
 import 'package:pinest_app/screens/tool_call_card.dart';
 import 'package:pinest_app/screens/tool_call_group.dart';
+import 'package:pinest_app/services/agent_service.dart';
 import 'package:pinest_app/services/user_preferences.dart';
+import 'package:provider/provider.dart';
 
 void main() {
   test('Session maps all fields with sensible defaults', () {
@@ -163,6 +168,40 @@ void main() {
     expect(find.text('file2.txt'), findsNothing);
   });
 
+  testWidgets('TaskNotificationCard renders as system notification and expands on tap', (tester) async {
+    const xml = '''
+<background-task-notification>
+  <task-id>bg_test123</task-id>
+  <command>./deploy.sh</command>
+  <status>completed</status>
+  <exit-code>0</exit-code>
+  <duration>54s</duration>
+  <output>Deploy complete! Hosting URL: https://pinest.web.app</output>
+</background-task-notification>
+''';
+
+    await tester.pumpWidget(const MaterialApp(
+      home: Scaffold(
+        body: TaskNotificationCard(text: xml, timestamp: 1789111760000),
+      ),
+    ));
+
+    expect(find.text('./deploy.sh • completed in 54s'), findsOneWidget);
+    expect(find.text('Deploy complete! Hosting URL: https://pinest.web.app'), findsNothing);
+
+    // Tap to expand
+    await tester.tap(find.text('./deploy.sh • completed in 54s'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Deploy complete! Hosting URL: https://pinest.web.app'), findsOneWidget);
+
+    // Tap to collapse
+    await tester.tap(find.text('./deploy.sh • completed in 54s'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Deploy complete! Hosting URL: https://pinest.web.app'), findsNothing);
+  });
+
 
   // ── Toolbar geometry (I-022b) ────────────────────────────────────────────
   // "Right-aligned" was asserted by reading the code and got shipped wrong
@@ -224,4 +263,96 @@ void main() {
     await tester.tap(find.byKey(const Key('toolbar-sidebar-button')));
     expect(opened, 1, reason: 'the button must open the sidebar');
   });
+
+  testWidgets('ChatScreen shows scroll to bottom FAB when scrolled up and scrolls on tap', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final preferences = await UserPreferences.load();
+    final svc = _ChatTestAgentService();
+    for (var i = 0; i < 40; i++) {
+      svc.testHistory.add({
+        'role': i % 2 == 0 ? 'user' : 'assistant',
+        'text': 'Message number $i with some padding content to ensure height',
+      });
+    }
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<AgentService>.value(value: svc),
+          Provider<UserPreferences>.value(value: preferences),
+        ],
+        child: const MaterialApp(
+          home: Scaffold(
+            body: ChatScreen(sessionId: 's1'),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Scroll to bottom FAB should have tooltip 'Scroll to bottom'
+    final fabFinder = find.byTooltip('Scroll to bottom');
+    expect(fabFinder, findsOneWidget);
+
+    // Initially scrolled to bottom, so the FAB should be inside an IgnorePointer with ignoring: true
+    final initialIgnorePointer = tester.widget<IgnorePointer>(
+      find.ancestor(of: fabFinder, matching: find.byType(IgnorePointer)).first,
+    );
+    expect(initialIgnorePointer.ignoring, isTrue);
+
+    // Scroll up by dragging down on the ListView
+    await tester.drag(find.byType(ListView), const Offset(0, 800));
+    await tester.pumpAndSettle();
+
+    final activeIgnorePointer = tester.widget<IgnorePointer>(
+      find.ancestor(of: fabFinder, matching: find.byType(IgnorePointer)).first,
+    );
+    expect(activeIgnorePointer.ignoring, isFalse);
+
+    // Tap the FAB to scroll back to bottom
+    await tester.tap(fabFinder);
+    await tester.pumpAndSettle();
+
+    final endIgnorePointer = tester.widget<IgnorePointer>(
+      find.ancestor(of: fabFinder, matching: find.byType(IgnorePointer)).first,
+    );
+    expect(endIgnorePointer.ignoring, isTrue);
+  });
+}
+
+class _ChatTestAgentService extends ChangeNotifier implements AgentService {
+  final List<Map<String, dynamic>> testHistory = [];
+
+  @override
+  List<Session> get sessions => [
+        Session(id: 's1', name: 'test', cwd: '/test', createdAt: 0),
+      ];
+
+  @override
+  String statusFor(String id) => 'idle';
+  @override
+  String? streamingFor(String id) => null;
+  @override
+  String? streamingThinkingFor(String id) => null;
+  @override
+  List<PinestModel> modelsFor(String id) => [];
+  @override
+  List<Map<String, dynamic>> historyFor(String id) => testHistory;
+  @override
+  List<Map<String, dynamic>> toolCallsFor(String id) => [];
+  @override
+  bool get wsConnected => true;
+  @override
+  int get outboxCount => 0;
+  @override
+  bool historyHasMore(String id) => false;
+  @override
+  List<BackgroundJob> jobsFor(String? id) => [];
+  @override
+  void getHistory(Session s, {int? cursor}) {}
+  @override
+  void listModels(Session s) {}
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
