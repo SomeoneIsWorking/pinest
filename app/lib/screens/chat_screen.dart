@@ -553,7 +553,11 @@ class _ChatScreenState extends State<ChatScreen> {
           items.add(_toolCallCard(t));
         }
       } else {
-        items.add(ToolCallGroup(tools: List.of(currentToolBatch)));
+        items.add(ToolCallGroup(
+          key: ValueKey('tools-${currentToolBatch.first.entryId ?? ''}'
+              '-${currentToolBatch.first.name}-${currentToolBatch.length}'),
+          tools: List.of(currentToolBatch),
+        ));
       }
       currentToolBatch.clear();
     }
@@ -898,6 +902,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final s = _session(context.read<AgentService>());
     final entry = tool.entryId;
     return ToolCallCard(
+      key: ValueKey('tool-${entry ?? tool.name}-${tool.timestamp ?? 0}'),
       name: tool.name,
       args: tool.args,
       result: tool.result,
