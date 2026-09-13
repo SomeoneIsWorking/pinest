@@ -28,18 +28,33 @@ class ImageStore {
 
   bool isPending(String id) => _inFlight.contains(id);
 
-  /// Asks the server for an image, once per id.
+  /// Asks the server for an image, once per id — and ONE AT A TIME.
+  ///
+  /// Image bytes share the control socket with the user's own messages, so
+  /// fetching every visible image at once lets a transcript's worth of
+  /// megabytes starve the send path: the user's message sits at "sending…"
+  /// behind images nobody asked to see yet. Serially, a burst is a trickle.
   void ensure(String id) {
     if (id.isEmpty) return;
-    if (_bytes.containsKey(id) || _failures.containsKey(id) || _inFlight.contains(id)) {
-      return;
-    }
+    if (_bytes.containsKey(id) || _failures.containsKey(id)) return;
+    if (_inFlight.contains(id) || _queued.contains(id)) return;
+    _queued.add(id);
+    _pump();
+  }
+
+  final List<String> _queued = [];
+
+  void _pump() {
+    if (_inFlight.isNotEmpty || _queued.isEmpty) return;
+    final id = _queued.removeAt(0);
     _inFlight.add(id);
     request(id);
   }
 
   void received(String id, String base64Data) {
     _inFlight.remove(id);
+    // ignore: unawaited_futures
+    Future.microtask(_pump);
     _failures.remove(id);
     final decoded = base64.decode(base64Data);
     _bytes[id] = decoded;
@@ -50,11 +65,13 @@ class ImageStore {
   void missing(String id, String reason) {
     _inFlight.remove(id);
     _failures[id] = reason;
+    _pump();
   }
 
   /// A reconnect invalidates in-flight requests without losing cached bytes.
   void resetInFlight() {
     _inFlight.clear();
+    _pump();
   }
 
   void _evict() {
