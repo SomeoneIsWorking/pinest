@@ -7,7 +7,7 @@ import 'package:pinest_app/screens/message_options_sheet.dart';
 import 'package:pinest_app/services/agent_service.dart';
 
 class _FakeAgentService extends ChangeNotifier implements AgentService {
-  String? lastDeletedText;
+  int? lastDeletedIndex;
   String? lastRewoundEntryId;
   bool isQueued = true;
 
@@ -15,8 +15,8 @@ class _FakeAgentService extends ChangeNotifier implements AgentService {
   bool isMessageQueued(String sessionId, String text) => isQueued;
 
   @override
-  void deleteQueuedMessage(Session s, String text) {
-    lastDeletedText = text;
+  void deleteQueuedMessage(Session s, int index) {
+    lastDeletedIndex = index;
   }
 
   @override
@@ -58,6 +58,7 @@ void main() {
                   svc: svc,
                   session: session,
                   text: 'steered prompt',
+                  index: 0,
                   pendingImgs: [
                     PendingImage(mimeType: 'image/png', bytes: Uint8List(4)),
                   ],
@@ -89,7 +90,7 @@ void main() {
     await tester.tap(find.text('Edit message'));
     await tester.pumpAndSettle();
 
-    expect(svc.lastDeletedText, 'steered prompt');
+    expect(svc.lastDeletedIndex, 0);
     expect(editedText, 'steered prompt');
     expect(editedImages?.length, 1);
     expect(deleted, false);

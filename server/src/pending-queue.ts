@@ -1,6 +1,47 @@
 import type { UserImage } from "./protocol.ts";
 import { popPending, pushPending } from "./logic.ts";
 
+/**
+ * The slice of pi's own session this module needs to keep its queue in step.
+ * pi exposes no per-entry delete, so a deletion is expressed as "make pi hold
+ * exactly these entries" — clear, then re-submit in order.
+ */
+interface QueueOwningSession {
+  clearQueue?: () => unknown;
+  prompt?: (text: string, options: { streamingBehavior: "steer" | "followUp"; source: string }) => unknown;
+}
+
+/**
+ * pi's session object, which older pi builds expose on the context and newer
+ * ones on the API. Absent means the caller has nothing to synchronise.
+ */
+export function piQueueSession(ctx: unknown, pi: unknown): QueueOwningSession | undefined {
+  const c = ctx as { session?: unknown; _session?: unknown } | undefined;
+  const p = pi as { session?: unknown } | undefined;
+  const candidate = c?.session ?? c?._session ?? p?.session;
+  return (candidate ?? undefined) as QueueOwningSession | undefined;
+}
+
+/** Make pi's own queue hold exactly `entries`, in order. */
+export function syncSessionQueue(
+  session: QueueOwningSession | undefined,
+  entries: { text: string; steer: boolean }[],
+): void {
+  if (typeof session?.clearQueue !== "function" || typeof session.prompt !== "function") return;
+  session.clearQueue();
+  for (const entry of entries) {
+    session.prompt(entry.text, {
+      streamingBehavior: entry.steer ? "steer" : "followUp",
+      source: "extension",
+    });
+  }
+}
+
+/** Drop everything pi still holds for this session. */
+export function clearSessionQueue(session: QueueOwningSession | undefined): void {
+  if (typeof session?.clearQueue === "function") session.clearQueue();
+}
+
 /** One queued message with the images it was submitted with (for parking). */
 export interface ParkedMessage {
   text: string;
@@ -69,11 +110,29 @@ export class HostPendingQueue {
     return false;
   }
 
-  /** Remove one specifically deleted queued text (queue_delete). */
-  delete(text: string) {
-    this.messages = popPending(this.messages, text);
-    this.steering = popPending(this.steering, text);
-    delete this.imagesByText[text];
+  /**
+   * Each queued entry is delivered in submission order, so its position in the
+   * snapshot IS its identity: the app deletes the chip it is looking at by
+   * index. Matching by text instead deleted every duplicate of a repeated
+   * message and could not tell two identical prompts apart.
+   */
+  deleteAt(index: number): boolean {
+    if (!Number.isInteger(index) || index < 0 || index >= this.messages.length) {
+      return false;
+    }
+    const removed = this.messages.splice(index, 1)[0];
+    if (removed === undefined) return false;
+    const steerIndex = this.steering.indexOf(removed);
+    if (steerIndex >= 0) this.steering.splice(steerIndex, 1);
+    // A text still present elsewhere must keep its images.
+    if (!this.messages.includes(removed)) delete this.imagesByText[removed];
+    this.pruneImages();
+    return true;
+  }
+
+  /** The ordered queue pi must be holding: the source of truth for a re-sync. */
+  entries(): { text: string; steer: boolean }[] {
+    return this.messages.map((text) => ({ text, steer: this.steering.includes(text) }));
   }
 
   /** Remove every queued entry and return them so the composer can restore them. */

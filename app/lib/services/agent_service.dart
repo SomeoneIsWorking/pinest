@@ -852,9 +852,9 @@ class AgentService extends ChangeNotifier {
   void clearQueue(Session s) =>
       _send({'type': 'queue_clear', 'sessionId': s.id});
 
-  /// Remove one specific queued/steering message from the session.
-  void deleteQueuedMessage(Session s, String text) =>
-      _send({'type': 'queue_delete', 'sessionId': s.id, 'text': text});
+  /// Remove one queued/steering message, named by its position in the queue.
+  void deleteQueuedMessage(Session s, int index) =>
+      _send({'type': 'queue_delete', 'sessionId': s.id, 'index': index});
 
   final Map<String, List<SessionTreeNode>> _trees = {};
   final Map<String, String?> _leafIds = {};

@@ -785,7 +785,8 @@ class _ChatScreenState extends State<ChatScreen> {
     final outgoingTexts = {
       for (final out in svc.outgoingFor(widget.sessionId)) out.text.trim(),
     };
-    for (final text in queued) {
+    for (var queuedIndex = 0; queuedIndex < queued.length; queuedIndex++) {
+      final text = queued[queuedIndex];
       final trimmedText = text.trim();
       if (!skippedLatestUser &&
           latestHistoryUserText.isNotEmpty &&
@@ -813,6 +814,7 @@ class _ChatScreenState extends State<ChatScreen> {
           svc: svc,
           session: s,
           text: text,
+          index: queuedIndex,
           pendingImgs: pendingImgs,
           onEdit: (editedText, restoredImgs) {
             _pendingImagesByText.remove(text);

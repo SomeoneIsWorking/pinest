@@ -282,15 +282,17 @@ export function parseClientCommand(input: unknown): ClientCommand {
       return { type: command.type, sessionId: sessionId(command, false) };
     }
     case "queue_delete": {
-      rejectUnknownFields(command, ["type", "sessionId", "text"]);
-      const rawText = command.text;
-      if (typeof rawText !== "string" || rawText.length === 0) {
-        fail("command.text must be a non-empty string");
+      rejectUnknownFields(command, ["type", "sessionId", "index"]);
+      // Position, not text: the queue is ordered and may legitimately hold the
+      // same text twice, so an index is the only identity that names one entry.
+      const rawIndex = command.index;
+      if (typeof rawIndex !== "number" || !Number.isInteger(rawIndex) || rawIndex < 0) {
+        fail("command.index must be a non-negative integer");
       }
       return {
         type: "queue_delete",
         sessionId: sessionId(command, false),
-        text: rawText,
+        index: rawIndex,
       };
     }
     case "session_tree_get": {

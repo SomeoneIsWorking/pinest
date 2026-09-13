@@ -12,6 +12,7 @@ void showQueuedMessageOptions({
   required AgentService svc,
   required Session session,
   required String text,
+  required int index,
   required List<PendingImage> pendingImgs,
   required void Function(String text, List<PendingImage> images) onEdit,
   required VoidCallback onDelete,
@@ -47,7 +48,7 @@ void showQueuedMessageOptions({
                   );
                   return;
                 }
-                svc.deleteQueuedMessage(session, text);
+                svc.deleteQueuedMessage(session, index);
                 onEdit(text == '[image]' ? '' : text, pendingImgs);
                 showAppToast(
                   context,
@@ -71,7 +72,7 @@ void showQueuedMessageOptions({
                     );
                     return;
                   }
-                  svc.deleteQueuedMessage(session, text);
+                  svc.deleteQueuedMessage(session, index);
                   svc.sendMessage(
                     session,
                     text == '[image]' ? '' : text,
@@ -99,7 +100,7 @@ void showQueuedMessageOptions({
                     );
                     return;
                   }
-                  svc.deleteQueuedMessage(session, text);
+                  svc.deleteQueuedMessage(session, index);
                   svc.sendMessage(
                     session,
                     text == '[image]' ? '' : text,
@@ -126,7 +127,7 @@ void showQueuedMessageOptions({
                   );
                   return;
                 }
-                svc.deleteQueuedMessage(session, text);
+                svc.deleteQueuedMessage(session, index);
                 svc.cancel(session);
                 Future.delayed(const Duration(milliseconds: 80), () {
                   svc.sendMessage(
@@ -152,7 +153,7 @@ void showQueuedMessageOptions({
               subtitle: const Text('Remove from queue without editing'),
               onTap: () {
                 Navigator.of(ctx).pop();
-                if (!svc.isMessageQueued(session.id, text)) {
+                if (index >= session.pendingMessages.length) {
                   showAppToast(
                     context,
                     "Can't delete: message already processed",
@@ -160,7 +161,7 @@ void showQueuedMessageOptions({
                   );
                   return;
                 }
-                svc.deleteQueuedMessage(session, text);
+                svc.deleteQueuedMessage(session, index);
                 onDelete();
                 showAppToast(
                   context,
