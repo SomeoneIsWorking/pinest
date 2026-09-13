@@ -67,11 +67,20 @@ class LazyImageTile extends StatelessWidget {
       );
     }
 
+    // Fetch on sight. The bytes travel in their own request and never in
+    // history, so there is nothing to ask permission for: a tap-to-load image
+    // is just a picture the user cannot see.
+    // Fetch on sight. The bytes travel in their own request and never in
+    // history, so there is nothing to ask permission for. Deferred by a frame
+    // because the store notifies listeners, and building must not mutate it.
+    if (!svc.images.isPending(_id)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => svc.images.ensure(_id));
+    }
     final pending = svc.images.isPending(_id);
     return _placeholder(
       context,
       icon: Icons.image_outlined,
-      label: pending ? 'Loading…' : 'Load image',
+      label: pending ? 'Loading…' : 'Image',
       detail: _sizeLabel,
       onTap: pending
           ? null
