@@ -39,6 +39,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Historical/live tool payload normalization for UI cards | `app` | `app/lib/models/tool_call_view.dart` (`ToolCallView`) |
 | Collapsible sequential tool call grouping | `app` | `app/lib/screens/tool_call_group.dart` (`ToolCallGroup`) |
 | Collapsible thinking/reasoning display | `app` | `app/lib/screens/thinking_card.dart` (`ThinkingCard`) |
+| Background task completion notification card | `app` | `app/lib/screens/task_notification_card.dart` (`TaskNotificationCard`) |
 | Durable-session UI + reconnect | `app` | `app/lib/screens/main_shell.dart` (`SessionHistorySheet`), `app/lib/services/agent_service.dart` |
 | Message options bottom sheet (queued edit/delete + history rewind/copy) | `app` | `app/lib/screens/message_options_sheet.dart` |
 | Relative and exact timestamp formatting for chat messages | `app` | `app/lib/logic/time_format.dart` (`formatRelativeTime`, `formatExactTime`) |
