@@ -420,3 +420,89 @@ test("a single oversized message is dropped and counted, never blamed on the cli
   server.broadcast({ type: "notice" as const, message: "later" });
   assert.deepEqual(await followUp, { type: "notice", message: "later" });
 });
+
+/** A stream frame is supersedable state; the payload can be arbitrarily large. */
+function streamFrame(sessionId: string, text: string, padding = 0): ServerMessageLike {
+  return {
+    type: "stream",
+    sessionId,
+    text,
+    status: "working",
+    thinking: "x".repeat(padding),
+  };
+}
+
+type ServerMessageLike = Parameters<WSServer["broadcast"]>[0];
+
+test("a streaming agent cannot delay another session's message", async (t) => {
+  const server = await startServer();
+  const client = await openClient(server);
+  t.after(() => stopAll(server, [client]));
+  await authenticate(client);
+
+  // Record BEFORE broadcasting: the flush is synchronous, so a listener attached
+  // afterwards would miss frames the server has already written.
+  const frames: Record<string, unknown>[] = [];
+  client.on("message", (data: WebSocket.RawData) => {
+    frames.push(JSON.parse(data.toString()) as Record<string, unknown>);
+  });
+
+  // Stream state first, then a discrete event: the event must arrive first even
+  // though the stream was broadcast before it.
+  server.broadcast(streamFrame("session-A", "streaming"));
+  server.broadcast({
+    type: "error",
+    sessionId: "session-B",
+    message: "delivered",
+  });
+
+  const deadline = Date.now() + 3000;
+  while (frames.length < 2 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(frames[0]?.type, "error", "the discrete frame must not wait behind stream state");
+  assert.equal(frames[1]?.type, "stream");
+});
+
+test("stream deltas for one session coalesce to the newest", async (t) => {
+  const server = await startServer();
+  const client = await openClient(server);
+  t.after(() => stopAll(server, [client]));
+  await authenticate(client);
+
+  for (let i = 0; i < 25; i++) {
+    server.broadcast(streamFrame("session-A", `delta ${i}`));
+  }
+  const received = await nextMessage(client);
+  assert.equal(received.text, "delta 24", "the newest delta is the one worth sending");
+
+  // Nothing older follows: the superseded frames were never written.
+  let extra = 0;
+  const onMessage = (): void => { extra += 1; };
+  client.on("message", onMessage);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  client.off("message", onMessage);
+  assert.equal(extra, 0, "coalesced deltas must not be replayed one by one");
+});
+
+test("streaming cannot exhaust the buffer and kill the socket", async (t) => {
+  const server = await startServer();
+  const client = await openClient(server);
+  t.after(() => stopAll(server, [client]));
+  await authenticate(client);
+
+  // 40 x 512 KiB is ~20 MiB of stream payload: more than the whole outbound
+  // allowance, which is what used to make the server close the client as "too
+  // slow" while the only thing that had grown was superseded state.
+  const big = "y".repeat(512 * 1024);
+  for (let i = 0; i < 40; i++) {
+    server.broadcast(streamFrame("session-A", big, 0));
+  }
+  const closed = nextClose(client).then(() => "closed");
+  const outcome = await Promise.race([
+    closed,
+    new Promise((resolve) => setTimeout(() => resolve("still open"), 250)),
+  ]);
+  assert.equal(outcome, "still open");
+  assert.equal(client.readyState, WebSocket.OPEN);
+});

@@ -22,6 +22,7 @@ type CommandHandler = (cmd: ClientCommand) => void;
 
 interface AuthedSocket extends WebSocket {
   authed: boolean;
+  outbound?: OutboundBox;
   authAttempted: boolean;
   acceptingMessages: boolean;
   authenticatedUid?: string;
@@ -32,6 +33,38 @@ interface AuthedSocket extends WebSocket {
 // A selected attachment is capped at 10 MiB in the app. Base64 expands it to
 // roughly 13.34 MiB; 16 MiB leaves room for the JSON envelope and bounded text
 // metadata while refusing ws's unsafe 100 MiB default.
+/** One frame waiting for a client. */
+interface OutboundFrame {
+  data: string;
+  byteLength: number;
+}
+
+/**
+ * A client's outbound schedule. Stream frames are SUPERSEDED state — a newer
+ * frame for a session replaces the older one completely — while every other
+ * frame is a discrete event (a delivered message, a tool result, an error) that
+ * must never wait behind them.
+ *
+ * Writing both into one FIFO meant a single streaming agent could delay another
+ * session's messages, and once the socket's buffer filled the client was closed
+ * as "too slow" when the only thing that had grown was stale deltas.
+ */
+interface OutboundBox {
+  urgent: OutboundFrame[];
+  streams: Map<string, OutboundFrame>;
+  timer: NodeJS.Timeout | null;
+}
+
+/** How long stream deltas may coalesce before the newest one is flushed. */
+const STREAM_FLUSH_MS = 50;
+
+/** The coalescing key for a supersedable frame; null when it must not coalesce. */
+function streamKeyOf(msg: ServerMessage): string | null {
+  if (msg.type !== "stream") return null;
+  const sessionId = (msg as { sessionId?: unknown }).sessionId;
+  return typeof sessionId === "string" ? sessionId : "";
+}
+
 const MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
 const MAX_TOKEN_CHARS = 16 * 1024;
 const AUTH_DEADLINE_MS = 10_000;
@@ -114,7 +147,11 @@ export class WSServer {
       debug("[remote-code] WS client error:", error.message);
       this.forgetSocket(ws);
     });
-    ws.on("close", () => this.forgetSocket(ws));
+    ws.on("close", () => {
+      if (ws.outbound?.timer != null) clearTimeout(ws.outbound.timer);
+      if (ws.outbound !== undefined) ws.outbound.timer = null;
+      this.forgetSocket(ws);
+    });
 
     if (this.stopped || this.unauthenticatedClients.size >= MAX_UNAUTHENTICATED_SOCKETS) {
       this.closeSocket(ws, 1013, "server busy");
@@ -318,31 +355,91 @@ export class WSServer {
 
   private send(ws: AuthedSocket, msg: ServerMessage): void {
     const data = JSON.stringify(msg);
-    this.sendSerialized(ws, data, Buffer.byteLength(data));
+    this.enqueue(ws, msg, data, Buffer.byteLength(data));
   }
 
-  private sendSerialized(ws: AuthedSocket, data: string, byteLength: number): void {
+  /** Schedule one frame for one client, honouring its class. */
+  private enqueue(ws: AuthedSocket, msg: ServerMessage, data: string, byteLength: number): void {
     if (ws.readyState !== WebSocket.OPEN || !ws.acceptingMessages) return;
-    // A single message bigger than the whole allowance can never be sent, no
-    // matter how fast the client is. Closing the socket blamed the client and
-    // produced a reconnect loop that silently destroyed the transcript; the
-    // payload is the server's problem, so say so and drop just this message.
-    if (byteLength > MAX_OUTBOUND_BUFFER_BYTES) {
+    const box = this.boxOf(ws);
+    const key = streamKeyOf(msg);
+    if (key !== null) {
+      box.streams.set(key, { data, byteLength });
+      if (box.timer === null) {
+        box.timer = setTimeout(() => {
+          box.timer = null;
+          this.flushOutbound(ws);
+        }, STREAM_FLUSH_MS);
+        box.timer.unref();
+      }
+      return;
+    }
+    box.urgent.push({ data, byteLength });
+    this.flushOutbound(ws);
+  }
+
+  private boxOf(ws: AuthedSocket): OutboundBox {
+    if (ws.outbound === undefined) {
+      ws.outbound = { urgent: [], streams: new Map(), timer: null };
+    }
+    return ws.outbound;
+  }
+
+  /** Every discrete frame first, then whatever stream state is newest. */
+  private flushOutbound(ws: AuthedSocket): void {
+    const box = this.boxOf(ws);
+    if (box.timer !== null) {
+      clearTimeout(box.timer);
+      box.timer = null;
+    }
+    while (box.urgent.length > 0) {
+      const frame = box.urgent.shift();
+      if (frame === undefined) break;
+      if (!this.writeFrame(ws, frame, false)) return;
+    }
+    for (const [key, frame] of box.streams) {
+      box.streams.delete(key);
+      if (!this.writeFrame(ws, frame, true)) return;
+    }
+  }
+
+  /**
+   * Write one frame. A frame too big to ever fit is dropped and counted rather
+   * than blamed on the client; a full buffer ends the socket for a discrete
+   * frame (something is genuinely wrong) but only drops superseded stream state.
+   */
+  private writeFrame(ws: AuthedSocket, frame: OutboundFrame, supersedable: boolean): boolean {
+    if (ws.readyState !== WebSocket.OPEN || !ws.acceptingMessages) return false;
+    if (frame.byteLength > MAX_OUTBOUND_BUFFER_BYTES) {
       this.oversizedDropped += 1;
       debug(
-        `[remote-code] dropped oversized outbound message (${(byteLength / 1048576).toFixed(2)}MB > ${MAX_OUTBOUND_BUFFER_BYTES / 1048576}MB) — total ${this.oversizedDropped}`,
+        `[remote-code] dropped oversized outbound message (${(frame.byteLength / 1048576).toFixed(2)}MB > ${MAX_OUTBOUND_BUFFER_BYTES / 1048576}MB) — total ${this.oversizedDropped}`,
       );
-      return;
+      return true;
     }
-    if (ws.bufferedAmount + byteLength > MAX_OUTBOUND_BUFFER_BYTES) {
+    if (ws.bufferedAmount + frame.byteLength > MAX_OUTBOUND_BUFFER_BYTES) {
+      if (supersedable) {
+        this.droppedStreamFrames += 1;
+        return false;
+      }
       this.closeSocket(ws, 1013, "client too slow");
-      return;
+      return false;
     }
     try {
-      ws.send(data);
+      ws.send(frame.data);
+      return true;
     } catch {
       this.closeSocket(ws, 1011, "send failed");
+      return false;
     }
+  }
+
+  /** Stream frames discarded because the client was behind; a superseded frame
+   *  is worthless, so this is healthy and only worth watching for growth. */
+  private droppedStreamFrames = 0;
+
+  get droppedStreams(): number {
+    return this.droppedStreamFrames;
   }
 
   /** Outbound messages refused because they exceed the whole allowance. */
@@ -357,7 +454,7 @@ export class WSServer {
   broadcast(msg: ServerMessage): void {
     const data = JSON.stringify(msg);
     const byteLength = Buffer.byteLength(data);
-    for (const ws of [...this.clients]) this.sendSerialized(ws, data, byteLength);
+    for (const ws of [...this.clients]) this.enqueue(ws, msg, data, byteLength);
   }
 
   /**
