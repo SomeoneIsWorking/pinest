@@ -43,9 +43,29 @@ export interface RuntimeRecord {
   owner?: string | null;
 }
 
+function realRuntimeRecordPath(): string {
+  return join(homedir(), ".pi", "agent", "remote-code", "runtime.json");
+}
+
 export function runtimeRecordPath(): string {
-  return process.env.RC_RUNTIME_PATH
-    || join(homedir(), ".pi", "agent", "remote-code", "runtime.json");
+  return process.env.RC_RUNTIME_PATH || realRuntimeRecordPath();
+}
+
+/**
+ * Same rule as the user config: a test process must never write the real
+ * record. Tests that load the extension without redirecting this path wrote the
+ * user's file and made a stale test load look like the running harness — which
+ * is the exact confusion this record exists to remove. Fail loudly instead.
+ */
+function assertWritableTarget(): void {
+  if (runtimeRecordPath() !== realRuntimeRecordPath()) return;
+  const underTest = Boolean(process.env.NODE_TEST_CONTEXT)
+    || /(^|\s)--test(\s|$)/.test(process.env.NODE_OPTIONS ?? "");
+  if (!underTest) return;
+  throw new Error(
+    `refusing to write the user's runtime record (${runtimeRecordPath()}) from a test process; `
+    + "import server/support/isolate-config.ts (or set RC_RUNTIME_PATH) BEFORE loading the extension",
+  );
 }
 
 /** Hash the extension's own sources: cheap, and the answer to "is my fix live". */
@@ -95,6 +115,7 @@ export function readRuntimeRecord(): RuntimeRecord | null {
 }
 
 function write(record: RuntimeRecord): void {
+  assertWritableTarget();
   try {
     const path = runtimeRecordPath();
     mkdirSync(dirname(path), { recursive: true });

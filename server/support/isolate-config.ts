@@ -1,6 +1,6 @@
 /**
- * Redirect the user-config path to a throwaway file, for tests that touch the
- * config directly or transitively.
+ * Redirect the harness's user-state files (config, runtime record) to a
+ * throwaway directory, for tests that touch them directly or transitively.
  *
  * Import this FIRST: `config.ts` resolves its path once, at module load, and
  * ESM evaluates static imports before the importing module's own statements —
@@ -11,8 +11,13 @@
 import { join } from "node:path";
 import { makeTempDir, removeTempDir } from "./tmp.ts";
 
-if (!process.env.RC_CONFIG_PATH) {
-  const dir = makeTempDir("rc-config-");
-  process.env.RC_CONFIG_PATH = join(dir, "config.json");
+if (!process.env.RC_CONFIG_PATH || !process.env.RC_RUNTIME_PATH) {
+  const dir = makeTempDir("rc-isolated-");
+  if (!process.env.RC_CONFIG_PATH) {
+    process.env.RC_CONFIG_PATH = join(dir, "config.json");
+  }
+  if (!process.env.RC_RUNTIME_PATH) {
+    process.env.RC_RUNTIME_PATH = join(dir, "runtime.json");
+  }
   process.on("exit", () => removeTempDir(dir));
 }
