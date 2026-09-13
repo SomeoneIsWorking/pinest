@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../models/session.dart';
 import '../models/session_tree.dart';
 import '../services/agent_service.dart';
+import '../services/outgoing_queue.dart';
 import 'app_toast.dart';
 
 /// Shows the actions bottom sheet for a queued or steering message.
@@ -389,3 +390,65 @@ Widget _sheetHeader(String text) => Padding(
     ),
   ),
 );
+
+
+/// Actions for a message this client sent but has NOT seen confirmed.
+///
+/// It may be stuck in the socket, refused, or simply not reported yet, and the
+/// user must be able to end that state either way instead of watching it.
+void showOutgoingSendOptions({
+  required BuildContext context,
+  required AgentService svc,
+  required Session session,
+  required OutgoingMessage message,
+}) {
+  showModalBottomSheet<void>(
+    context: context,
+    constraints: const BoxConstraints(maxWidth: 560),
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+    ),
+    builder: (ctx) => SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ListTile(
+            leading: const Icon(Icons.refresh),
+            title: const Text('Send again'),
+            subtitle: const Text('Put it back on the wire now'),
+            onTap: () {
+              Navigator.of(ctx).pop();
+              svc.resendOutgoing(session, message);
+              showAppToast(
+                context,
+                'Sending again…',
+                duration: const Duration(seconds: 2),
+              );
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.close, color: Colors.red),
+            title: const Text(
+              'Discard',
+              style: TextStyle(color: Colors.red),
+            ),
+            subtitle: Text(
+              message.failure == null
+                  ? 'Remove the unsent message from this chat'
+                  : 'Remove it; it was not delivered (${message.failure})',
+            ),
+            onTap: () {
+              Navigator.of(ctx).pop();
+              svc.discardOutgoing(session, message);
+              showAppToast(
+                context,
+                'Unsent message discarded',
+                duration: const Duration(seconds: 2),
+              );
+            },
+          ),
+        ],
+      ),
+    ),
+  );
+}
