@@ -479,10 +479,11 @@ def main() -> int:
     parser.add_argument(
         "--retry-interval",
         type=float,
-        default=3.0,
-        help="seconds between attempts. A refusal is instant and silent, so a request is "
-        "worth repeating often: the only thing that decides is whether the session happens "
-        "to be idle at that instant.",
+        default=30.0,
+        help="seconds between attempts. A request that lands mid-turn is REFUSED and prints "
+        "the command's notice in the user's terminal, so retrying faster than a human pace "
+        "is noise rather than progress: the only thing that decides is whether the session "
+        "happens to be idle at that instant.",
     )
     parser.add_argument(
         "--deadline",
