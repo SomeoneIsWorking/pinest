@@ -12,14 +12,45 @@ export { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_MODEL_ID } from "./product-def
 
 /**
  * pi's auto-compaction trigger is `contextTokens > contextWindow -
- * reserveTokens` (server/src… pi compaction.ts). For a 1M window, reserving
- * 600_000 tokens fires compaction at ~400k.
+ * reserveTokens`. The threshold the user sets is therefore expressed to pi as
+ * a RESERVE, and this is the only place that conversion happens — provisioning
+ * and the `/autocompact` command must agree, or the setting the user changes is
+ * not the setting that compacts.
  */
-export function reserveTokensFor(contextWindow: number): number {
+export function reserveTokensFor(
+  contextWindow: number,
+  compactAtTokens: number = DEFAULT_COMPACT_AT_TOKENS,
+): number {
   if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
     throw new Error(`invalid contextWindow: ${contextWindow}`);
   }
-  return Math.max(0, contextWindow - DEFAULT_COMPACT_AT_TOKENS);
+  if (!Number.isFinite(compactAtTokens) || compactAtTokens <= 0) {
+    throw new Error(`invalid compactAtTokens: ${compactAtTokens}`);
+  }
+  if (compactAtTokens >= contextWindow) {
+    throw new Error(
+      `compactAtTokens ${compactAtTokens} is not below the ${contextWindow}-token window`,
+    );
+  }
+  return contextWindow - compactAtTokens;
+}
+
+/** The compaction settings for a threshold — ONE authority for the
+ * threshold→reserve conversion, shared by provisioning and by the
+ * `/autocompact` command. */
+export function compactionSettings(
+  existing: Record<string, any> | null | undefined,
+  compactAtTokens: number = DEFAULT_COMPACT_AT_TOKENS,
+  contextWindow: number = GLM_CONTEXT_WINDOW,
+): { compaction: Record<string, unknown>; changed: boolean } {
+  const cur = (existing ?? {}).compaction as Record<string, unknown> | undefined;
+  const want = {
+    enabled: true,
+    reserveTokens: reserveTokensFor(contextWindow, compactAtTokens),
+    keepRecentTokens: 20_000,
+  };
+  const merged = { ...(cur ?? {}), ...want };
+  return { compaction: merged, changed: JSON.stringify(cur ?? null) !== JSON.stringify(merged) };
 }
 
 export interface SettingsPatchResult {
@@ -36,25 +67,31 @@ export const GLM_CONTEXT_WINDOW = 1_000_000;
  * Build the settings.json patch: compaction tuned for the 1M GLM window and
  * the default model. Idempotent — already-correct values produce no changes.
  */
-export function buildSettingsPatch(existing: Record<string, any> | null | undefined): SettingsPatchResult {
+export function buildSettingsPatch(
+  existing: Record<string, any> | null | undefined,
+  compactAtTokens: number = DEFAULT_COMPACT_AT_TOKENS,
+  /** The window the threshold applies to. Defaults to the provisioned GLM
+   * target; callers acting on a specific session pass its real window. */
+  contextWindow: number = GLM_CONTEXT_WINDOW,
+): SettingsPatchResult {
   const cur = existing ?? {};
   const patch: Record<string, any> = {};
   const changes: string[] = [];
   const replaced: Record<string, unknown> = {};
 
   // compaction
-  const wantCompaction = {
-    enabled: true,
-    reserveTokens: reserveTokensFor(GLM_CONTEXT_WINDOW),
-    keepRecentTokens: 20_000,
-  };
-  const curCompaction = (cur as any).compaction;
-  const mergedCompaction = { ...(curCompaction ?? {}), ...wantCompaction };
-  if (curCompaction === undefined || JSON.stringify(mergedCompaction) !== JSON.stringify({ ...wantCompaction, ...curCompaction })) {
-    if (curCompaction !== undefined) replaced.compaction = curCompaction;
-    changes.push(`compaction → ${JSON.stringify(wantCompaction)} (auto-compact at ~${DEFAULT_COMPACT_AT_TOKENS.toLocaleString()} tokens on the 1M window)`);
+  const { compaction, changed: compactionChanged } = compactionSettings(
+    cur,
+    compactAtTokens,
+    contextWindow,
+  );
+  if (compactionChanged) {
+    if (cur.compaction !== undefined) replaced.compaction = cur.compaction;
+    changes.push(
+      `compaction → ${JSON.stringify(compaction)} (auto-compact at ~${compactAtTokens.toLocaleString()} tokens on the ${contextWindow.toLocaleString()}-token window)`,
+    );
   }
-  patch.compaction = mergedCompaction;
+  patch.compaction = compaction;
 
   // defaultProvider and defaultModel
   // pi's SettingsManager requires defaultProvider and defaultModel as separate fields.
