@@ -515,9 +515,11 @@ PiNest natively owns background process execution, auto-backgrounding, and UI ma
 3. Terminal notifications (`<background-task-notification>`) wake up follow-up agent turns with command status, exit codes, and output summaries.
 4. The Flutter client provides real-time visibility and control via `BackgroundJobsBanner` in the chat screen and `_JobsListSheet` with live log inspection and job termination.
 5. Message history and bubbles carry relative timestamps (`3m ago`) and full datetime tooltips.
-6. Model reasoning/thinking processes stream and display in a collapsible card (`ThinkingCard`), tool calls carry and display execution timestamps with relative format and datetime tooltips, and multiple sequential tool calls automatically collapse into an expandable group (`ToolCallGroup`) with configurable defaults.
+6. Model reasoning/thinking processes stream and display in a collapsible card (`ThinkingCard`), tool calls carry and display execution timestamps with relative format and datetime tooltips (history tool cards included), and multiple sequential tool calls automatically collapse into an expandable group (`ToolCallGroup`) with configurable defaults.
+7. Chat history survives compaction: `extractSessionMessages` reads the full session branch (`getBranch()`/`getEntries()`) instead of the post-compaction context window, so messages before a compaction stay visible and compaction events render as a `Conversation compacted` system bubble.
+8. Background task completion notifications are routed to the owning session only: supervisor sessions are matched by sessionManager session ID as well as map key, and the host pi session receives a notification only when the task belongs to it (no cross-session leaks).
 
-Evidence: Node suite (`npm test`) passes with 298 tests and 0 failures; `npm run typecheck` and `tools/check_structure.py` pass clean; Flutter test suite passes with 72/72 tests; Flutter analyze clean (0 issues).
+Evidence: Node suite (`npm test`) passes with 296 tests and 0 failures; `npm run typecheck` and `tools/check_structure.py` pass clean; Flutter test suite passes with 74/74 tests; Flutter analyze clean (0 issues).
 
 ## Current focus
 
