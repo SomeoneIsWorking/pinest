@@ -294,55 +294,74 @@ def main() -> int:
     parser.add_argument("--api-key", default=os.environ.get("PINEST_FIREBASE_API_KEY", DEFAULT_API_KEY))
     parser.add_argument("--verify-timeout", type=float, default=VERIFY_TIMEOUT_S)
     parser.add_argument(
+        "--deadline",
+        type=float,
+        default=300.0,
+        help="keep re-requesting until a load is observed, for this many seconds. "
+        "A reload is refused while a response is streaming, so a single request is a "
+        "race against the requesting session; the request is retried instead.",
+    )
+    parser.add_argument(
         "--delay",
         type=float,
         default=0.0,
-        help="seconds to wait before requesting: a reload is refused while a response "
-        "is streaming, so a request made from inside a turn must outlive that turn",
+        help="seconds to wait before the first request, so the requesting turn has ended",
     )
     args = parser.parse_args()
 
     before = read_runtime_record()
-    print(f"before: {describe_record(before)}")
+    print(f"before: {describe_record(before)}", flush=True)
     if args.status:
         return 0
 
     if args.delay > 0:
         print(f"waiting {args.delay:g}s so the requesting turn has finished…", flush=True)
         time.sleep(args.delay)
-        before = read_runtime_record()
-        print(f"before: {describe_record(before)}")
 
     token, uid = owner_id_token(args.api_key)
     ports = candidate_ws_ports()
     if not ports:
         raise ReloadError("no `pi` process is listening on loopback; start the host first")
-    print(f"asking the host on port(s) {ports} to reload (owner uid {uid[:6]}…)")
-    used = request_reload(token, ports)
+    print(f"owner {uid[:6]}… · control channel port(s) {ports}", flush=True)
 
-    deadline = time.time() + args.verify_timeout
-    while time.time() < deadline:
-        time.sleep(1.5)
-        now = read_runtime_record()
-        if now is None:
-            continue
-        changed = (
-            now.get("at") != (before or {}).get("at")
-            or now.get("factoryEntries", 0) > (before or {}).get("factoryEntries", 0)
-        )
-        if changed and now.get("load") == "ok":
-            print(f"reloaded via {used}: {describe_record(now)}")
-            print(f"status: OK — the harness re-initialized on {now.get('sourceFingerprint')}")
-            return 0
-        if changed and now.get("load") == "failed":
-            print(f"reloaded via {used} but bootstrap FAILED: {describe_record(now)}")
-            return 2
+    deadline = time.time() + args.deadline
+    attempt = 0
+    while True:
+        attempt += 1
+        started = time.time()
+        try:
+            used = request_reload(token, ports)
+            print(f"attempt {attempt}: asked the host on port {used} to reload", flush=True)
+        except ReloadError as error:
+            print(f"attempt {attempt}: {error}", flush=True)
 
-    after = read_runtime_record()
-    print(f"after: {describe_record(after)}")
+        # Give the host time to re-initialize before deciding.
+        while time.time() - started < args.verify_timeout:
+            time.sleep(1.5)
+            now = read_runtime_record()
+            if now is None:
+                continue
+            changed = (
+                now.get("at") != (before or {}).get("at")
+                or now.get("factoryEntries", 0) > (before or {}).get("factoryEntries", 0)
+            )
+            if changed and now.get("load") == "ok":
+                print(f"reloaded on attempt {attempt}: {describe_record(now)}", flush=True)
+                print(f"status: OK — the harness re-initialized on {now.get('sourceFingerprint')}", flush=True)
+                return 0
+            if changed and now.get("load") == "failed":
+                print(f"reloaded on attempt {attempt} but bootstrap FAILED: {describe_record(now)}", flush=True)
+                return 2
+        if time.time() >= deadline:
+            break
+        print("not reloaded yet (the session was probably mid-response) — retrying", flush=True)
+        time.sleep(5)
+
+    print(f"after {attempt} attempt(s): {describe_record(read_runtime_record())}", flush=True)
     print(
-        "status: NOT RELOADED — the request was accepted but no new load was recorded. "
-        "pi's TUI refuses to reload while the session is streaming, which is the usual cause."
+        "status: NOT RELOADED — every request was accepted but no load was recorded. "
+        "pi's TUI refuses a reload while a session is streaming, which is the usual cause.",
+        flush=True,
     )
     return 1
 
