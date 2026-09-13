@@ -45,6 +45,11 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Message options bottom sheet (queued edit/delete + history rewind/copy) | `app` | `app/lib/screens/message_options_sheet.dart` |
 | Relative and exact timestamp formatting for chat messages | `app` | `app/lib/logic/time_format.dart` (`formatRelativeTime`, `formatExactTime`) |
 | Markdown rendering with tappable http(s) links (chat, streaming, release notes) | `app` | `app/lib/widgets/markdown_view.dart` (`MarkdownText` via `openExternalUrl`) |
+| Chat composer (text field, attachments, stop/send, slash autocomplete) | `app` | `app/lib/screens/composer_bar.dart` (`ComposerBar`); slash catalog `app/lib/logic/slash_commands.dart`, execution in `session_actions.dart` (`runSlashCommand`) |
+| Compact token-count parse/format ("300k") | `app` | `app/lib/logic/token_format.dart` (`parseTokenCount`, `formatTokenCount`) |
+| Stable decoded-image bytes for flicker-free rebuilds | `app` | `app/lib/logic/image_cache.dart` (`decodeImageBytes`) |
+| Newer-deployed-build detection + reload banner (web) | `app` | `app/lib/services/deploy_version.dart` (`DeployVersionWatcher`); reload via `link_bridge.dart` (`reloadPage`); deploy stamp in `app/deploy.sh` (version.json) |
+| Server queue parked on stop → restored into composer | `server`, `app` | `server/src/pending-queue.ts` (`HostPendingQueue.park`), `queue_parked` in `protocol.ts`; `AgentService.parkedFor` + restore in `chat_screen.dart` |
 | AgentService per-session transient state + eviction | `app` | `app/lib/services/session_cache.dart` (`SessionCache`) |
 | Correlated WebSocket request/reply lifecycle | `app` | `app/lib/services/correlated_request_broker.dart` (`CorrelatedRequestBroker`) |
 | Web client local deploy + Hosting-site routing | `app` | `app/deploy.sh`, `app/firebase.json`, `app/.firebaserc` (`pinest` canonical; `pinest-app` legacy redirect) |
