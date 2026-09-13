@@ -17,8 +17,8 @@ import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { hostname, homedir } from "node:os";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { UserImage } from "./protocol.ts";
-import { popPending, pushPending, extractUserText, extractText } from "./logic.ts";
+import { extractUserText, extractText } from "./logic.ts";
+import { HostPendingQueue } from "./pending-queue.ts";
 import { createMessageSubmitter, type MessageSubmitter } from "./submit.ts";
 import { createFirebase } from "./auth.ts";
 import type { FirebaseAuth } from "./auth.ts";
@@ -106,13 +106,9 @@ let _bgManager: BackgroundProcessManager | null = null;
 // submission queue to know a submission actually started a run.
 let _turnStarted = false;
 
-// Server-authoritative pending-message queue (text of messages submitted but
-// not yet delivered into the session). The app renders this instead of doing
-// its own bookkeeping — it must behave like the pi terminal's queue.
-let _pendingMessages: string[] = [];
-/** Subset of _pendingMessages submitted as steers (see protocol note). */
-let _pendingSteering: string[] = [];
-let _pendingImagesByText: Record<string, UserImage[]> = {};
+// Server-authoritative pending-message queue (texts of messages submitted but
+// not yet delivered into the session), owned by HostPendingQueue.
+const _pending = new HostPendingQueue();
 
 /** Serialized user-message submission queue.
  *
@@ -709,32 +705,25 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
       // Image-only messages need a text part that also appears in session
       // history (the client clears its "queued" badge by matching text).
       const text = cmd.text.trim().length === 0 ? "[image]" : cmd.text;
-      _pendingMessages = pushPending(_pendingMessages, text);
-      if (wasWorking && deliverAs === "steer") {
-        _pendingSteering = pushPending(_pendingSteering, text);
-      }
-      if (images.length > 0) _pendingImagesByText[text] = images;
-      upsertSession(_sessionId, {
-        pendingMessages: [..._pendingMessages],
-        pendingSteering: [..._pendingSteering],
-        pendingImagesByText: { ..._pendingImagesByText },
-      });
+      _pending.track(text, images, wasWorking && deliverAs === "steer");
+      upsertSession(_sessionId, _pending.snapshot());
       _submitter?.submit(text, images, deliverAs);
       break;
     }
-    case "cancel":
-      _pendingSteering = [];
-      _pendingMessages = [];
-      _pendingImagesByText = {};
-      upsertSession(_sessionId, {
-        pendingMessages: [],
-        pendingSteering: [],
-        pendingImagesByText: {},
-      });
+    case "cancel": {
+      // Park queued prompts instead of destroying them: stopping the run
+      // must drain the agent's queue, but the user's text comes back to
+      // the composer via queue_parked rather than vanishing.
+      const parked = _pending.park();
+      upsertSession(_sessionId, HostPendingQueue.emptySnapshot());
       // NOTE: ExtensionAPI has no abort(); it lives on ExtensionContext.
       // (pinest used _pi?.abort?.() — a silent no-op on the host.)
       (_ctx as any)?.abort?.();
+      if (parked.length > 0) {
+        broadcast({ type: "queue_parked", sessionId: _sessionId, messages: parked });
+      }
       break;
+    }
     case "model_set":
       await setModel(cmd);
       break;
@@ -765,10 +754,8 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
         const anySession = (_ctx as any)?.session ?? (_ctx as any)?._session ?? (_pi as any)?.session;
         anySession?.clearQueue?.();
       } catch { /* getter-absent session */ }
-      _pendingMessages = [];
-      _pendingSteering = [];
-      _pendingImagesByText = {};
-      upsertSession(_sessionId, { pendingMessages: [], pendingSteering: [], pendingImagesByText: {} });
+      _pending.clear();
+      upsertSession(_sessionId, HostPendingQueue.emptySnapshot());
       break;
     case "queue_delete":
       try {
@@ -786,14 +773,8 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
           }
         }
       } catch { /* getter-absent session */ }
-      _pendingMessages = popPending(_pendingMessages, cmd.text);
-      _pendingSteering = popPending(_pendingSteering, cmd.text);
-      delete _pendingImagesByText[cmd.text];
-      upsertSession(_sessionId, {
-        pendingMessages: [..._pendingMessages],
-        pendingSteering: [..._pendingSteering],
-        pendingImagesByText: { ..._pendingImagesByText },
-      });
+      _pending.delete(cmd.text);
+      upsertSession(_sessionId, _pending.snapshot());
       break;
     case "session_tree_get": {
       try {
@@ -896,8 +877,7 @@ const hostContext = new HostContextController({
   compactAtTokens: () => loadConfig().compactAtTokens,
   getHistory: getInteractiveHistory,
   clearPending: () => {
-    _pendingMessages = [];
-    _pendingSteering = [];
+    _pending.clear();
     upsertSession(_sessionId, { pendingMessages: [], pendingSteering: [] });
   },
   upsertSession,
@@ -963,18 +943,8 @@ function bridge(pi: ExtensionAPI): void {
   });
 
   (pi as any).on?.("queue_update", (event: any) => {
-    _pendingMessages = [...(event?.steering ?? []), ...(event?.followUp ?? [])];
-    _pendingSteering = [...(event?.steering ?? [])];
-    for (const k of Object.keys(_pendingImagesByText)) {
-      if (!_pendingMessages.includes(k)) {
-        delete _pendingImagesByText[k];
-      }
-    }
-    upsertSession(_sessionId, {
-      pendingMessages: [..._pendingMessages],
-      pendingSteering: [..._pendingSteering],
-      pendingImagesByText: { ..._pendingImagesByText },
-    });
+    _pending.applyAgentQueue(event);
+    upsertSession(_sessionId, _pending.snapshot());
   });
 
   pi.on("message_start", (event: any, ctx?: ExtensionContext) => {
@@ -987,22 +957,8 @@ function bridge(pi: ExtensionAPI): void {
       upsertSession(_sessionId, { streamingText: "", status: "working" });
       const rawText = (extractUserText(event.message) || extractText(event.message?.content)).trim();
       const delivered = rawText || "[image]";
-      const nextPending = popPending(_pendingMessages, delivered, { fallbackOldest: true });
-      const nextSteering = popPending(_pendingSteering, delivered, { fallbackOldest: true });
-      if (nextPending.length < _pendingMessages.length || nextSteering.length < _pendingSteering.length) {
-        _pendingMessages = nextPending;
-        _pendingSteering = nextSteering;
-        delete _pendingImagesByText[delivered];
-        for (const k of Object.keys(_pendingImagesByText)) {
-          if (!_pendingMessages.includes(k) && !_pendingMessages.some((m) => m.trim() === k.trim())) {
-            delete _pendingImagesByText[k];
-          }
-        }
-        upsertSession(_sessionId, {
-          pendingMessages: [..._pendingMessages],
-          pendingSteering: [..._pendingSteering],
-          pendingImagesByText: { ..._pendingImagesByText },
-        });
+      if (_pending.delivered(delivered)) {
+        upsertSession(_sessionId, _pending.snapshot());
       }
       // The message just became part of the session — push history so the
       // client can drop its "queued" badge for it NOW instead of at agent_end.
@@ -1067,9 +1023,7 @@ function bridge(pi: ExtensionAPI): void {
     segmenter.reset();
     _status = "idle";
     debug(`[remote-code] host status: working -> idle (agent_end)`);
-    _pendingSteering = [];
-    _pendingMessages = [];
-    _pendingImagesByText = {};
+    _pending.clear();
     broadcast({ type: "stream", sessionId: _sessionId, text: "", segments: [], status: "idle" });
     if (Array.isArray(event?.messages)) {
       const last = event.messages[event.messages.length - 1];

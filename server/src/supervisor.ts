@@ -438,7 +438,14 @@ export class Supervisor {
           // queue_update once prompt() actually queues (or runs) the message.
           break;
         }
-        case "cancel":
+        case "cancel": {
+          // Park queued prompts instead of destroying them: stopping the run
+          // must drain the agent's queue, but the user's text comes back to
+          // the composer via queue_parked rather than vanishing.
+          const parked = (s.pending ?? []).map((text) => ({
+            text,
+            images: s.pendingImagesByText?.[text] ?? [],
+          }));
           try { (s.session as any).clearQueue?.(); } catch { /* */ }
           s.pending = [];
           s.pendingSteering = [];
@@ -449,7 +456,15 @@ export class Supervisor {
             pendingImagesByText: {},
           });
           await s.session.abort();
+          if (parked.length > 0) {
+            this.callbacks.broadcast({
+              type: "queue_parked",
+              sessionId: cmd.sessionId as string,
+              messages: parked,
+            });
+          }
           break;
+        }
         case "model_set":
           await this.setModel(cmd, s);
           break;

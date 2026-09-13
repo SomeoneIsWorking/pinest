@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import '../logic/token_format.dart';
 import '../services/auth_service.dart';
 import '../services/agent_service.dart';
 import '../services/apk_release.dart';
@@ -101,7 +102,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final at = svc.sessions
           .map((s) => s.contextCompactAt)
           .firstWhere((v) => v != null, orElse: () => null);
-      if (at != null) _threshold.text = at.toString();
+      if (at != null) _threshold.text = formatTokenCount(at);
     }
 
     return Scaffold(
@@ -169,11 +170,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       Expanded(
                         child: TextField(
                           controller: _threshold,
-                          keyboardType: TextInputType.number,
-                          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                          keyboardType: TextInputType.text,
+                          inputFormatters: [
+                            FilteringTextInputFormatter.allow(RegExp(r'[0-9.kKmM]')),
+                          ],
                           decoration: const InputDecoration(
-                            labelText: 'Threshold (tokens)',
-                            hintText: '400000',
+                            labelText: 'Threshold (e.g. 300k)',
+                            hintText: '400k',
                             border: OutlineInputBorder(),
                             isDense: true,
                           ),
@@ -182,11 +185,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       const SizedBox(width: 12),
                       FilledButton(
                         onPressed: () {
-                          final v = int.tryParse(_threshold.text.trim());
+                          final v = parseTokenCount(_threshold.text);
                           if (v == null || v < 1000) {
                             showAppToast(
                               context,
-                              'Enter a value >= 1000 tokens',
+                              'Enter a value >= 1000 tokens, e.g. 300k',
                               isError: true,
                             );
                             return;
@@ -202,7 +205,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           svc.setCompactThreshold(v);
                           showAppToast(
                             context,
-                            'Auto-compact set to ${v.toString()} tokens',
+                            'Auto-compact set to ${formatTokenCount(v)} tokens',
                           );
                         },
                         child: const Text('Save'),

@@ -7,3 +7,6 @@ void openExternalUrl(String url) {
     launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 }
+
+/// Reloads the app page (web only; no-op elsewhere).
+void reloadPage() {}

@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import '../services/auth_service.dart';
 import '../services/agent_service.dart';
 import '../services/apk_release.dart';
+import '../services/deploy_version.dart';
 import '../services/link_bridge.dart';
 import '../services/user_preferences.dart';
 import '../models/session.dart';
@@ -29,6 +30,8 @@ class _MainShellState extends State<MainShell> {
   String? _selectedId;
   bool _spawning = false;
   StreamSubscription<ServerNotice>? _noticeSub;
+  final DeployVersionWatcher _deployVersion = DeployVersionWatcher();
+  bool _deployBannerShown = false;
 
   @override
   void initState() {
@@ -56,6 +59,35 @@ class _MainShellState extends State<MainShell> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkUpdateOnAndroid();
     });
+    // Web: detect a newer deployed build and offer a reload.
+    if (kIsWeb) {
+      _deployVersion.addListener(_onDeployVersionChanged);
+      _deployVersion.start();
+    }
+  }
+
+  void _onDeployVersionChanged() {
+    if (!mounted) return;
+    setState(() {});
+    if (_deployVersion.newDeployAvailable && !_deployBannerShown) {
+      _deployBannerShown = true;
+      ScaffoldMessenger.of(context).showMaterialBanner(
+        MaterialBanner(
+          content: const Text('A newer version of PiNest has been deployed.'),
+          actions: [
+            TextButton(
+              onPressed: reloadPage,
+              child: const Text('Reload'),
+            ),
+            TextButton(
+              onPressed: () =>
+                  ScaffoldMessenger.of(context).hideCurrentMaterialBanner(),
+              child: const Text('Dismiss'),
+            ),
+          ],
+        ),
+      );
+    }
   }
 
   Future<void> _checkUpdateOnAndroid() async {
@@ -79,6 +111,8 @@ class _MainShellState extends State<MainShell> {
   @override
   void dispose() {
     _noticeSub?.cancel();
+    _deployVersion.removeListener(_onDeployVersionChanged);
+    _deployVersion.dispose();
     super.dispose();
   }
 

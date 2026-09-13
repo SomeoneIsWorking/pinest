@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import '../logic/image_cache.dart';
 import '../logic/time_format.dart';
 
 /// Full-size viewer for a base64 image (tool results, user attachments).
@@ -10,7 +11,7 @@ void showImageDialog(BuildContext context, String b64) {
       insetPadding: const EdgeInsets.all(12),
       child: InteractiveViewer(
         maxScale: 8,
-        child: Image.memory(base64Decode(b64)),
+        child: Image.memory(decodeImageBytes(b64)),
       ),
     ),
   );
@@ -200,7 +201,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
             child: Stack(
               children: [
                 Image.memory(
-                  base64Decode(img['data'] as String),
+                  decodeImageBytes(img['data'] as String),
                   width: 240,
                   fit: BoxFit.contain,
                 ),

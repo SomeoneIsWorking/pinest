@@ -151,6 +151,7 @@ export type ServerMessage =
   | { type: "paths"; cmdId?: string; paths: string[] }
   | { type: "session_tree"; sessionId: string; tree: unknown[]; leafId: string | null; cmdId?: string; editorText?: string }
   | { type: "session_rewound"; sessionId: string; entryId: string; editorText?: string; cmdId?: string }
+  | { type: "queue_parked"; sessionId: string; messages: Array<{ text: string; images: UserImage[] }> }
   | { type: "path_check"; cmdId?: string; exists: boolean; isDirectory: boolean }
   | { type: "folder_created"; cmdId?: string; path?: string; error?: string };
 
