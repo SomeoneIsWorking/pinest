@@ -113,6 +113,10 @@ export interface SessionSnapshot {
   pendingImagesByText?: Record<string, UserImage[]>;
   /** True while a compact() is in flight for this session. */
   isCompacting?: boolean;
+  /** A provider error the agent is retrying on its own. Without this the app
+   * showed only a repeating error toast and the user had nothing to stop: the
+   * retry loop belongs to pi and only an abort on THAT session ends it. */
+  retry?: { attempt: number; maxAttempts: number; delayMs: number; errorMessage: string } | null;
   /** Background jobs running or recently finished for this session. */
   jobs?: BackgroundJobSummary[];
 }

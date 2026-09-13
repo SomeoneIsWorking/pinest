@@ -920,6 +920,12 @@ class AgentService extends ChangeNotifier {
   void setCompactThreshold(int tokens) =>
       _send({'type': 'set_compact_threshold', 'thresholdTokens': tokens});
 
+  /// Cap the bytes of any image that reaches the model. A provider that refuses
+  /// an oversized request leaves the session unusable until the image is gone,
+  /// so this is the setting that prevents it.
+  void setMaxImageBytes(int bytes) =>
+      _send({'type': 'set_max_image_bytes', 'maxBytes': bytes});
+
   /// Resume a registry-only session (re-opens its pi session file on the host).
   void resumeSession(String sessionId) =>
       _send({'type': 'session_resume', 'sessionId': sessionId});
