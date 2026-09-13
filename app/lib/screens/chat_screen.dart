@@ -4,7 +4,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'package:flutter_markdown/flutter_markdown.dart';
+import '../widgets/markdown_view.dart';
 import '../services/agent_service.dart';
 import '../services/attachment_selection.dart';
 import '../services/paste_bridge.dart';
@@ -1093,7 +1093,7 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             if (text.isNotEmpty)
               markdown
-                  ? MarkdownBody(data: text, shrinkWrap: true, selectable: true)
+                  ? MarkdownText(text, selectable: true)
                   : Text(text),
             if (timestamp != null && timestamp > 0)
               Padding(
@@ -1155,7 +1155,7 @@ class _StreamingBubble extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            MarkdownBody(data: text, shrinkWrap: true),
+            MarkdownText(text),
             const SizedBox(height: 4),
             Row(
               children: [

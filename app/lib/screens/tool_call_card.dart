@@ -124,7 +124,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
                         style: TextStyle(
                           fontSize: 11,
                           fontFamily: 'monospace',
-                          color: Colors.grey.shade600,
+                          color: Theme.of(context).colorScheme.onSurface.withAlpha(140),
                         ),
                         maxLines: 1,
                         softWrap: false,
@@ -141,67 +141,32 @@ class _ToolCallCardState extends State<ToolCallCard> {
               for (final img in widget.images)
                 Padding(
                   padding: const EdgeInsets.only(left: 20, top: 4),
-                  child: InkWell(
-                    onTap: () => _showImage(context, img['data'] as String),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(6),
-                      child: Image.memory(
-                        base64Decode(img['data'] as String),
-                        width: 240,
-                        fit: BoxFit.contain,
-                      ),
-                    ),
-                  ),
+                  child: _imageThumb(context, img),
                 ),
             if (widget.imagesOmitted > 0)
               Padding(
                 padding: const EdgeInsets.only(left: 20, top: 4),
                 child: Text(
                   '${widget.imagesOmitted} image(s) not shown — older history',
-                  style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: Theme.of(context).colorScheme.onSurface.withAlpha(140),
+                  ),
                 ),
               ),
             if (_expanded) ...[
               if (argStr.isNotEmpty)
-                Container(
+                _toolBlock(
+                  context,
+                  argStr,
                   margin: const EdgeInsets.only(top: 4),
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: Colors.grey.shade100,
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: SelectableText(
-                    argStr,
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontFamily: 'monospace',
-                      color: Colors.grey.shade700,
-                    ),
-                  ),
                 ),
               if (widget.result != null)
-                Container(
+                _toolBlock(
+                  context,
+                  widget.result!,
                   margin: const EdgeInsets.only(top: 4),
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: widget.isError
-                        ? Colors.red.shade50
-                        : Colors.grey.shade100,
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  constraints: const BoxConstraints(maxHeight: 300),
-                  child: SingleChildScrollView(
-                    child: SelectableText(
-                      widget.result!,
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontFamily: 'monospace',
-                        color: widget.isError
-                            ? Colors.red.shade700
-                            : Colors.grey.shade700,
-                      ),
-                    ),
-                  ),
+                  error: widget.isError,
                 ),
             ],
           ],
@@ -213,6 +178,100 @@ class _ToolCallCardState extends State<ToolCallCard> {
   /// Full-size view of a tool-returned image (tap the thumbnail).
   void _showImage(BuildContext context, String b64) =>
       showImageDialog(context, b64);
+
+  /// A tool-returned image framed as an image: border, size label, and a
+  /// zoom affordance so it reads as tappable rather than as stray content.
+  Widget _imageThumb(BuildContext context, Map<String, dynamic> img) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final mime = (img['mimeType'] as String?) ?? 'image';
+    return InkWell(
+      onTap: () => _showImage(context, img['data'] as String),
+      borderRadius: BorderRadius.circular(6),
+      child: Tooltip(
+        message: 'Tap to view full size',
+        child: Container(
+          width: 240,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: colorScheme.onSurface.withAlpha(50)),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(5),
+            child: Stack(
+              children: [
+                Image.memory(
+                  base64Decode(img['data'] as String),
+                  width: 240,
+                  fit: BoxFit.contain,
+                ),
+                Positioned(
+                  left: 4,
+                  bottom: 4,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withAlpha(150),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.open_in_full, size: 10, color: Colors.white),
+                        const SizedBox(width: 4),
+                        Text(
+                          mime,
+                          style: const TextStyle(fontSize: 9, color: Colors.white),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// A theme-aware monospace block for tool args/results. Hardcoded light
+  /// greys rendered as a glaring white bubble in dark mode; deriving from
+  /// onSurface works in both themes and matches the bubble family.
+  Widget _toolBlock(
+    BuildContext context,
+    String text, {
+    required EdgeInsets margin,
+    bool error = false,
+  }) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final foreground = error ? colorScheme.error : colorScheme.onSurface.withAlpha(214);
+    return Container(
+      margin: margin,
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: error
+            ? colorScheme.error.withAlpha(30)
+            : colorScheme.onSurface.withAlpha(14),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(
+          color: error
+              ? colorScheme.error.withAlpha(90)
+              : colorScheme.onSurface.withAlpha(30),
+        ),
+      ),
+      constraints: const BoxConstraints(maxHeight: 300),
+      child: SingleChildScrollView(
+        child: SelectableText(
+          text,
+          style: TextStyle(
+            fontSize: 11,
+            fontFamily: 'monospace',
+            color: foreground,
+          ),
+        ),
+      ),
+    );
+  }
 
   static const _summaryMaxChars = 160;
 
