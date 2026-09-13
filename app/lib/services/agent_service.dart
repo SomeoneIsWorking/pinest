@@ -680,6 +680,11 @@ class AgentService extends ChangeNotifier {
         _error = msg['message'] as String?;
         if (_error != null && _error!.isNotEmpty) {
           final sid = msg['sessionId'] as String?;
+          if (sid != null) {
+            // A refused command means the send it belongs to did not happen.
+            _outgoing.markFailed(sid, _error!);
+            unawaited(_outgoing.persist());
+          }
           final sessionName = sid != null
               ? _sessions.where((s) => s.id == sid).firstOrNull?.name
               : null;
