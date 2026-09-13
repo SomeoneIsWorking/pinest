@@ -171,6 +171,14 @@ export class BackgroundProcessManager {
     this.hostSessionId = options.hostSessionId;
   }
 
+  /** True when a notification's task is owned by THIS manager's host session.
+   * Unknown tasks are foreign (e.g. started by an orphaned pre-reload manager)
+   * and must not be delivered to the host. */
+  isHostOwnedTask(taskId: string): boolean {
+    const task = this.tasks.get(taskId);
+    return !!task && this.ownedBy(task, this.hostSessionId);
+  }
+
   /** A task is visible to a session only when it belongs to that session;
    * session-less tasks belong to the manager's own (host) session alone —
    * they must never leak into other sessions' job lists. */
