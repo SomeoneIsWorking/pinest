@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { makeTempDir, removeTempDir } from "../support/tmp.ts";
 import {
   BackgroundProcessManager,
   createAutoBackgroundBashTool,
@@ -163,4 +165,21 @@ test("isHostOwnedTask: only the host's own tasks pass; foreign and unknown are r
   assert.equal(manager.isHostOwnedTask(rLegacy.task!.id), true);
 
   manager.dispose();
+});
+
+test("a SILENT background task still has the log file its receipt points at", async () => {
+  // Real regression (benefactor): every command redirected to /dev/null, so the
+  // task produced no output bytes and the log was never created — while the
+  // receipt and the completion notification both named that path. The agent
+  // that trusted it wasted a turn on "No such file or directory".
+  const dir = makeTempDir("bg-silent-");
+  const manager = new BackgroundProcessManager({ autoBgTimeoutMs: 50 });
+  const task = manager.startTask("sleep 0.3", { cwd: dir });
+
+  assert.ok(existsSync(task.logPath), `receipt names ${task.logPath}, so it must exist`);
+  const logs = manager.getTaskLogs(task);
+  assert.equal(logs.text, "", "a silent task has empty logs, not an error");
+  assert.equal(logs.path, task.logPath);
+  manager.dispose();
+  removeTempDir(dir);
 });
