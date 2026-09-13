@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -20,7 +19,10 @@ import 'thinking_card.dart';
 import 'task_notification_card.dart';
 import 'message_options_sheet.dart';
 import 'background_jobs_sheet.dart';
+import '../logic/image_cache.dart';
 import '../logic/time_format.dart';
+import '../logic/slash_commands.dart';
+import 'composer_bar.dart';
 
 export 'session_actions.dart';
 import 'tree_dialog.dart';
@@ -41,7 +43,7 @@ void showImageDialog(BuildContext context, String b64) {
       insetPadding: const EdgeInsets.all(12),
       child: InteractiveViewer(
         maxScale: 8,
-        child: Image.memory(base64Decode(b64)),
+        child: Image.memory(decodeImageBytes(b64)),
       ),
     ),
   );
@@ -60,7 +62,6 @@ class _ChatScreenState extends State<ChatScreen> {
   final Map<String, int> _prevHistoryLen = {};
 
   bool get _isMacOS => Theme.of(context).platform == TargetPlatform.macOS;
-  String get _sendShortcutLabel => _isMacOS ? '⌘+Enter' : 'Ctrl+Enter';
 
   Session? _session(AgentService svc) =>
       svc.sessions.where((s) => s.id == widget.sessionId).firstOrNull;
@@ -72,6 +73,8 @@ class _ChatScreenState extends State<ChatScreen> {
   void initState() {
     super.initState();
     _scroll.addListener(_onScroll);
+    // Rebuild when the text changes so stop/send swap with box emptiness.
+    _input.addListener(_onInputChanged);
     if (kIsWeb) {
       _disposePaste = registerImagePasteListener(
         _onPastedImage,
@@ -90,9 +93,52 @@ class _ChatScreenState extends State<ChatScreen> {
   void dispose() {
     _disposePaste?.call();
     _scroll.removeListener(_onScroll);
+    _input.removeListener(_onInputChanged);
     _input.dispose();
     _scroll.dispose();
     super.dispose();
+  }
+
+  void _onInputChanged() {
+    if (mounted) setState(() {});
+  }
+
+  /// Restores parked (undelivered queued) messages into the composer after a
+  /// stop, so the user's prompts survive instead of vanishing with the queue.
+  void _restoreParked(List<Map<String, dynamic>> parked) {
+    final texts = <String>[];
+    for (final m in parked) {
+      final text = m['text'] as String? ?? '';
+      if (text.isNotEmpty) texts.add(text);
+      for (final img in (m['images'] as List? ?? const [])) {
+        final data = img['data'] as String?;
+        if (data == null) continue;
+        final image = PendingImage.fromBase64(
+          mimeType: (img['mimeType'] as String?) ?? 'image/png',
+          data: data,
+        );
+        if (!_attachedImages.any(
+            (p) => p.bytes.length == image.bytes.length && p.mimeType == image.mimeType)) {
+          _attachedImages.add(image);
+        }
+      }
+    }
+    final restored = texts.join('\n\n');
+    if (restored.isEmpty && _attachedImages.isEmpty) return;
+    setState(() {
+      _input.text = _input.text.trim().isEmpty
+          ? restored
+          : '${_input.text}\n\n$restored';
+      _input.selection = TextSelection.collapsed(offset: _input.text.length);
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Stopped — ${texts.length} queued message(s) parked into the input',
+        ),
+        duration: const Duration(seconds: 3),
+      ),
+    );
   }
 
   void _onScroll() {
@@ -271,7 +317,17 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  void _send() {
+  /// Applies a tapped slash-command suggestion: argless commands run
+  /// immediately, argument commands are inserted ready for typing.
+  void _applySlash(SlashCommandSpec command) {
+    setState(() {
+      _input.text = command.usage;
+      _input.selection = TextSelection.collapsed(offset: command.usage.length);
+    });
+    if (!command.hasArg) _send();
+  }
+
+  void _send() async {
     final text = _input.text.trim();
     if (text == '/reload' || text == '/pinest-reload') {
       _input.clear();
@@ -293,6 +349,16 @@ class _ChatScreenState extends State<ChatScreen> {
     if (text.isEmpty && !hasImages) return;
     final svc = context.read<AgentService>();
     final s = _session(svc);
+    if (text.startsWith('/')) {
+      if (hasImages) {
+        showAppToast(context, "Slash commands can't carry attachments", isError: true);
+        return;
+      }
+      if (await runSlashCommand(context, svc: svc, s: s, text: text)) {
+        _input.clear();
+        return;
+      }
+    }
     final displayText = text.isEmpty ? '[image]' : text;
     if (hasImages) {
       _pendingImagesByText[displayText] =
@@ -342,6 +408,16 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     }
     _prevHistoryLen[widget.sessionId] = history.length;
+
+    // Parked messages (server parked the queue on stop) restore into the
+    // composer once, in a post-frame callback so we don't mutate during build.
+    if (s != null) {
+      final parked = svc.parkedFor(s.id);
+      if (parked.isNotEmpty) {
+        svc.clearParked(s.id);
+        WidgetsBinding.instance.addPostFrameCallback((_) => _restoreParked(parked));
+      }
+    }
 
     if (streaming != null || streamingThinking != null) _scrollDown();
 
@@ -423,7 +499,22 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
           ),
-        _inputBar(working, svc, s),
+        ComposerBar(
+          input: _input,
+          working: working,
+          svc: svc,
+          session: s,
+          steer: _steer,
+          onSteerChanged: (v) => setState(() => _steer = v),
+          attachedImages: _attachedImages,
+          onRemoveAttachment: (i) => setState(() => _attachedImages.removeAt(i)),
+          outboxCount: svc.outboxCount,
+          isMacOS: _isMacOS,
+          onSend: _send,
+          onAttachBrowse: _attachFiles,
+          onPasteClipboard: _pasteClipboardImage,
+          onSlashSelected: _applySlash,
+        ),
       ],
     );
   }
@@ -693,11 +784,32 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
       );
     }
-    return ListView(
-      controller: _scroll,
-      padding: const EdgeInsets.all(12),
-      children: items,
+    // Nested scrollables (expanded tool-output blocks) absorb the drag until
+    // they hit their edge; from there the leftover overscroll transfers to the
+    // chat list so the finger never gets stuck at the block's boundary.
+    return NotificationListener<OverscrollNotification>(
+      onNotification: _bubbleNestedOverscroll,
+      child: ListView(
+        controller: _scroll,
+        padding: const EdgeInsets.all(12),
+        children: items,
+      ),
     );
+  }
+
+  /// Moves the chat list by an inner scrollable's leftover overscroll.
+  /// depth 0 is the chat list's own overscroll — only nested (depth > 0)
+  /// reports are transferred.
+  bool _bubbleNestedOverscroll(OverscrollNotification notification) {
+    if (notification.depth == 0 || !_scroll.hasClients) return false;
+    final position = _scroll.position;
+    final target = (position.pixels + notification.overscroll).clamp(
+      position.minScrollExtent,
+      position.maxScrollExtent,
+    );
+    if (target == position.pixels) return false;
+    _scroll.jumpTo(target);
+    return true;
   }
 
   Widget _toolCallCard(ToolCallView tool) => ToolCallCard(
@@ -759,179 +871,6 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _attachmentStrip() {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 4),
-      child: Wrap(
-        spacing: 6,
-        runSpacing: 6,
-        children: [
-          for (var i = 0; i < _attachedImages.length; i++)
-            Stack(
-              children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(6),
-                  child: Image.memory(
-                    _attachedImages[i].bytes,
-                    width: 72,
-                    height: 72,
-                    fit: BoxFit.cover,
-                  ),
-                ),
-                Positioned(
-                  right: 0,
-                  top: 0,
-                  child: GestureDetector(
-                    onTap: () => setState(() => _attachedImages.removeAt(i)),
-                    child: Container(
-                      decoration: const BoxDecoration(
-                        color: Colors.black54,
-                        shape: BoxShape.circle,
-                      ),
-                      padding: const EdgeInsets.all(2),
-                      child: const Icon(
-                        Icons.close,
-                        size: 14,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _inputBar(bool working, AgentService svc, Session? s) {
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.all(8),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: [
-            Expanded(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (svc.outboxCount > 0)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 4),
-                      child: Text(
-                        'Reconnecting… ${svc.outboxCount} message(s) will '
-                        'send automatically',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Colors.orange.shade700,
-                        ),
-                      ),
-                    ),
-                  if (_attachedImages.isNotEmpty) _attachmentStrip(),
-                  KeyboardListener(
-                    focusNode: FocusNode(),
-                    onKeyEvent: (event) {
-                      if (event is KeyDownEvent &&
-                          event.logicalKey == LogicalKeyboardKey.enter &&
-                          (_isMacOS
-                              ? HardwareKeyboard.instance.isMetaPressed
-                              : HardwareKeyboard.instance.isControlPressed)) {
-                        _send();
-                      }
-                    },
-                    child: TextField(
-                      controller: _input,
-                      minLines: 1,
-                      maxLines: 5,
-                      decoration: InputDecoration(
-                        hintText: working
-                            ? 'Agent is working… (steer or wait)'
-                            : 'Message… ($_sendShortcutLabel to send)',
-                        // Keep the hint to one line so a large text scale
-                        // doesn't grow the empty field to two rows.
-                        hintMaxLines: 1,
-                        border: const OutlineInputBorder(),
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 10,
-                        ),
-                        prefixIcon: PopupMenuButton<String>(
-                          icon: const Icon(Icons.attach_file, size: 20),
-                          tooltip: 'Attach files or paste an image',
-                          onSelected: (v) {
-                            if (v == 'browse') _attachFiles();
-                            if (v == 'paste') _pasteClipboardImage();
-                          },
-                          itemBuilder: (_) => [
-                            const PopupMenuItem(
-                              value: 'browse',
-                              child: Text('Browse files…'),
-                            ),
-                            if (kIsWeb)
-                              const PopupMenuItem(
-                                value: 'paste',
-                                child: Text('Paste image from clipboard'),
-                              ),
-                          ],
-                        ),
-                        // Mid-turn delivery mode: bolt = steer (delivered
-                        // before the next LLM call), low-priority = follow-up
-                        // (after the turn). Irrelevant when idle.
-                        suffixIcon: working
-                            ? IconButton(
-                                icon: Icon(
-                                  _steer ? Icons.bolt : Icons.low_priority,
-                                  size: 20,
-                                  color: _steer
-                                      ? Colors.deepOrange
-                                      : Colors.grey,
-                                ),
-                                tooltip: _steer
-                                    ? 'Steering — tap to queue as follow-up'
-                                    : 'Queued follow-up — tap to steer mid-turn',
-                                onPressed: () =>
-                                    setState(() => _steer = !_steer),
-                              )
-                            : null,
-                      ),
-                      onSubmitted: (_) => _send(),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 6),
-            // Compact 40px buttons: on phone widths the old 48px set plus the
-            // attach/steer buttons overflowed the row.
-            SizedBox(
-              width: 40,
-              height: 40,
-              child: IconButton(
-                icon: const Icon(Icons.send, size: 20),
-                tooltip: 'Send ($_sendShortcutLabel)',
-                onPressed: _send,
-              ),
-            ),
-            if (working)
-              SizedBox(
-                width: 40,
-                height: 40,
-                child: IconButton(
-                  icon: const Icon(Icons.stop, size: 20),
-                  tooltip: 'Stop the agent',
-                  onPressed: s == null ? null : () => svc.cancel(s),
-                  style: IconButton.styleFrom(
-                    backgroundColor: Theme.of(context).colorScheme.primary,
-                    foregroundColor: Colors.white,
-                  ),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
 
   Widget _systemBubble(String text, {int? timestamp}) {
     return Align(
@@ -1079,7 +1018,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(6),
                           child: Image.memory(
-                            base64Decode(img['data'] as String),
+                            decodeImageBytes(img['data'] as String),
                             width: 96,
                             height: 96,
                             fit: BoxFit.cover,

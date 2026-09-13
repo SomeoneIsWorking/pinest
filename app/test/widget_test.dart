@@ -341,6 +341,8 @@ class _ChatTestAgentService extends ChangeNotifier implements AgentService {
   @override
   List<Map<String, dynamic>> toolCallsFor(String id) => [];
   @override
+  List<Map<String, dynamic>> parkedFor(String id) => [];
+  @override
   bool get wsConnected => true;
   @override
   int get outboxCount => 0;
