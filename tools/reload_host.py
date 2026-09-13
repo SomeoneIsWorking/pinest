@@ -26,6 +26,7 @@ import hashlib
 import json
 import os
 import re
+import select
 import socket
 import subprocess
 import sys
@@ -46,6 +47,8 @@ RUNTIME_PATH = Path(os.environ.get("RC_RUNTIME_PATH", HOST_DIR / "runtime.json")
 # web app). It identifies the project, it is not a secret.
 DEFAULT_API_KEY = "AIzaSyD1gGGBicszg7el5Qp4wR07cMJucOjBd4I"
 TOKEN_URL = "https://securetoken.googleapis.com/v1/token"
+FRAME_READ_TIMEOUT_S = 30.0
+ASK_READ_WINDOW_S = 1.5
 AUTH_TIMEOUT_S = 20
 VERIFY_TIMEOUT_S = 6
 
@@ -146,6 +149,10 @@ class WebSocketError(RuntimeError):
     """A handshake or frame-level failure on the control channel."""
 
 
+class WebSocketClosed(WebSocketError):
+    """The peer closed the connection, as opposed to nothing having arrived."""
+
+
 class WebSocket:
     """The smallest WebSocket client that can talk to this host.
 
@@ -159,6 +166,9 @@ class WebSocket:
 
     def __init__(self, port: int, timeout: float) -> None:
         self._closed = False
+        self.close_code: int | None = None
+        self.close_reason = ""
+        self.frames_seen: list[str] = []
         self.sock = socket.create_connection(("127.0.0.1", port), timeout=5)
         self.sock.settimeout(timeout)
         key = base64.b64encode(os.urandom(16)).decode()
@@ -209,7 +219,7 @@ class WebSocket:
         while len(data) < count:
             chunk = self.sock.recv(count - len(data))
             if not chunk:
-                raise WebSocketError("closed mid-frame")
+                raise WebSocketClosed("the peer closed the connection")
             data += chunk
         return data
 
@@ -217,38 +227,79 @@ class WebSocket:
     def closed(self) -> bool:
         return self._closed
 
-    def recv_text(self, deadline: float) -> str | None:
-        """Next text frame, or None when the peer closed."""
+    def _send_frame(self, opcode: int, payload: bytes = b"") -> None:
+        mask = os.urandom(4)
+        header = bytearray([0x80 | opcode])
+        length = len(payload)
+        if length < 126:
+            header.append(0x80 | length)
+        elif length < 65536:
+            header.append(0x80 | 126)
+            header.extend(length.to_bytes(2, "big"))
+        else:
+            header.append(0x80 | 127)
+            header.extend(length.to_bytes(8, "big"))
+        header.extend(mask)
+        masked = bytes(byte ^ mask[i % 4] for i, byte in enumerate(payload))
+        self.sock.sendall(bytes(header) + masked)
+
+    def _wait_readable(self, wait: float) -> bool:
+        if wait <= 0:
+            return False
+        try:
+            readable, _, _ = select.select([self.sock], [], [], wait)
+        except (OSError, ValueError):
+            return False
+        return bool(readable)
+
+    def recv_text(self, wait: float) -> str | None:
+        """The next text frame, or None if none arrived within `wait` seconds.
+
+        A frame is always read to completion. Abandoning a partial frame on a
+        short timeout desynchronises the stream, after which every later header
+        is garbage — which is how an earlier version of this tool invented
+        "the host closed the socket" and stale session statuses.
+        """
+        deadline = time.time() + wait
         while True:
-            remaining = deadline - time.time()
-            if remaining <= 0:
+            if not self._wait_readable(deadline - time.time()):
                 return None
-            self.sock.settimeout(remaining)
+            # Data has arrived: read the whole frame without a short deadline.
+            self.sock.settimeout(FRAME_READ_TIMEOUT_S)
             try:
                 first, second = self._read_exactly(2)
-            except (socket.timeout, WebSocketError):
+                opcode = first & 0x0F
+                masked = bool(second & 0x80)
+                length = second & 0x7F
+                if length == 126:
+                    length = int.from_bytes(self._read_exactly(2), "big")
+                elif length == 127:
+                    length = int.from_bytes(self._read_exactly(8), "big")
+                mask = self._read_exactly(4) if masked else b""
+                payload = self._read_exactly(length) if length else b""
+            except WebSocketClosed:
+                self._closed = True
+                self.close_reason = self.close_reason or "connection ended without a close frame"
                 return None
-            opcode = first & 0x0F
-            masked = bool(second & 0x80)
-            length = second & 0x7F
-            if length == 126:
-                length = int.from_bytes(self._read_exactly(2), "big")
-            elif length == 127:
-                length = int.from_bytes(self._read_exactly(8), "big")
-            mask = self._read_exactly(4) if masked else b""
-            payload = self._read_exactly(length) if length else b""
+            except socket.timeout as error:
+                raise WebSocketError(f"frame truncated mid-read: {error}") from error
             if masked:
                 payload = bytes(byte ^ mask[i % 4] for i, byte in enumerate(payload))
             if opcode == 0x8:  # close
                 self._closed = True
+                if len(payload) >= 2:
+                    self.close_code = int.from_bytes(payload[:2], "big")
+                    self.close_reason = payload[2:].decode(errors="replace")
                 return None
-            if opcode in (0x9, 0xA):  # ping/pong
+            if opcode == 0x9:  # ping — the host expects a pong
+                self._send_frame(0xA, payload)
                 continue
-            if opcode == 0x8:  # close
-                self._closed = True
-                return None
+            if opcode == 0xA:  # pong
+                continue
             if opcode in (0x1, 0x2, 0x0):
-                return payload.decode(errors="replace")
+                text = payload.decode(errors="replace")
+                self.frames_seen.append(describe_frame(text))
+                return text
 
     def close(self) -> None:
         try:
@@ -257,16 +308,34 @@ class WebSocket:
             pass
 
 
-def recv_json(ws: WebSocket, deadline: float) -> dict[str, Any] | None:
+def recv_json(ws: WebSocket, wait: float) -> dict[str, Any] | None:
+    """The next frame that parses as a JSON object, within `wait` seconds."""
+    deadline = time.time() + wait
     while time.time() < deadline:
-        text = ws.recv_text(deadline)
+        text = ws.recv_text(max(0.05, deadline - time.time()))
         if text is None:
-            return None
+            if ws.closed:
+                return None
+            continue
         try:
             return json.loads(text)
         except json.JSONDecodeError:
             continue
     return None
+
+
+def describe_frame(text: str) -> str:
+    """A frame's type, for reporting what the host actually said back."""
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return "unparseable"
+    if isinstance(parsed, dict):
+        kind = str(parsed.get("type", "?"))
+        if kind == "error":
+            return f"error: {parsed.get('message', '')}"
+        return kind
+    return "unparseable"
 
 
 def host_status_from_state(state: dict[str, Any]) -> str:
@@ -290,7 +359,8 @@ def ask_repeatedly(token: str, port: int, deadline: float, interval: float) -> N
     Asking a handful of times and stopping lands every attempt inside the turn
     that launched this tool — precisely when the reload is refused. A refusal is
     instant and silent, so the only thing that works is asking continuously
-    until one lands in an idle moment.
+    until one lands in an idle moment. Every reply and every close is reported,
+    so "nothing happened" is never confused with "nobody answered".
     """
     attempts = 0
     while time.time() < deadline:
@@ -298,31 +368,41 @@ def ask_repeatedly(token: str, port: int, deadline: float, interval: float) -> N
         try:
             ws = WebSocket(port, AUTH_TIMEOUT_S)
             ws.send_text(json.dumps({"type": "auth", "token": token}))
-            reply = recv_json(ws, time.time() + AUTH_TIMEOUT_S)
+            reply = recv_json(ws, AUTH_TIMEOUT_S)
             if reply is None or reply.get("type") != "authed":
                 print(f"authentication failed: {reply}", flush=True)
                 time.sleep(2)
                 continue
             status = "unknown"
+            status_at = 0.0
             while time.time() < deadline:
                 attempts += 1
-                if attempts == 1 or attempts % 20 == 0:
-                    print(f"ask {attempts} (host session status: {status})", flush=True)
                 try:
                     ws.send_text('{"type":"reload"}')
                 except OSError as error:
                     print(f"ask {attempts}: socket write failed ({error}); reconnecting", flush=True)
                     break
-                # The state frame arrives after auth; keep the latest status.
-                frame = ws.recv_text(time.time() + 0.05)
-                if frame and '"type":"state"' in frame:
-                    try:
-                        status = host_status_from_state(json.loads(frame))
-                    except json.JSONDecodeError:
-                        pass
+                # The host answers a reload only by acting on it: read whatever
+                # it does send (state frames, errors) before asking again.
+                frame = ws.recv_text(ASK_READ_WINDOW_S)
+                while frame is not None:
+                    kind = describe_frame(frame)
+                    if kind == "state":
+                        try:
+                            status = host_status_from_state(json.loads(frame))
+                            status_at = time.time()
+                        except json.JSONDecodeError:
+                            pass
+                    elif kind != "state":
+                        print(f"ask {attempts}: host replied with {kind}", flush=True)
+                    frame = ws.recv_text(ASK_READ_WINDOW_S)
                 if ws.closed:
-                    print(f"ask {attempts}: host closed the socket; reconnecting", flush=True)
+                    detail = f"code {ws.close_code}" if ws.close_code else ws.close_reason
+                    print(f"ask {attempts}: host closed the connection ({detail}); reconnecting", flush=True)
                     break
+                if attempts == 1 or attempts % 20 == 0:
+                    age = f"{time.time() - status_at:.0f}s ago" if status_at else "never"
+                    print(f"ask {attempts}: accepted, no load yet (host said its session was {status}, sampled {age})", flush=True)
                 time.sleep(interval)
         except (OSError, WebSocketError) as error:
             print(f"connection error: {error}", flush=True)
@@ -388,7 +468,7 @@ def main() -> int:
         deadline = time.time() + args.watch_status
         last = None
         while time.time() < deadline:
-            frame = ws.recv_text(time.time() + 1.0)
+            frame = ws.recv_text(1.0)
             if not frame:
                 continue
             try:
