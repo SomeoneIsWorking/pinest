@@ -506,3 +506,71 @@ test("streaming cannot exhaust the buffer and kill the socket", async (t) => {
   assert.equal(outcome, "still open");
   assert.equal(client.readyState, WebSocket.OPEN);
 });
+
+test("a subscribed socket receives its session and nothing about another", async (t) => {
+  const server = await startServer();
+  const client = await openClient(server);
+  t.after(() => stopAll(server, [client]));
+  await authenticate(client);
+  // The subscribe is handled asynchronously, so wait for a round trip before
+  // broadcasting: otherwise this asserts a race rather than the filter.
+  const subscribed = nextMessage(client);
+  client.send(JSON.stringify({ type: "subscribe", sessionIds: ["mine"] }));
+  client.send(JSON.stringify({ type: "ping" }));
+  await subscribed;                       // pong proves the subscribe was applied
+
+  const frames: Record<string, unknown>[] = [];
+  client.on("message", (data: WebSocket.RawData) => {
+    frames.push(JSON.parse(data.toString()) as Record<string, unknown>);
+  });
+
+  server.broadcast(streamFrame("other", "another agent talking"));
+  server.broadcast(streamFrame("mine", "my session talking"));
+  server.broadcast({ type: "state", online: true, hostname: "h", sessions: [] });
+
+  const deadline = Date.now() + 3000;
+  const seen = (): string[] => frames.map((f) => `${String(f.type)}:${String(f.sessionId ?? "-")}`);
+  while (!seen().includes("stream:mine") && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  // Membership is the invariant; arrival order between a stream delta and the
+  // session list is not something a client may depend on.
+  assert.ok(seen().includes("stream:mine"), `own session missing: ${seen().join(",")}`);
+  assert.ok(seen().includes("state:-"), `the session list must always arrive: ${seen().join(",")}`);
+  assert.ok(
+    !seen().includes("stream:other"),
+    `another session leaked to a socket that did not subscribe: ${seen().join(",")}`,
+  );
+});
+
+test("a socket that never subscribes still receives everything", async (t) => {
+  // This is what keeps an older app build working: no subscription, no change.
+  const server = await startServer();
+  const client = await openClient(server);
+  t.after(() => stopAll(server, [client]));
+  await authenticate(client);
+
+  const frames: Record<string, unknown>[] = [];
+  client.on("message", (data: WebSocket.RawData) => {
+    frames.push(JSON.parse(data.toString()) as Record<string, unknown>);
+  });
+  server.broadcast(streamFrame("a", "one"));
+  server.broadcast(streamFrame("b", "two"));
+
+  const deadline = Date.now() + 3000;
+  while (frames.length < 2 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.deepEqual(frames.map((f) => String(f.sessionId)), ["a", "b"]);
+});
+
+test("subscribing before authentication is refused", async (t) => {
+  const server = await startServer();
+  const client = await openClient(server);
+  t.after(() => stopAll(server, [client]));
+  const closed = nextClose(client);
+  client.send(JSON.stringify({ type: "subscribe", sessionIds: ["mine"] }));
+  const result = await closed;
+  assert.equal(result.code, 1008);
+  assert.match(result.reason, /authentication/);
+});

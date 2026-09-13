@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'auth_service.dart';
 import 'correlated_request_broker.dart';
@@ -442,6 +443,7 @@ class AgentService extends ChangeNotifier {
         _flushOutbox();
         break;
       case 'state':
+        _httpKey = (msg['httpKey'] as String?) ?? _httpKey;
         _online = msg['online'] ?? false;
         _hostname = msg['hostname'] ?? 'machine';
         _activeSessionId = msg['activeSessionId'] as String?;
@@ -787,18 +789,111 @@ class AgentService extends ChangeNotifier {
   /// Unconfirmed sends, so the UI can show them and a reload can replay them.
   final OutgoingQueue _outgoing = OutgoingQueue();
 
-  /// History images, fetched on demand (never shipped as base64 with history).
-  late final ImageStore images = ImageStore(
-    (imageId) => _send({'type': 'get_image', 'imageId': imageId}),
-  );
+  /// Secret the server issued to this connection, used on HTTP requests.
+  String? _httpKey;
+
+  /// The HTTP side of the same origin the socket reached.
+  ///
+  /// Actions go here rather than over the socket: a request gets its own
+  /// connection and a status code, so an 11 KB image cannot queue behind a
+  /// screenshot and a send cannot queue behind either. The socket is left for
+  /// what the server PUSHES.
+  Uri? get httpBase {
+    final endpoint = _lastEndpoint;
+    if (endpoint == null) return null;
+    return endpoint.replace(
+      scheme: endpoint.scheme == 'wss' ? 'https' : 'http',
+      path: '',
+      query: '',
+      fragment: '',
+    );
+  }
+
+  /// History images, fetched on demand over HTTP (never shipped with history).
+  late final ImageStore images = ImageStore((imageId) {
+    unawaited(_fetchImage(imageId));
+  });
+
+  Future<void> _fetchImage(String imageId) async {
+    final base = httpBase;
+    final key = _httpKey;
+    if (base == null || key == null) {
+      images.missing(imageId, 'not connected yet');
+      return;
+    }
+    final url = base.replace(path: '/image/$imageId');
+    try {
+      final response = await http.get(url, headers: {'x-pinest-key': key});
+      if (response.statusCode == 200) {
+        images.received(imageId, base64.encode(response.bodyBytes));
+        return;
+      }
+      // The server's own words, so "unavailable" has a reason.
+      images.missing(imageId, 'HTTP ${response.statusCode}');
+    } catch (e) {
+      images.missing(imageId, 'request failed: $e');
+    }
+  }
 
   void _send(Map<String, dynamic> cmd) {
-    if (cmd['type'] == 'user_message' && !_connected) {
+    // A user message is an ACTION, not an observation: it goes over HTTP so its
+    // outcome is a status code the app can act on.
+    if (cmd['type'] == 'user_message') {
+      unawaited(_postMessage(cmd));
+      return;
+    }
+    _ws?.send({'type': 'command', 'cmd': cmd});
+  }
+
+  /// Deliver a message over HTTP; the reply decides whether it was accepted.
+  Future<void> _postMessage(Map<String, dynamic> cmd) async {
+    final base = httpBase;
+    final key = _httpKey;
+    if (base == null || key == null || !_connected) {
       if (_outbox.length < 50) _outbox.add(cmd);
       notifyListeners();
       return;
     }
-    _ws?.send({'type': 'command', 'cmd': cmd});
+    try {
+      final response = await http.post(
+        base.replace(path: '/message'),
+        headers: {'content-type': 'application/json', 'x-pinest-key': key},
+        body: json.encode(cmd),
+      );
+      if (response.statusCode == 202) {
+        // Accepted for delivery: the transcript entry arrives as a push.
+        return;
+      }
+      _failSend(cmd, _httpReason(response));
+    } catch (e) {
+      _failSend(cmd, 'could not reach the server: $e');
+    }
+  }
+
+  String _httpReason(http.Response response) {
+    try {
+      final body = json.decode(response.body);
+      if (body is Map && body['error'] is String) {
+        return 'HTTP ${response.statusCode}: ${body['error']}';
+      }
+    } catch (_) {
+      // Fall through to the status line.
+    }
+    return 'HTTP ${response.statusCode}';
+  }
+
+  /// Mark the tracked send that matches this command as refused, with its reason.
+  void _failSend(Map<String, dynamic> cmd, String reason) {
+    final sessionId = cmd['sessionId'] as String?;
+    if (sessionId == null) return;
+    for (final message in _outgoing.forSession(sessionId)) {
+      if (message.command['text'] == cmd['text']) {
+        message.failure = reason;
+        unawaited(_outgoing.persist());
+        notifyListeners();
+        return;
+      }
+    }
   }
 
   // ── Commands ──────────────────────────────────────────────────────────────
@@ -880,7 +975,7 @@ class AgentService extends ChangeNotifier {
     final pending = List<Map<String, dynamic>>.from(_outbox);
     _outbox.clear();
     for (final cmd in pending) {
-      _ws?.send({'type': 'command', 'cmd': cmd});
+      _send(cmd);       // re-decides the transport: messages go over HTTP
     }
   }
 
