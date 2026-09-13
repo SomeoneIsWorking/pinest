@@ -1,6 +1,10 @@
 // Tests for SourceWatcher — the change DETECTOR behind harness self-modification.
 // It must report changes and never reload: reload is explicit only.
 // Run with: npm test
+//
+// FIRST import: this file runs the real extension factory, which records its
+// load in the harness's user-state files.
+import "../support/isolate-config.ts";
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, mkdirSync } from "node:fs";

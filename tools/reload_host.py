@@ -160,7 +160,9 @@ def request_reload(token: str, ports: list[int]) -> int:
     for port in ports:
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
-                sock.settimeout(2.0)
+                # Firebase verification is a network round trip: the socket must
+                # wait as long as the deadline, not a token couple of seconds.
+                sock.settimeout(AUTH_TIMEOUT_S)
                 sock.sendall(json.dumps({"type": "auth", "token": token}).encode())
                 reply = _recv_json(sock, time.time() + AUTH_TIMEOUT_S)
                 if not reply:
@@ -172,6 +174,7 @@ def request_reload(token: str, ports: list[int]) -> int:
                 sock.sendall(b'{"type":"reload"}')
                 # The server answers or closes as it tears its socket down;
                 # either is fine, the verification below is what decides.
+                sock.settimeout(3.0)
                 _recv_json(sock, time.time() + 3)
                 return port
         except OSError as error:
