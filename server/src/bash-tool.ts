@@ -14,6 +14,7 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import type { BackgroundJobSummary } from "./protocol.ts";
+import { routeOrphanTask, type OrphanRoute } from "./bg-routing.ts";
 import debug from "./log.ts";
 
 export const DEFAULT_AUTO_BG_TIMEOUT_MS = 30_000;
@@ -161,6 +162,11 @@ export class BackgroundProcessManager {
    * policy instead of the stale closure it was created with. */
   public notifyCompletion?: (task: BackgroundTask) => void | Promise<void>;
   public onTaskUpdate?: (task: BackgroundTask) => void;
+  /** Resolves an owner for a task that carries no session id (a task created by
+   * an older build and still running across a reload). Without it, "no id"
+   * means host-owned, which put another project's completion in the host
+   * transcript. */
+  public resolveOrphan?: (task: BackgroundTask) => OrphanRoute;
   private readonly hostSessionId?: string;
 
   constructor(options: BackgroundProcessManagerOptions = {}) {
@@ -176,7 +182,10 @@ export class BackgroundProcessManager {
    * and must not be delivered to the host. */
   isHostOwnedTask(taskId: string): boolean {
     const task = this.tasks.get(taskId);
-    return !!task && this.ownedBy(task, this.hostSessionId);
+    if (!task) return false;
+    if (task.sessionId) return this.ownedBy(task, this.hostSessionId);
+    // No id at all: ask where it actually ran instead of assuming the host.
+    return this.resolveOrphan?.(task).kind === "host";
   }
 
   /** A task is visible to a session only when it belongs to that session;
@@ -748,6 +757,24 @@ export function createDefaultBackgroundManager(
   deps: DefaultBackgroundManagerDeps
 ): BackgroundProcessManager {
   const arm = (mgr: BackgroundProcessManager): BackgroundProcessManager => {
+    /** Where a task with no session id really ran. */
+    const routeOrphan = (task: BackgroundTask): OrphanRoute => {
+      const supervisor = deps.getSupervisor?.();
+      const sessions = supervisor?.sessions
+        ? [...supervisor.sessions.entries()].map(([id, s]: [string, any]) => ({
+            id,
+            cwd: s?.cwd ?? "",
+          }))
+        : [];
+      return routeOrphanTask(task.cwd ?? "", hostCwd(), sessions);
+    };
+    const hostCwd = (): string => {
+      const supervisor = deps.getSupervisor?.();
+      const host = supervisor?.sessions?.get(deps.getSessionId());
+      return host?.cwd ?? process.cwd();
+    };
+    mgr.resolveOrphan = routeOrphan;
+
     mgr.notifyCompletion = async (task) => {
       const targetSessionId = task.sessionId || deps.getSessionId();
       const content = formatTaskNotificationXml(task);
@@ -769,6 +796,17 @@ export function createDefaultBackgroundManager(
           }
         }
       }
+      let orphanUnroutable = false;
+      if (!task.sessionId && !supSession) {
+        // An older build started this task without an owner id; route it by
+        // where it actually ran rather than dumping it in the host transcript.
+        const route = routeOrphan(task);
+        if (route.kind === "session") {
+          supSession = supervisor?.sessions?.get(route.sessionId);
+        } else if (route.kind === "unroutable") {
+          orphanUnroutable = true;
+        }
+      }
 
       if (supSession?.session?.sendCustomMessage) {
         try {
@@ -782,7 +820,11 @@ export function createDefaultBackgroundManager(
       } else {
         const hostSessionId = deps.getSessionId();
         const piSessionId = (deps.getPi() as any)?.sessionManager?.getSessionId?.();
-        const isHostTask = !task.sessionId || task.sessionId === hostSessionId || (piSessionId && task.sessionId === piSessionId);
+        const isHostTask = orphanUnroutable
+          ? false
+          : !task.sessionId
+            ? routeOrphan(task).kind === "host"
+            : task.sessionId === hostSessionId || (piSessionId && task.sessionId === piSessionId);
         if (isHostTask) {
           const pi = deps.getPi();
           try {
@@ -794,14 +836,21 @@ export function createDefaultBackgroundManager(
             debug("[pinest] bg notify host session failed:", e);
           }
         } else {
-          debug(`[pinest] bg task ${task.id} belongs to session ${task.sessionId}; not delivering to host session`);
+          debug(
+            `[pinest] bg task ${task.id} belongs to session ${task.sessionId}; not delivering to host session`,
+          );
         }
       }
 
+      // One notice per completion. An unroutable orphan says WHY it has no
+      // transcript instead of implying it landed in the host's.
       deps.broadcast({
         type: "notice",
         sessionId: targetSessionId,
-        message: `Background command "${task.command.slice(0, 60)}" ${task.status} (exit ${task.exitCode ?? 0})`,
+        message: orphanUnroutable
+          ? `Background command "${task.command.slice(0, 60)}" ${task.status} — no session owns its directory`
+          : `Background command "${task.command.slice(0, 60)}" ${task.status} (exit ${task.exitCode ?? 0})`,
+        ...(orphanUnroutable && task.status === "failed" ? { isError: true } : {}),
       });
     };
     mgr.onTaskUpdate = (task) => {
