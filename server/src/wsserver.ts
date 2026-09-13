@@ -323,6 +323,17 @@ export class WSServer {
 
   private sendSerialized(ws: AuthedSocket, data: string, byteLength: number): void {
     if (ws.readyState !== WebSocket.OPEN || !ws.acceptingMessages) return;
+    // A single message bigger than the whole allowance can never be sent, no
+    // matter how fast the client is. Closing the socket blamed the client and
+    // produced a reconnect loop that silently destroyed the transcript; the
+    // payload is the server's problem, so say so and drop just this message.
+    if (byteLength > MAX_OUTBOUND_BUFFER_BYTES) {
+      this.oversizedDropped += 1;
+      debug(
+        `[remote-code] dropped oversized outbound message (${(byteLength / 1048576).toFixed(2)}MB > ${MAX_OUTBOUND_BUFFER_BYTES / 1048576}MB) — total ${this.oversizedDropped}`,
+      );
+      return;
+    }
     if (ws.bufferedAmount + byteLength > MAX_OUTBOUND_BUFFER_BYTES) {
       this.closeSocket(ws, 1013, "client too slow");
       return;
@@ -332,6 +343,14 @@ export class WSServer {
     } catch {
       this.closeSocket(ws, 1011, "send failed");
     }
+  }
+
+  /** Outbound messages refused because they exceed the whole allowance. */
+  private oversizedDropped = 0;
+
+  /** Diagnosed payloads the server refused to send — 0 is the only healthy value. */
+  get oversizedDrops(): number {
+    return this.oversizedDropped;
   }
 
   /** Broadcast a message to all authed clients. */

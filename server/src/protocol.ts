@@ -30,6 +30,15 @@ export interface ToolEvent {
   timestamp?: number;
 }
 
+/** A reference to an image the client can fetch on demand. Base64 never
+ * travels in history: it is re-sent on every push and reload, and a real
+ * transcript's eight 4K screenshots were 19.36 MB of a 19.7 MB payload. */
+export interface HistoryImage {
+  id: string;
+  mimeType: string;
+  bytes: number;
+}
+
 export interface HistoryItem {
   id?: string;
   role: "user" | "assistant" | "system";
@@ -39,10 +48,8 @@ export interface HistoryItem {
   thinking?: string;
   /** Timestamp in epoch milliseconds when the message was recorded. */
   timestamp?: number;
-  /** Images the MESSAGE itself carried (user image attachments), base64. */
-  images?: Array<{ data: string; mimeType: string }>;
-  /** Item images dropped by the payload budget — reported, never silent. */
-  imagesOmitted?: number;
+  /** Images the MESSAGE itself carried (user image attachments), by reference. */
+  images?: HistoryImage[];
   tools: Array<{
     name: string;
     args?: unknown;
@@ -51,10 +58,10 @@ export interface HistoryItem {
     isError?: boolean;
     /** Timestamp in epoch milliseconds when the tool call was made or returned. */
     timestamp?: number;
-    /** Images the tool result carried (base64), e.g. an image `read`. */
-    images?: Array<{ data: string; mimeType: string }>;
-    /** Images dropped to keep the payload sane — reported, never silent. */
-    imagesOmitted?: number;
+    /** Images the tool result carried (e.g. an image `read`), by reference. A
+     * LIVE tool call still carries `data` inline — that is a single one-off
+     * payload, while history repeats on every push. */
+    images?: Array<HistoryImage & { data?: string }>;
   }>;
 }
 
@@ -145,13 +152,15 @@ export type ServerMessage =
       /** The transcript was rewritten (compact/clear), so the client must
        * discard every previously loaded page before applying this one. */
       reset?: boolean }
-  | { type: "stream"; sessionId: string; text: string; status: string; segments?: string[]; thinking?: string }
+  | { type: "stream"; sessionId: string; text: string; status: string; segments?: Array<{ text: string; atTool: number }>; thinking?: string }
   | { type: "tool"; sessionId: string; tool: ToolEvent }
   | { type: "models"; sessionId?: string; models: ModelInfo[] }
   | { type: "paths"; cmdId?: string; paths: string[] }
   | { type: "session_tree"; sessionId: string; tree: unknown[]; leafId: string | null; cmdId?: string; editorText?: string }
   | { type: "session_rewound"; sessionId: string; entryId: string; editorText?: string; cmdId?: string }
   | { type: "queue_parked"; sessionId: string; messages: Array<{ text: string; images: UserImage[] }> }
+  | { type: "image"; imageId: string; mimeType: string; data: string }
+  | { type: "image_missing"; imageId: string; reason: string }
   | { type: "path_check"; cmdId?: string; exists: boolean; isDirectory: boolean }
   | { type: "folder_created"; cmdId?: string; path?: string; error?: string };
 
@@ -194,4 +203,5 @@ export type ClientCommand =
   | { type: "jobs_list"; sessionId?: string }
   | { type: "job_kill"; jobId: string; sessionId?: string }
   | { type: "job_logs"; jobId: string; maxBytes?: number; tail?: boolean; id?: string; sessionId?: string }
+  | { type: "get_image"; imageId: string; id?: string }
   | { type: "reload" };

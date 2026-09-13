@@ -1,21 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import '../logic/image_cache.dart';
 import '../logic/time_format.dart';
-
-/// Full-size viewer for a base64 image (tool results, user attachments).
-void showImageDialog(BuildContext context, String b64) {
-  showDialog<void>(
-    context: context,
-    builder: (ctx) => Dialog(
-      insetPadding: const EdgeInsets.all(12),
-      child: InteractiveViewer(
-        maxScale: 8,
-        child: Image.memory(decodeImageBytes(b64)),
-      ),
-    ),
-  );
-}
+import '../widgets/lazy_image_tile.dart';
 
 class ToolCallCard extends StatefulWidget {
   final String name;
@@ -23,9 +9,6 @@ class ToolCallCard extends StatefulWidget {
   final String? result;
   final List<Map<String, dynamic>> images;
 
-  /// Images the server left out of this history payload. Shown as a count —
-  /// an image that is not there must say so rather than just be absent.
-  final int imagesOmitted;
   final bool isError;
   final bool running;
   final int? timestamp;
@@ -38,7 +21,6 @@ class ToolCallCard extends StatefulWidget {
     required this.images,
     required this.isError,
     required this.running,
-    this.imagesOmitted = 0,
     this.timestamp,
   });
 
@@ -168,19 +150,8 @@ class _ToolCallCardState extends State<ToolCallCard> {
               for (final img in widget.images)
                 Padding(
                   padding: const EdgeInsets.only(left: 20, top: 4),
-                  child: _imageThumb(context, img),
+                  child: LazyImageTile(image: img, width: 240, height: 160, fit: BoxFit.contain),
                 ),
-            if (widget.imagesOmitted > 0)
-              Padding(
-                padding: const EdgeInsets.only(left: 20, top: 4),
-                child: Text(
-                  '${widget.imagesOmitted} image(s) not shown — older history',
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: Theme.of(context).colorScheme.onSurface.withAlpha(140),
-                  ),
-                ),
-              ),
             if (_expanded) ...[
               if (argStr.isNotEmpty)
                 _toolBlock(
@@ -202,69 +173,10 @@ class _ToolCallCardState extends State<ToolCallCard> {
     );
   }
 
-  /// Full-size view of a tool-returned image (tap the thumbnail).
-  void _showImage(BuildContext context, String b64) =>
-      showImageDialog(context, b64);
+  /// True when this tool's result carried images — the collapsed card labels
+  /// that with an image badge so an image `read` is obvious before expanding.
+  bool get _returnsImages => widget.images.isNotEmpty;
 
-  /// True when this tool's result carried images (or had them omitted from
-  /// the history payload) — the collapsed card labels that with an image
-  /// badge so an image `read` is obvious before expanding.
-  bool get _returnsImages => widget.images.isNotEmpty || widget.imagesOmitted > 0;
-
-  /// A tool-returned image framed as an image: border, size label, and a
-  /// zoom affordance so it reads as tappable rather than as stray content.
-  Widget _imageThumb(BuildContext context, Map<String, dynamic> img) {
-    final colorScheme = Theme.of(context).colorScheme;
-    final mime = (img['mimeType'] as String?) ?? 'image';
-    return InkWell(
-      onTap: () => _showImage(context, img['data'] as String),
-      borderRadius: BorderRadius.circular(6),
-      child: Tooltip(
-        message: 'Tap to view full size',
-        child: Container(
-          width: 240,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(6),
-            border: Border.all(color: colorScheme.onSurface.withAlpha(50)),
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(5),
-            child: Stack(
-              children: [
-                Image.memory(
-                  decodeImageBytes(img['data'] as String),
-                  width: 240,
-                  fit: BoxFit.contain,
-                ),
-                Positioned(
-                  left: 4,
-                  bottom: 4,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withAlpha(150),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(Icons.open_in_full, size: 10, color: Colors.white),
-                        const SizedBox(width: 4),
-                        Text(
-                          mime,
-                          style: const TextStyle(fontSize: 9, color: Colors.white),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
 
   /// A theme-aware monospace block for tool args/results. Hardcoded light
   /// greys rendered as a glaring white bubble in dark mode; deriving from

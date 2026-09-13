@@ -14,6 +14,8 @@ import 'package:pinest_app/screens/tool_call_group.dart';
 import 'package:pinest_app/services/agent_service.dart';
 import 'package:pinest_app/services/user_preferences.dart';
 import 'package:provider/provider.dart';
+import 'package:pinest_app/services/image_store.dart';
+import 'package:pinest_app/services/outgoing_queue.dart';
 
 void main() {
   test('Session maps all fields with sensible defaults', () {
@@ -119,7 +121,6 @@ void main() {
         args: {'path': 'file1.txt'},
         result: 'contents 1',
         images: [],
-        imagesOmitted: 0,
         isError: false,
         running: false,
       ),
@@ -128,7 +129,6 @@ void main() {
         args: {'path': 'file2.txt'},
         result: 'contents 2',
         images: [],
-        imagesOmitted: 0,
         isError: false,
         running: false,
       ),
@@ -137,7 +137,6 @@ void main() {
         args: {'path': 'file1.txt'},
         result: 'edited',
         images: [],
-        imagesOmitted: 0,
         isError: false,
         running: false,
       ),
@@ -342,6 +341,15 @@ class _ChatTestAgentService extends ChangeNotifier implements AgentService {
   List<Map<String, dynamic>> toolCallsFor(String id) => [];
   @override
   List<Map<String, dynamic>> parkedFor(String id) => [];
+
+  @override
+  final ImageStore images = ImageStore((_) {});
+
+  @override
+  List<OutgoingMessage> outgoingFor(String sessionId) => const [];
+
+  @override
+  Future<void> restoreOutgoing() async {}
   @override
   bool get wsConnected => true;
   @override

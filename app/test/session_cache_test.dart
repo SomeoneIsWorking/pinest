@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pinest_app/models/stream_segment.dart';
 import 'package:pinest_app/models/chat_item.dart';
 import 'package:pinest_app/services/session_cache.dart';
 
@@ -9,7 +10,7 @@ void main() {
 
     for (final id in ['deleted', 'kept']) {
       cache.streamingText[id] = 'text';
-      cache.streamingSegments[id] = ['segment'];
+      cache.streamingSegments[id] = const [StreamSegment(text: 'segment', atTool: 0)];
       cache.models[id] = [model];
       cache.history[id] = [
         {'text': 'history'},

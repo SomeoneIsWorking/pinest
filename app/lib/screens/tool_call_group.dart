@@ -158,7 +158,6 @@ class _ToolCallGroupState extends State<ToolCallGroup> {
                         args: tool.args,
                         result: tool.result,
                         images: tool.images,
-                        imagesOmitted: tool.imagesOmitted,
                         isError: tool.isError,
                         running: tool.running,
                         timestamp: tool.timestamp,

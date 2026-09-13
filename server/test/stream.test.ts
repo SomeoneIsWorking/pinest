@@ -14,12 +14,12 @@ test("segmenter: tool start promotes streamed text into a visible segment", () =
   assert.equal(new StreamSegmenter().onToolStart(), null);
   // Text streamed → promoted; the streaming bubble clears.
   const snap = seg.onToolStart();
-  assert.deepEqual(snap, { text: "", segments: ["Looking at the file."] });
+  assert.deepEqual(snap, { text: "", segments: [{ text: "Looking at the file.", atTool: 0 }] });
   // Streaming resumes fresh after the tool.
   seg.onTextDelta("Now the result: ");
   assert.deepEqual(seg.snapshot(), {
     text: "Now the result: ",
-    segments: ["Looking at the file."],
+    segments: [{ text: "Looking at the file.", atTool: 0 }],
   });
 });
 
@@ -38,7 +38,7 @@ test("segmenter: startMessage clears current text but keeps segments", () => {
   seg.onToolStart();
   seg.onTextDelta("second message so far");
   const snap = seg.startMessage();
-  assert.deepEqual(snap, { text: "", segments: ["first message text"] });
+  assert.deepEqual(snap, { text: "", segments: [{ text: "first message text", atTool: 0 }] });
 });
 
 test("segmenter: thinking deltas stream and are cleared on reset", () => {
@@ -58,4 +58,19 @@ test("segmenter: thinking deltas stream and are cleared on reset", () => {
   });
   seg.reset();
   assert.deepEqual(seg.snapshot(), { text: "", segments: [] });
+});
+
+test("segments record WHICH tool call they preceded", () => {
+  // The app pairs speech with tools by this index. Positional pairing put a
+  // paragraph written after the 8th tool call above the whole batch.
+  const seg = new StreamSegmenter();
+  seg.onToolStart(); // tool 0, nothing streamed
+  seg.onToolStart(); // tool 1
+  seg.onTextDelta("spoken after two tools");
+  const snap = seg.onToolStart(); // tool 2
+  assert.deepEqual(snap?.segments, [{ text: "spoken after two tools", atTool: 2 }]);
+  // A new turn resets the tool count with the segments.
+  seg.reset();
+  seg.onTextDelta("fresh turn");
+  assert.deepEqual(seg.onToolStart()?.segments, [{ text: "fresh turn", atTool: 0 }]);
 });

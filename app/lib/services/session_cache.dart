@@ -1,4 +1,5 @@
 import '../models/chat_item.dart';
+import '../models/stream_segment.dart';
 
 /// All transient data keyed by a server session id.
 ///
@@ -7,7 +8,7 @@ import '../models/chat_item.dart';
 class SessionCache {
   final Map<String, String> streamingText = {};
   final Map<String, String> streamingThinking = {};
-  final Map<String, List<String>> streamingSegments = {};
+  final Map<String, List<StreamSegment>> streamingSegments = {};
   final Map<String, List<PinestModel>> models = {};
   final Map<String, List<Map<String, dynamic>>> history = {};
   final Map<String, int> historyCursor = {};

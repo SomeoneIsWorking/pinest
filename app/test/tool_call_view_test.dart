@@ -2,14 +2,17 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:pinest_app/models/tool_call_view.dart';
 
 void main() {
-  test('history payload keeps durable images and omitted count', () {
-    final image = <String, dynamic>{'data': 'base64', 'mimeType': 'image/png'};
+  test('history payload keeps image references', () {
+    final image = <String, dynamic>{
+      'id': 'abc123',
+      'mimeType': 'image/png',
+      'bytes': 2400000,
+    };
     final tool = ToolCallView.fromPayload({
       'name': 'read',
       'args': {'path': 'frame.png'},
       'result': 'Loaded image.',
       'images': [image],
-      'imagesOmitted': 3.9,
       'isError': true,
       'running': true,
     }, source: ToolCallSource.history);
@@ -19,27 +22,27 @@ void main() {
     expect(tool.result, 'Loaded image.');
     expect(tool.images, [image]);
     expect(tool.images.single, isNot(same(image)));
-    expect(tool.imagesOmitted, 3);
+    expect(tool.images.single['id'], 'abc123',
+        reason: 'history ships a fetchable reference, not bytes');
     expect(tool.isError, isTrue);
     expect(tool.running, isFalse);
   });
 
-  test(
-    'live payload keeps running state and ignores history-only omissions',
-    () {
-      final tool = ToolCallView.fromPayload({
-        'name': 'bash',
-        'running': true,
-        'imagesOmitted': 8,
-      }, source: ToolCallSource.live);
+  test('live payload keeps running state and inline bytes', () {
+    final tool = ToolCallView.fromPayload({
+      'name': 'bash',
+      'running': true,
+      'images': [
+        {'data': 'inlinebase64', 'mimeType': 'image/png'},
+      ],
+    }, source: ToolCallSource.live);
 
-      expect(tool.name, 'bash');
-      expect(tool.images, isEmpty);
-      expect(tool.imagesOmitted, 0);
-      expect(tool.isError, isFalse);
-      expect(tool.running, isTrue);
-    },
-  );
+    expect(tool.name, 'bash');
+    expect(tool.images.single['data'], 'inlinebase64',
+        reason: 'a live result is one-off, so it may carry its bytes');
+    expect(tool.isError, isFalse);
+    expect(tool.running, isTrue);
+  });
 
   test('missing common fields use the same safe defaults for both sources', () {
     for (final source in ToolCallSource.values) {
@@ -49,7 +52,6 @@ void main() {
       expect(tool.args, isNull);
       expect(tool.result, isNull);
       expect(tool.images, isEmpty);
-      expect(tool.imagesOmitted, 0);
       expect(tool.isError, isFalse);
       expect(tool.running, isFalse);
     }

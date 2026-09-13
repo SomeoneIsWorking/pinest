@@ -28,6 +28,7 @@ cited), `partial`, `blocked`, `missing`. One current focus at the bottom.
 | S11 | The authenticated web client connects to the owner's advertised host over the internet | partial | S5b, S7 | G1, G6 |
 | S12 | An installable, attested Android APK is published for the mobile client | verified | S6, S7 | G1, G6 |
 | S13 | The mobile client is distributed through Google Play | missing | S6, S7 | G1 |
+| S14 | History transport is bounded and images load on demand | verified | S6, S9 | G1, G6 |
 Atomic work and findings live in `docs/issues/`.
 
 ### S8 — Remote session lifecycle
@@ -43,8 +44,19 @@ inspection, and remote stop. Web and mobile clients support interactive message 
 editor (I-042), message timestamps with relative format and exact-time tooltips, automatic
 background execution for commands running longer than 30 seconds (I-043), background task completion
 notifications rendered as dedicated system cards instead of user chat bubbles, and a scroll-to-bottom
-floating action button when scrolled up. Gap: the complete operation set
+floating action button when scrolled up. A send is shown as its own bubble with a sending/queued
+state until it lands in the transcript, and a text-only send that was never confirmed is restored
+after a page reload. Gap: the complete operation set
 is not yet qualified end to end on every shipping client.
+
+### S14 — History transport is bounded and images load on demand
+
+History is paged and carries image REFERENCES (id, mime, bytes), never base64; the bytes are fetched
+per image over `get_image` and cached in the client. Measured on the Kenji-NX transcript, one history
+page was 7.02 MB (19.36 MB of the full transcript was eight 4K screenshots) and is now 122.9 KB with
+no base64 in the payload. Hiding the last page behind the 16 MiB outbound allowance is no longer
+possible: an oversized payload is dropped and counted rather than misread as a slow client, because
+closing the socket made the app reconnect-loop and never receive the transcript.
 
 ### S10 — Context and compaction controls
 

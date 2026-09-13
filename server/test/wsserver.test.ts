@@ -397,3 +397,26 @@ test("outbound buffering accepts the boundary then closes a slow client", async 
   assert.equal(ended.reason, "client too slow");
   assert.equal(server.clients.size, 0);
 });
+
+test("a single oversized message is dropped and counted, never blamed on the client", async (t) => {
+  // A 19.7 MB history payload exceeded the whole outbound allowance. The old
+  // guard treated that like a slow client and closed the socket (1013), so the
+  // app reconnect-looped and never received the transcript — the server's own
+  // oversized payload looked like the client's fault.
+  const server = await startServer();
+  const ws = await openClient(server);
+  t.after(() => stopAll(server, [ws]));
+  assert.deepEqual(await authenticate(ws), { type: "authed" });
+  const serverSocket = [...server.clients][0]!;
+  Object.defineProperty(serverSocket, "bufferedAmount", { configurable: true, value: 0 });
+
+  const huge = { type: "notice" as const, message: "x".repeat(17 * 1024 * 1024) };
+  server.broadcast(huge);
+
+  // The client is still connected and still gets useful traffic.
+  assert.equal(server.clients.size, 1, "an oversized payload must not kill the client");
+  assert.equal(server.oversizedDrops, 1, "and it must be recorded, not forgotten");
+  const followUp = nextMessage(ws);
+  server.broadcast({ type: "notice" as const, message: "later" });
+  assert.deepEqual(await followUp, { type: "notice", message: "later" });
+});
