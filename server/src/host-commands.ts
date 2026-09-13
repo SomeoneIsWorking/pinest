@@ -8,7 +8,7 @@ import { createSessionsView, type SessionSummary } from "./sessions-view.ts";
 import { resolvePathInput, deriveSessionName } from "./logic.ts";
 import { DEFAULT_MODEL } from "./product-defaults.ts";
 import { reauthenticateRemoteOwner } from "./owner-runtime.ts";
-import { pendingReloadState, queueReload } from "./reload-manager.ts";
+import { pendingReloadState, queueReload, setIsWorkingProbe } from "./reload-manager.ts";
 import { Type } from "typebox";
 import { registerSessionMessaging } from "./session-messaging.ts";
 import debug from "./log.ts";
@@ -375,6 +375,9 @@ export function registerHostCommands(pi: ExtensionAPI, deps: () => HostCommandDe
     return sessions?.get(sessionId)?.status === "working";
   };
 
+  // One answer for "is the host mid-response", used by every reload path.
+  setIsWorkingProbe(isWorking);
+
   registerSessionMessaging(pi, () => {
     const d = deps();
     return {
@@ -420,7 +423,7 @@ export function registerHostCommands(pi: ExtensionAPI, deps: () => HostCommandDe
     parameters: Type.Object({}),
     async execute(_toolCallId: string, _params: unknown, _signal: any, _onUpdate: unknown, ctx: any) {
       const pending = pendingReloadState();
-      const { message } = queueReload(pi, ctx, { working: isWorking() });
+      const { message } = queueReload(pi, ctx);
       return {
         content: [{ type: "text", text: message }],
         details: { pending },
