@@ -335,6 +335,14 @@ def ask_repeatedly(token: str, port: int, deadline: float, interval: float) -> N
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--status", action="store_true", help="report the loaded build and exit")
+    parser.add_argument(
+        "--watch-status",
+        type=float,
+        default=0.0,
+        help="watch the host session's own status for this many seconds. The reload is "
+        "refused while that session is streaming, so this measures the condition instead "
+        "of inferring it.",
+    )
     parser.add_argument("--api-key", default=os.environ.get("PINEST_FIREBASE_API_KEY", DEFAULT_API_KEY))
     parser.add_argument(
         "--verify-timeout",
@@ -369,6 +377,31 @@ def main() -> int:
     before = read_runtime_record()
     print(f"before: {describe_record(before)}", flush=True)
     if args.status:
+        return 0
+    if args.watch_status > 0:
+        token, _uid = owner_id_token(args.api_key)
+        ports = candidate_ws_ports()
+        ws = WebSocket(ports[0], AUTH_TIMEOUT_S)
+        ws.send_text(json.dumps({"type": "auth", "token": token}))
+        recv_json(ws, time.time() + AUTH_TIMEOUT_S)
+        print("watching the host session status (state frames arrive on every change)", flush=True)
+        deadline = time.time() + args.watch_status
+        last = None
+        while time.time() < deadline:
+            frame = ws.recv_text(time.time() + 1.0)
+            if not frame:
+                continue
+            try:
+                parsed = json.loads(frame)
+            except json.JSONDecodeError:
+                continue
+            if parsed.get("type") != "state":
+                continue
+            status = host_status_from_state(parsed)
+            if status != last:
+                print(f"{time.strftime('%H:%M:%S')} host session status → {status}", flush=True)
+                last = status
+        ws.close()
         return 0
 
     if args.delay > 0:
