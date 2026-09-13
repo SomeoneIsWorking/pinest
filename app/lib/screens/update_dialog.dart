@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:flutter_markdown/flutter_markdown.dart' show MarkdownStyleSheet;
+import '../widgets/markdown_view.dart';
 import '../services/apk_release.dart';
 import '../services/link_bridge.dart';
 import '../services/update_service.dart';
@@ -101,9 +102,9 @@ class UpdateDialog extends StatelessWidget {
               ),
               child: SingleChildScrollView(
                 child: release.body.trim().isNotEmpty
-                    ? MarkdownBody(
-                        data: release.body,
-                        styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(
+                    ? MarkdownText(
+                        release.body,
+                        styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
                           p: const TextStyle(fontSize: 13, height: 1.4),
                         ),
                       )
