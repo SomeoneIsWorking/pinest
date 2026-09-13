@@ -19,15 +19,42 @@ export interface Config {
   tunnelProvider: string; // "cloudflared" | "ngrok" | "tailscale" | "off"
   /** Auto-compact sessions at this many context tokens (0/undefined = off). */
   compactAtTokens?: number;
+  /** Largest image, in bytes, that may enter a session's context. */
+  maxImageBytes?: number;
   activeSessionId?: string;
   [key: string]: unknown;
 }
+
+/** pi allows 4.5 MiB encoded; providers still refuse a few MiB of base64, and a
+ * refused request leaves the session unusable, so the default is far lower. */
+export const DEFAULT_MAX_IMAGE_BYTES = 1 * 1024 * 1024;
 
 const DEFAULTS: Config = {
   tunnelProvider: "cloudflared",
   /** Auto-compact a session when its context reaches this many tokens. */
   compactAtTokens: DEFAULT_COMPACT_AT_TOKENS,
+  maxImageBytes: DEFAULT_MAX_IMAGE_BYTES,
 };
+
+/**
+ * The configured cap. Read per tool result rather than captured at startup, so
+ * changing it in the app takes effect without a reload; a nonsense value falls
+ * back to the default instead of letting every image through.
+ */
+export function imageBytesLimit(): number {
+  const value = loadConfig().maxImageBytes;
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : DEFAULT_MAX_IMAGE_BYTES;
+}
+
+/** Set the image cap and return the line to show the user. The tool-result hook
+ * reads the value per call, so this applies without a reload. */
+export function setImageBytesLimit(maxBytes: number): string {
+  saveConfig({ maxImageBytes: maxBytes });
+  return `[pinest] images larger than ${(maxBytes / (1024 * 1024)).toFixed(1)} MiB `
+    + "are scaled down before reaching the model";
+}
 
 export function loadConfig(): Config {
   const cfg: Config = { ...DEFAULTS };

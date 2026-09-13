@@ -7,6 +7,8 @@
  * stays resumable), and resume() re-opens a session from its pi session file.
  */
 import debug from "./log.ts";
+import { imageBytesLimit } from "./config.ts";
+import { imageBudgetExtension } from "./image-budget.ts";
 import {
   createAgentSession,
   SessionManager,
@@ -23,7 +25,7 @@ import { mapModel, deriveSessionName, messagesToHistory, pageHistory, historyWit
 import { createAutoBackgroundBashTool, type BackgroundProcessManager } from "./bash-tool.ts";
 import { createBackgroundTools } from "./background-tools.ts";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { StreamSegmenter } from "./stream.ts";
+import { StreamSegmenter, type StreamSegmenterState } from "./stream.ts";
 import { createMessageSubmitter, type MessageSubmitter } from "./submit.ts";
 import { resolveThinkingLevel } from "./thinking.ts";
 import type { SessionRegistry } from "./registry.ts";
@@ -49,6 +51,14 @@ const ADOPT_DEADLINE_MS = Number(process.env.RC_ADOPT_DEADLINE_MS) || 30_000;
 
 interface ReloadStash {
   sessions: Map<string, LiveSession>;
+  /** Each parked session's streamed-text state as plain DATA.
+   *
+   * The parked LiveSession objects were built by the previous build of this
+   * module, so every field holding an instance of a class defined here is a
+   * version hazard: the reloaded module calls methods that instance's class
+   * never had. `stashForReload` runs in the old build, so it captures the data
+   * there, and adoption rebuilds the instance from it. */
+  segmenterStates: Map<string, StreamSegmenterState | undefined>;
   /** Fires if nobody adopts; cleared by adoptStashedSessions(). */
   guard: NodeJS.Timeout | null;
 }
@@ -81,7 +91,7 @@ export interface SupervisorCallbacks {
   bgManager?: BackgroundProcessManager;
 }
 
-interface LiveSession {
+export interface LiveSession {
   session: AgentSession;
   currentTurnId: string | null;
   unsub: (() => void) | null;
@@ -119,7 +129,7 @@ export interface SupervisorOptions {
 /** Fill in fields a parked session may predate (a hot reload IS a version
  * change). Returns the names of the fields that had to be defaulted — the
  * caller logs them, so an older-build handoff is visible rather than silent. */
-function normaliseAdopted(id: string, s: LiveSession): string[] {
+export function normaliseAdopted(id: string, s: LiveSession, segmenterState?: StreamSegmenterState): string[] {
   const missing: string[] = [];
   const fix = <K extends keyof LiveSession>(key: K, value: LiveSession[K], ok: boolean): void => {
     if (ok) return;
@@ -131,6 +141,13 @@ function normaliseAdopted(id: string, s: LiveSession): string[] {
   fix("name", s.name || id, typeof s.name === "string" && s.name.length > 0);
   fix("cwd", s.cwd || process.cwd(), typeof s.cwd === "string" && s.cwd.length > 0);
   fix("status", s.status === "working" ? "working" : "idle", s.status === "idle" || s.status === "working");
+  // Rebuild the segmenter rather than carrying the parked instance: a reload
+  // that added a method to StreamSegmenter otherwise throws on every delta
+  // ("segmenter.onThinkingDelta is not a function") for the whole run.
+  if (!(s.segmenter instanceof StreamSegmenter)) {
+    s.segmenter = StreamSegmenter.fromState(segmenterState);
+    missing.push("segmenter");
+  }
   return missing;
 }
 
@@ -171,6 +188,10 @@ export class Supervisor {
       cwd,
       agentDir,
       settingsManager,
+      // Spawned sessions deliberately exclude pinest itself, so the image cap
+      // travels as its own inline extension or these sessions would be the ones
+      // a too-large screenshot could still poison (413 on every later request).
+      extensionFactories: [imageBudgetExtension(imageBytesLimit)],
       extensionsOverride: (base) => ({
         ...base,
         extensions: base.extensions.filter((ext) => !isPinestExtension(ext.path, ext.resolvedPath)),
@@ -1035,7 +1056,18 @@ export class Supervisor {
       debug("[remote-code] reload: parked 0 live session(s) (nothing to park)");
       return;
     }
-    const stash: ReloadStash = { sessions, guard: null };
+    const stash: ReloadStash = {
+      sessions,
+      // Captured HERE, in the build that owns the live instances: asking a
+      // parked instance for its state after the reload is the same hazard we
+      // are removing (the old class may not have the method).
+      // Optional calls on purpose: a session parked by a build that predates the
+      // segmenter must not throw here either — adoption rebuilds it from nothing.
+      segmenterStates: new Map(
+        [...sessions].map(([id, s]) => [id, (s as any).segmenter?.captureState?.()] as const),
+      ),
+      guard: null,
+    };
     // Nobody adopting = invisible run. Bounded, not hoped-for.
     stash.guard = setTimeout(() => { void this.abandonStash(stash); }, ADOPT_DEADLINE_MS);
     stash.guard.unref?.();
@@ -1079,7 +1111,7 @@ export class Supervisor {
       // are missing. Normalise explicitly and say what was missing; the first
       // version spread `s.pendingSteering` straight into a snapshot and took
       // the whole host offline with "not iterable".
-      const missing = normaliseAdopted(id, s);
+      const missing = normaliseAdopted(id, s, stash.segmenterStates.get(id));
       if (missing.length) {
         debug(`[remote-code] reload: parked session ${id} came from an older build — defaulted ${missing.join(", ")}`);
       }
