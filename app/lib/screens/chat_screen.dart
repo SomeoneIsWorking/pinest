@@ -399,9 +399,13 @@ class _ChatScreenState extends State<ChatScreen> {
                       backgroundColor:
                           Theme.of(context).colorScheme.surfaceContainerHigh,
                       foregroundColor:
-                          Theme.of(context).colorScheme.primary,
+                          Theme.of(context).colorScheme.onSurface,
                       elevation: 3,
-                      child: const Icon(Icons.keyboard_arrow_down, size: 22),
+                      child: Icon(
+                        Icons.keyboard_arrow_down,
+                        size: 24,
+                        color: Theme.of(context).colorScheme.onSurface,
+                      ),
                     ),
                   ),
                 ),
