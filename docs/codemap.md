@@ -65,6 +65,11 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Live Firestore owner-boundary verification | `tools` | `tools/verify_firestore_rules.py`, `tools/test_verify_firestore_rules.py` |
 | Auto-compact threshold (ONE conversion from the user's threshold to pi's `compaction.reserveTokens`, applied to the trigger that actually compacts) | `server` | `server/src/compaction-settings.ts` (`applyCompactThreshold`, `applyCompactThresholdCommand`), `reserveTokensFor`/`compactionSettings` in `server/src/provision-core.ts`; command wired in `server/src/index.ts` |
 | State snapshot wire shape + registry/live row merging (pure) | `server` | `server/src/state-message.ts` (`buildStateMessage`, `mergeRegistryRows`) |
+| Reload request lifecycle (deferred while a response is streaming, fired on session settle) | `server` | `server/src/reload-manager.ts` (`queueReload`, `flushDeferredReload`); settle hook in `server/src/index.ts` |
+| Load-vs-fix observability: what the running harness loaded, with a reason for failure or skip | `server` | `server/src/runtime-record.ts` (`recordFactoryEntry`, `recordLoadOutcome`, `readRuntimeRecord`) |
+| Host control from outside the TUI (reload request + verification) | `tools` | `tools/reload_host.py` |
+| Session state, its wire shape, and broadcast policy | `server` | `server/src/state-publisher.ts` (`StatePublisher`) |
+| Owner presence publishing | `server` | `server/src/presence.ts` (`publishPresence`) |
 | Generated Flutter platform runner projects and packaging shells | `app` | `app/android/`, `app/ios/`, `app/linux/`, `app/macos/`, `app/windows/` |
 | Auto-backgrounding bash tool & task lifecycle manager | `server` | `server/src/bash-tool.ts` (`BackgroundProcessManager`, `createAutoBackgroundBashTool`) |
 | First-party background tools (`bg_run`, `bg_status`, `bg_logs`, `bg_kill`) & job commands | `server` | `server/src/background-tools.ts` (`createBackgroundTools`, `registerBackgroundTools`, `handleJobCommand`) |

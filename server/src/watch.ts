@@ -11,7 +11,8 @@
  * N rapid changes within the debounce window → exactly one report, carrying
  * every changed path seen in that window.
  */
-import { watch, existsSync, statSync, readdirSync } from "node:fs";
+import { watch, existsSync, statSync, readdirSync, readFileSync } from "node:fs";
+import { stripTypeScriptTypes } from "node:module";
 import type { FSWatcher } from "node:fs";
 import { join, basename } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -101,9 +102,18 @@ export class SourceWatcher {
  * A broken file (e.g. a half-written edit) must NOT be reloaded — the running
  * instance keeps serving and the caller is told which file to fix. Returns the
  * first broken path, or null when everything parses. */
+/**
+ * The first source file that cannot be parsed, or null.
+ *
+ * `node --check` is NOT a syntax check for TypeScript: it exits 0 for a `.ts`
+ * file containing `export const x = (;`, so the reload guard that depends on
+ * this function silently passed every broken extension source. TypeScript is
+ * therefore parsed with the same primitive the runtime uses to strip it.
+ */
 export function firstSyntaxError(dirs: string[], files: string[]): string | null {
-  const checkable = new Set<string>();
-  const exts = [".ts", ".mts", ".cts", ".js", ".mjs", ".cjs"];
+  const tsExts = [".ts", ".mts", ".cts"];
+  const jsExts = [".js", ".mjs", ".cjs"];
+  const checkable: string[] = [];
   const walk = (p: string, depth: number): void => {
     if (depth > 8) return;
     let st: import("node:fs").Stats;
@@ -111,15 +121,29 @@ export function firstSyntaxError(dirs: string[], files: string[]): string | null
     if (st.isDirectory()) {
       if (["node_modules", ".git", "build", "dist", "scratch"].includes(basename(p))) return;
       try { for (const c of readdirSync(p)) walk(join(p, c), depth + 1); } catch { /* unreadable dir: skip */ }
-    } else if (exts.some((e) => p.endsWith(e))) {
-      checkable.add(p);
+    } else if (tsExts.some((e) => p.endsWith(e)) || jsExts.some((e) => p.endsWith(e))) {
+      checkable.push(p);
     }
   };
   for (const d of dirs) walk(d, 0);
   for (const f of files) {
-    if (exts.some((e) => f.endsWith(e))) checkable.add(f);
+    if (tsExts.some((e) => f.endsWith(e)) || jsExts.some((e) => f.endsWith(e))) checkable.push(f);
   }
   for (const f of checkable) {
+    let source: string;
+    try {
+      source = readFileSync(f, "utf-8");
+    } catch {
+      continue; // unreadable: not a syntax problem
+    }
+    if (tsExts.some((e) => f.endsWith(e))) {
+      try {
+        stripTypeScriptTypes(source, { mode: "strip" });
+      } catch {
+        return f;
+      }
+      continue;
+    }
     const r = spawnSync(process.execPath, ["--check", f], { timeout: 10_000 });
     if (r.status !== 0) return f;
   }

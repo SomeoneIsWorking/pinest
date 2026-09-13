@@ -368,6 +368,12 @@ export function registerHostCommands(pi: ExtensionAPI, deps: () => HostCommandDe
     },
   });
 
+  /** Whether the host session is mid-response (a reload would be refused). */
+  const isWorking = (): boolean => {
+    const { sessionId, sessions } = deps();
+    return sessions?.get(sessionId)?.status === "working";
+  };
+
   // ── reload_runtime — LLM-callable; lets the agent apply its own edits ──
   pi.registerTool({
     name: "reload_runtime",
@@ -382,7 +388,7 @@ export function registerHostCommands(pi: ExtensionAPI, deps: () => HostCommandDe
     parameters: Type.Object({}),
     async execute(_toolCallId: string, _params: unknown, _signal: any, _onUpdate: unknown, ctx: any) {
       const pending = pendingReloadState();
-      const { message } = queueReload(pi, ctx);
+      const { message } = queueReload(pi, ctx, { working: isWorking() });
       return {
         content: [{ type: "text", text: message }],
         details: { pending },

@@ -43,6 +43,7 @@ import {
   noteChangedSources,
   pendingReloadState,
   queueReload,
+  flushDeferredReload,
   changedSources,
 } from "./reload-manager.ts";
 export {
@@ -241,13 +242,10 @@ function broadcastState(): void {
 }
 
 function publishCurrentPresence(online: boolean): Promise<void> {
-  return publishPresence({
-    fb: _fb,
-    ownerUid: _ownerUid,
-    ownerEmail: _ownerEmail,
-    tunnelUrl: () => _ws?.tunnelUrl ?? null,
-    hostname,
-  }, online);
+  return publishPresence(
+    { fb: _fb, ownerUid: _ownerUid, ownerEmail: _ownerEmail, tunnelUrl: () => _ws?.tunnelUrl ?? null, hostname },
+    online,
+  );
 }
 
 /** Registry rows overlaid with live status (live: true = loaded in-process). */
@@ -1098,7 +1096,10 @@ function bridge(pi: ExtensionAPI): void {
       });
   });
 
-  pi.on("agent_settled", () => hostContext.maybeAutoCompact());
+  pi.on("agent_settled", () => {
+    hostContext.maybeAutoCompact();
+    flushDeferredReload(_pi); // a reload asked for mid-turn is refused until now
+  });
 
   // Reload tears this instance down; the re-imported instance bootstraps
   // fresh (ws server, tunnel, registry reload). Spawned sessions were parked
