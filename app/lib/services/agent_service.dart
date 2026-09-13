@@ -405,6 +405,10 @@ class AgentService extends ChangeNotifier {
           _sessions.add(session);
           final id = session.id;
 
+          // Sticky: the queue drains at message_start, history arrives at
+          // message_end, and the gap must not read as "not sent yet".
+          _outgoing.markQueued(id, session.pendingMessages);
+
           final prevStatus = _sessionStatusHistory[id];
           if (prevStatus == 'working' && session.status == 'idle') {
             _notifySessionFinished(session);
