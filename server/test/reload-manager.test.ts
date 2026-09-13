@@ -10,6 +10,7 @@ import {
   queueReload,
   flushDeferredReload,
   reloadDeferred,
+  setIsWorkingProbe,
 } from "../src/reload-manager.ts";
 
 const TMP = makeTempDir("rc-reload-test-");
@@ -30,7 +31,10 @@ function fakePi(): { sent: string[]; api: any } {
 /** A context that reports no syntax problems and does not reload directly. */
 const eventCtx = { mode: "tui" } as any;
 
-beforeEach(() => removeTempDir(TMP));
+beforeEach(() => {
+  removeTempDir(TMP);
+  setIsWorkingProbe(() => false);
+});
 
 test("a reload asked for mid-turn is DEFERRED, not silently refused", () => {
   const { sent, api } = fakePi();
@@ -84,4 +88,29 @@ test("a syntax error still refuses and leaves no reload pending", () => {
   assert.equal(reloadDeferred(), false, "a refused reload must not fire later");
   assert.deepEqual(sent, []);
   removeTempDir(broken);
+});
+
+test("the working state comes from one probe, so no caller can forget it", () => {
+  // This is the bug that produced a reload NOTICE with no reload behind it: the
+  // app's path called queueReload without a `working` flag, so it tore down
+  // nothing while the terminal printed that it was reloading.
+  const { sent, api } = fakePi();
+  setIsWorkingProbe(() => true);
+
+  const result = queueReload(api, eventCtx);          // no flag at all
+  assert.match(result.message, /deferred/i);
+  assert.deepEqual(sent, []);
+  assert.equal(reloadDeferred(), true, "the ask is remembered for the settle event");
+
+  setIsWorkingProbe(() => false);
+  assert.equal(flushDeferredReload(api), true, "and it lands as soon as the turn ends");
+  assert.deepEqual(sent, ["/pinest-reload"]);
+});
+
+test("an explicit flag still wins over the probe for a known state", () => {
+  const { sent, api } = fakePi();
+  setIsWorkingProbe(() => true);
+  const result = queueReload(api, eventCtx, { working: false });
+  assert.equal(result.ok, true);
+  assert.deepEqual(sent, ["/pinest-reload"], "a known-idle caller is not deferred");
 });
