@@ -12,6 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { compactionSettings } from "./provision-core.ts";
+import debug from "./log.ts";
 
 export type ApplyResult =
   | { ok: true; path: string; reserveTokens: number; changed: boolean }
@@ -121,4 +122,28 @@ export function applyCompactThresholdCommand(
     });
   }
   deps.refreshUsage();
+}
+
+/**
+ * Apply the stored threshold on startup so the user's choice survives a restart
+ * instead of reverting to the provisioned default. Nothing configured is not a
+ * failure; a refusal IS, and is reported rather than swallowed.
+ */
+export function reconcileStoredThreshold(options: {
+  agentDir: string;
+  contextWindow: number | undefined | null;
+  compactAtTokens: number | undefined;
+}): ApplyResult | null {
+  if (options.compactAtTokens === undefined) return null;
+  const result = applyCompactThreshold({
+    agentDir: options.agentDir,
+    contextWindow: options.contextWindow,
+    compactAtTokens: options.compactAtTokens,
+  });
+  debug(
+    result.ok
+      ? `[remote-code] stored auto-compact threshold applied (pi reserve ${result.reserveTokens})`
+      : `[remote-code] stored auto-compact threshold NOT applied: ${result.reason}`,
+  );
+  return result;
 }

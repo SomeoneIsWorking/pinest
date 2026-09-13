@@ -52,3 +52,12 @@ export function mergeRegistryRows(
     };
   });
 }
+
+/** Sessions with their live background jobs attached — the state the app reads
+ * to show a per-session job list without a second request. */
+export function snapshotsWithJobs<T extends { id: string }>(
+  sessions: T[],
+  jobsFor: (sessionId: string) => unknown[],
+): T[] {
+  return sessions.map((session) => ({ ...session, jobs: jobsFor(session.id) }));
+}
