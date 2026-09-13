@@ -46,7 +46,7 @@ RUNTIME_PATH = Path(os.environ.get("RC_RUNTIME_PATH", HOST_DIR / "runtime.json")
 DEFAULT_API_KEY = "AIzaSyD1gGGBicszg7el5Qp4wR07cMJucOjBd4I"
 TOKEN_URL = "https://securetoken.googleapis.com/v1/token"
 AUTH_TIMEOUT_S = 20
-VERIFY_TIMEOUT_S = 45
+VERIFY_TIMEOUT_S = 6
 
 
 class ReloadError(RuntimeError):
@@ -292,7 +292,20 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--status", action="store_true", help="report the loaded build and exit")
     parser.add_argument("--api-key", default=os.environ.get("PINEST_FIREBASE_API_KEY", DEFAULT_API_KEY))
-    parser.add_argument("--verify-timeout", type=float, default=VERIFY_TIMEOUT_S)
+    parser.add_argument(
+        "--verify-timeout",
+        type=float,
+        default=VERIFY_TIMEOUT_S,
+        help="seconds to wait for a load after each request before trying again",
+    )
+    parser.add_argument(
+        "--retry-interval",
+        type=float,
+        default=3.0,
+        help="seconds between attempts. A refusal is instant and silent, so a request is "
+        "worth repeating often: the only thing that decides is whether the session happens "
+        "to be idle at that instant.",
+    )
     parser.add_argument(
         "--deadline",
         type=float,
@@ -335,7 +348,8 @@ def main() -> int:
         except ReloadError as error:
             print(f"attempt {attempt}: {error}", flush=True)
 
-        # Give the host time to re-initialize before deciding.
+        # Give the host time to re-initialize before deciding. A refusal is
+        # immediate, so this stays short and attempts stay frequent.
         while time.time() - started < args.verify_timeout:
             time.sleep(1.5)
             now = read_runtime_record()
@@ -355,7 +369,7 @@ def main() -> int:
         if time.time() >= deadline:
             break
         print("not reloaded yet (the session was probably mid-response) — retrying", flush=True)
-        time.sleep(5)
+        time.sleep(args.retry_interval)
 
     print(f"after {attempt} attempt(s): {describe_record(read_runtime_record())}", flush=True)
     print(
