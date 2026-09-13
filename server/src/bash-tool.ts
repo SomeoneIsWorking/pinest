@@ -167,9 +167,38 @@ export interface BackgroundProcessManagerOptions {
   autoBgTimeoutMs?: number;
   notifyCompletion?: (task: BackgroundTask) => void | Promise<void>;
   onTaskUpdate?: (task: BackgroundTask) => void;
-  /** The session that owns this manager (host app session id). Tasks with no
-   * sessionId belong to it — and to it ONLY, never to other sessions. */
-  hostSessionId?: string;
+  /** The session this manager serves (host app session id). REQUIRED: a task's
+   * visibility is decided by comparing ids, so a manager without one cannot
+   * say who anything belongs to. */
+  hostSessionId: string;
+}
+
+/**
+ * The owning session id, taken from the ONE place that knows it: the live tool
+ * execution context. pi passes it to every tool call, so no caller has to carry
+ * an id around — and none can pass the wrong one.
+ *
+ * `preferred` exists for the host, whose tasks are identified by the app's
+ * session id rather than pi's session-file id; it is supplied once by the
+ * composition root, not by each caller.
+ */
+export function ownerFromContext(ctx: unknown, preferred?: string): string {
+  const fromContext = (ctx as { sessionManager?: { getSessionId?: () => string } } | undefined)
+    ?.sessionManager?.getSessionId?.();
+  return requireSessionId(preferred ?? fromContext, "background task");
+}
+
+/** The identity a background task is owned by.
+ *
+ * Deliberately a required, non-optional string: the leak this type prevents was
+ * a task created with `sessionId: undefined`, which every routing decision then
+ * read as "the host's". Callers cannot forget it — they must obtain it from the
+ * LIVE tool context, which is the only place it cannot be stale. */
+export function requireSessionId(sessionId: string | undefined, what: string): string {
+  if (!sessionId || !sessionId.trim()) {
+    throw new Error(`${what} has no owning session id; refusing to create an unowned task`);
+  }
+  return sessionId;
 }
 
 export class BackgroundProcessManager {
@@ -185,14 +214,20 @@ export class BackgroundProcessManager {
    * means host-owned, which put another project's completion in the host
    * transcript. */
   public resolveOrphan?: (task: BackgroundTask) => OrphanRoute;
-  private readonly hostSessionId?: string;
+  private readonly hostSessionId: string;
 
-  constructor(options: BackgroundProcessManagerOptions = {}) {
+  constructor(options: BackgroundProcessManagerOptions) {
     this.autoBgTimeoutMs = options.autoBgTimeoutMs ??
       (Number(process.env.PI_AUTO_BG_TIMEOUT_MS) || DEFAULT_AUTO_BG_TIMEOUT_MS);
     this.notifyCompletion = options.notifyCompletion;
     this.onTaskUpdate = options.onTaskUpdate;
-    this.hostSessionId = options.hostSessionId;
+    this.hostSessionId = requireSessionId(options.hostSessionId, "background process manager");
+  }
+
+  /** A handle bound to one owning session. Getting one requires a resolved
+   * owner, so a task cannot be started without an owner at all. */
+  forSession(sessionId: string): SessionTasks {
+    return new SessionTasks(this, requireSessionId(sessionId, "session task scope"));
   }
 
   /** True when a notification's task is owned by THIS manager's host session.
@@ -311,13 +346,15 @@ export class BackgroundProcessManager {
     options: {
       name?: string;
       cwd?: string;
-      sessionId?: string;
+      /** Who owns this task. Required — see requireSessionId. */
+      sessionId: string;
       timeoutSeconds?: number;
       isAgent?: boolean;
       notifyOnCompletion?: boolean;
       triggerOnCompletion?: boolean;
-    } = {}
+    }
   ): BackgroundTask {
+    const sessionId = requireSessionId(options.sessionId, "background task");
     const cwd = options.cwd || process.cwd();
     const taskId = `bg_${randomBytes(4).toString("hex")}`;
     const logDir = resolveLogDirectory(cwd);
@@ -349,7 +386,7 @@ export class BackgroundProcessManager {
       name: options.name,
       command,
       cwd,
-      sessionId: options.sessionId,
+      sessionId,
       pid: child.pid,
       startedAt: Date.now(),
       status: "running",
@@ -446,11 +483,12 @@ export class BackgroundProcessManager {
     command: string,
     options: {
       cwd?: string;
-      sessionId?: string;
+      /** Who owns this task. Required — see requireSessionId. */
+      sessionId: string;
       timeout?: number;
       signal?: AbortSignal;
       onUpdate?: (update: { content: Array<{ type: "text"; text: string }>; details?: unknown }) => void;
-    } = {}
+    }
   ): Promise<{
     isBackground: boolean;
     task?: BackgroundTask;
@@ -458,6 +496,7 @@ export class BackgroundProcessManager {
     exitCode?: number;
     details?: unknown;
   }> {
+    const sessionId = requireSessionId(options.sessionId, "background task");
     const cwd = options.cwd || process.cwd();
     const taskId = `bg_${randomBytes(4).toString("hex")}`;
     const logDir = resolveLogDirectory(cwd);
@@ -497,7 +536,7 @@ export class BackgroundProcessManager {
       id: taskId,
       command,
       cwd,
-      sessionId: options.sessionId,
+      sessionId,
       pid: child.pid,
       startedAt: Date.now(),
       status: "running",
@@ -717,11 +756,9 @@ export class BackgroundProcessManager {
 export function createAutoBackgroundBashTool(options: {
   bgManager: BackgroundProcessManager;
   cwd?: string;
-  /** Ownership identity for this session's tasks. When set (the host
-   * registers it as the app session id) it wins over the ctx's pi session-file
-   * id, so host tasks carry the SAME id its bg tools and notification routing
-   * use — one identity per session. */
-  sessionId?: string;
+  /** Overrides the context-derived owner. Only the host sets it (its tasks are
+   * identified by the APP session id so the app's job queries find them). */
+  preferredOwner?: string;
 }): ToolDefinition {
   const { bgManager } = options;
 
@@ -739,17 +776,17 @@ export function createAutoBackgroundBashTool(options: {
     }),
     async execute(_toolCallId, { command, timeout }, signal, onUpdate, ctx) {
       const targetCwd = ctx?.cwd || options.cwd || process.cwd();
-      const sessionId = options.sessionId ?? ctx?.sessionManager?.getSessionId?.();
 
-      const result = await bgManager.executeCommand(command, {
-        cwd: targetCwd,
-        sessionId,
-        timeout,
-        signal,
-        onUpdate: onUpdate
-          ? (update) => onUpdate({ content: update.content, details: update.details })
-          : undefined,
-      });
+      const result = await bgManager
+        .forSession(ownerFromContext(ctx, options.preferredOwner))
+        .executeCommand(command, {
+          cwd: targetCwd,
+          timeout,
+          signal,
+          onUpdate: onUpdate
+            ? (update) => onUpdate({ content: update.content, details: update.details })
+            : undefined,
+        });
 
       return {
         content: [{ type: "text", text: result.outputText }],
@@ -765,6 +802,60 @@ export interface DefaultBackgroundManagerDeps {
   getSupervisor?: () => any;
   broadcast: (msg: any) => void;
   autoBgTimeoutMs?: number;
+}
+
+/**
+ * A background-task handle for ONE session.
+ *
+ * The process-wide manager cannot know who is calling it, which is how tasks
+ * ended up ownerless and "ownerless" came to mean "the host's". Every operation
+ * here is bound to a session resolved from the live tool context, so call sites
+ * never handle ids, and an unowned task is not constructible.
+ */
+export class SessionTasks {
+  private readonly manager: BackgroundProcessManager;
+  readonly sessionId: string;
+
+  constructor(manager: BackgroundProcessManager, sessionId: string) {
+    this.manager = manager;
+    this.sessionId = sessionId;
+  }
+
+  startTask(
+    command: string,
+    options: Omit<Parameters<BackgroundProcessManager["startTask"]>[1], "sessionId">,
+  ): BackgroundTask {
+    return this.manager.startTask(command, { ...options, sessionId: this.sessionId });
+  }
+
+  executeCommand(
+    command: string,
+    options: Omit<Parameters<BackgroundProcessManager["executeCommand"]>[1], "sessionId">,
+  ): ReturnType<BackgroundProcessManager["executeCommand"]> {
+    return this.manager.executeCommand(command, { ...options, sessionId: this.sessionId });
+  }
+
+  /** This session's own tasks — never another session's. */
+  list(): BackgroundTask[] {
+    return this.manager.listTasks(this.sessionId);
+  }
+
+  /** Resolve an id the caller is allowed to act on, or refuse by name. */
+  resolveOwned(idOrPrefix: string): BackgroundTask {
+    const task = this.manager.resolveTask(idOrPrefix);
+    if (!this.manager.isOwned(task, this.sessionId)) {
+      throw new Error(`Task not found: ${idOrPrefix}`);
+    }
+    return task;
+  }
+
+  getLogs(task: BackgroundTask, options: { maxBytes?: number; tail?: boolean } = {}) {
+    return this.manager.getTaskLogs(task, options);
+  }
+
+  kill(idOrPrefix: string): boolean {
+    return this.manager.killTask(this.resolveOwned(idOrPrefix).id);
+  }
 }
 
 /** One BackgroundProcessManager per PROCESS. Sessions and bg tools capture
@@ -901,6 +992,8 @@ export function registerBashIntegration(
     sessionId?: string;
   }
 ): void {
-  pi.registerTool(createAutoBackgroundBashTool({ bgManager: deps.bgManager, sessionId: deps.sessionId }));
+  pi.registerTool(
+    createAutoBackgroundBashTool({ bgManager: deps.bgManager, preferredOwner: deps.sessionId }),
+  );
 }
 

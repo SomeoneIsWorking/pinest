@@ -20,8 +20,8 @@ test("escapeXml escapes special characters", () => {
 });
 
 test("BackgroundProcessManager: fast command (< threshold) finishes in foreground", async () => {
-  const manager = new BackgroundProcessManager({ autoBgTimeoutMs: 1000 });
-  const result = await manager.executeCommand("echo 'fast foreground'");
+  const manager = new BackgroundProcessManager({ autoBgTimeoutMs: 1000, hostSessionId: "host-app" });
+  const result = await manager.executeCommand("echo 'fast foreground'", { sessionId: "host-app" });
   assert.equal(result.isBackground, false);
   assert.ok(result.outputText.includes("fast foreground"));
   assert.equal(result.exitCode, 0);
@@ -29,10 +29,10 @@ test("BackgroundProcessManager: fast command (< threshold) finishes in foregroun
 });
 
 test("BackgroundProcessManager: failing fast command throws error with exit code", async () => {
-  const manager = new BackgroundProcessManager({ autoBgTimeoutMs: 1000 });
+  const manager = new BackgroundProcessManager({ autoBgTimeoutMs: 1000, hostSessionId: "host-app" });
   await assert.rejects(
     async () => {
-      await manager.executeCommand("exit 42");
+      await manager.executeCommand("exit 42", { sessionId: "host-app" });
     },
     (err: Error) => {
       return err.message.includes("42");
@@ -42,13 +42,13 @@ test("BackgroundProcessManager: failing fast command throws error with exit code
 });
 
 test("BackgroundProcessManager: aborted foreground command rejects cleanly", async () => {
-  const manager = new BackgroundProcessManager({ autoBgTimeoutMs: 2000 });
+  const manager = new BackgroundProcessManager({ autoBgTimeoutMs: 2000, hostSessionId: "host-app" });
   const ac = new AbortController();
   setTimeout(() => ac.abort(), 50);
 
   await assert.rejects(
     async () => {
-      await manager.executeCommand("sleep 5", { signal: ac.signal });
+      await manager.executeCommand("sleep 5", { sessionId: "host-app", signal: ac.signal });
     },
     (err: Error) => {
       return err.message.includes("aborted");
@@ -66,6 +66,7 @@ test("BackgroundProcessManager: command exceeding threshold automatically transi
 
   const manager = new BackgroundProcessManager({
     autoBgTimeoutMs: 200, // 200ms threshold for fast testing
+    hostSessionId: "host-app",
     notifyCompletion: (task) => {
       completionNotificationTask = task;
       notifyResolve();
@@ -73,7 +74,7 @@ test("BackgroundProcessManager: command exceeding threshold automatically transi
   });
 
   // Run a command that takes 600ms (exceeding the 200ms threshold)
-  const result = await manager.executeCommand("echo 'step 1'; sleep 0.6; echo 'step 2'");
+  const result = await manager.executeCommand("echo 'step 1'; sleep 0.6; echo 'step 2'", { sessionId: "host-app" });
 
   // Tool call returned after 200ms with background receipt!
   assert.equal(result.isBackground, true);
@@ -98,8 +99,8 @@ test("BackgroundProcessManager: command exceeding threshold automatically transi
 });
 
 test("BackgroundProcessManager: killTask cancels running background task", async () => {
-  const manager = new BackgroundProcessManager({ autoBgTimeoutMs: 100 });
-  const result = await manager.executeCommand("sleep 10");
+  const manager = new BackgroundProcessManager({ autoBgTimeoutMs: 100, hostSessionId: "host-app" });
+  const result = await manager.executeCommand("sleep 10", { sessionId: "host-app" });
 
   assert.equal(result.isBackground, true);
   const taskId = result.task!.id;
@@ -113,32 +114,35 @@ test("BackgroundProcessManager: killTask cancels running background task", async
 });
 
 test("createAutoBackgroundBashTool: wraps executeCommand as a tool definition", async () => {
-  const manager = new BackgroundProcessManager({ autoBgTimeoutMs: 1000 });
+  const manager = new BackgroundProcessManager({ autoBgTimeoutMs: 1000, hostSessionId: "host-app" });
   const tool = createAutoBackgroundBashTool({ bgManager: manager });
 
   assert.equal(tool.name, "bash");
-  const execResult = await tool.execute("call_1", { command: "echo 'tool ok'" }, undefined, undefined, {} as any);
+  // Ownership comes from the live execution context — the only place that
+  // knows the session, and the reason no caller passes an id anymore.
+  const ctx = { sessionManager: { getSessionId: () => "host-app" } };
+  const execResult = await tool.execute("call_1", { command: "echo 'tool ok'" }, undefined, undefined, ctx as any);
   assert.ok(execResult.content[0].type === "text");
   assert.ok(execResult.content[0].text.includes("tool ok"));
 
   manager.dispose();
 });
 
-test("listTasks scopes tasks to their owning session; session-less tasks belong only to the host", async () => {
+test("listTasks scopes tasks to their owning session", async () => {
   const manager = new BackgroundProcessManager({ autoBgTimeoutMs: 100, hostSessionId: "host-app" });
   const r1 = await manager.executeCommand("sleep 10", { sessionId: "host-app" });
   const r2 = await manager.executeCommand("sleep 10", { sessionId: "spawned-pi-id" });
-  const r3 = await manager.executeCommand("sleep 10"); // no sessionId (legacy ctx)
+  const r3 = await manager.executeCommand("sleep 10", { sessionId: "host-app" });
 
-  assert.equal(manager.listTasks("host-app").length, 2, "host sees its own + session-less tasks");
+  assert.equal(manager.listTasks("host-app").length, 2, "host sees its own tasks");
   assert.equal(manager.listTasks("spawned-pi-id").length, 1, "spawned session sees only its own task");
   assert.equal(manager.listTasks("spawned-pi-id")[0]!.id, r2.task!.id);
   assert.equal(manager.listTasks("someone-else").length, 0, "foreign sessions see nothing");
 
   assert.equal(manager.isOwned(r1.task!, "spawned-pi-id"), false, "spawned session cannot touch a host task");
   assert.equal(manager.isOwned(r2.task!, "host-app"), false, "host cannot touch a spawned task via isOwned");
-  assert.equal(manager.isOwned(r3.task!, "host-app"), true, "session-less task belongs to the host");
-  assert.equal(manager.isOwned(r3.task!, "spawned-pi-id"), false, "session-less task is not everyone's");
+  assert.equal(manager.isOwned(r3.task!, "host-app"), true, "the host's own task is its own");
+  assert.equal(manager.isOwned(r3.task!, "spawned-pi-id"), false, "and is not another session's");
 
   manager.dispose();
 });
@@ -147,22 +151,16 @@ test("isHostOwnedTask: only the host's own tasks pass; foreign and unknown are r
   const manager = new BackgroundProcessManager({ autoBgTimeoutMs: 100, hostSessionId: "host-app" });
   const rHost = await manager.executeCommand("sleep 10", { sessionId: "host-app" });
   const rForeign = await manager.executeCommand("sleep 10", { sessionId: "spawned-pi-id" });
-  const rLegacy = await manager.executeCommand("sleep 10"); // session-less legacy
-
   assert.equal(manager.isHostOwnedTask(rHost.task!.id), true, "host-owned task passes");
   assert.equal(manager.isHostOwnedTask(rForeign.task!.id), false, "foreign task refused");
   assert.equal(manager.isHostOwnedTask("bg_nonexistent"), false, "unknown task refused");
-  // The host stamps EVERY task it starts, so a task with no id is not the
-  // host's by assumption — that assumption leaked other projects' completions
-  // into the host transcript (bg_4b7a536e).
-  assert.equal(
-    manager.isHostOwnedTask(rLegacy.task!.id),
-    false,
-    "a session-less task is not assumed to be the host's",
+
+  // An unowned task is now UNCONSTRUCTIBLE, which is the point: the leak was a
+  // task created with no id that every routing decision read as the host's.
+  await assert.rejects(
+    async () => await manager.executeCommand("sleep 1", { sessionId: "" }),
+    /no owning session id/,
   );
-  // With evidence that it ran in the host's own directory, it is.
-  manager.resolveOrphan = () => ({ kind: "host" });
-  assert.equal(manager.isHostOwnedTask(rLegacy.task!.id), true);
 
   manager.dispose();
 });
@@ -173,8 +171,8 @@ test("a SILENT background task still has the log file its receipt points at", as
   // receipt and the completion notification both named that path. The agent
   // that trusted it wasted a turn on "No such file or directory".
   const dir = makeTempDir("bg-silent-");
-  const manager = new BackgroundProcessManager({ autoBgTimeoutMs: 50 });
-  const task = manager.startTask("sleep 0.3", { cwd: dir });
+  const manager = new BackgroundProcessManager({ autoBgTimeoutMs: 50, hostSessionId: "host-app" });
+  const task = manager.startTask("sleep 0.3", { sessionId: "host-app", cwd: dir });
 
   assert.ok(existsSync(task.logPath), `receipt names ${task.logPath}, so it must exist`);
   const logs = manager.getTaskLogs(task);

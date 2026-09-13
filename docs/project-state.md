@@ -61,7 +61,11 @@ closing the socket made the app reconnect-loop and never receive the transcript.
 ### S10 — Context and compaction controls
 
 The client displays model/context usage and exposes configured automatic compaction plus visible
-manual `/compact` and `/clear` operations. Gap: provider and reconnect behavior remains incomplete.
+manual `/compact` and `/clear` operations. The threshold the user sets is converted once into pi's
+own `compaction.reserveTokens` for the active model's window and applied to the trigger that
+actually compacts — previously it was stored only in pinest's config while pi compacted at a
+provisioned 400k reserve, so a 300k setting behaved like 400k and re-provisioning reset it.
+Gap: provider and reconnect behavior remains incomplete.
 
 ### S11 — Authenticated internet connection
 

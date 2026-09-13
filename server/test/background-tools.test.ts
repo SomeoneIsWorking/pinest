@@ -4,8 +4,12 @@ import { BackgroundProcessManager } from "../src/bash-tool.ts";
 import { createBackgroundTools, handleJobCommand } from "../src/background-tools.ts";
 import type { ServerMessage } from "../src/protocol.ts";
 
+/** The execution context pi passes to every tool call — the only thing that
+ * knows which session is calling. */
+const ctx = { sessionManager: { getSessionId: () => "host-app" } } as any;
+
 test("createBackgroundTools: provides bg_run, bg_status, bg_logs, bg_kill and aliases", () => {
-  const manager = new BackgroundProcessManager();
+  const manager = new BackgroundProcessManager({ hostSessionId: "host-app" });
   const tools = createBackgroundTools(manager);
   const names = tools.map((t) => t.name);
 
@@ -22,14 +26,14 @@ test("createBackgroundTools: provides bg_run, bg_status, bg_logs, bg_kill and al
 });
 
 test("bg_run: launches a background command and returns receipt", async () => {
-  const manager = new BackgroundProcessManager();
+  const manager = new BackgroundProcessManager({ hostSessionId: "host-app" });
   const tools = createBackgroundTools(manager);
   const bgRun = tools.find((t) => t.name === "bg_run")!;
 
   const result = await bgRun.execute("call_1", {
     command: "echo 'hello from bg'",
     name: "test echo",
-  });
+  }, undefined, undefined, ctx);
 
   assert.ok(result.content[0].text.includes("Started background task: test echo"));
   assert.ok(result.details?.task?.id, "has task ID");
@@ -39,44 +43,47 @@ test("bg_run: launches a background command and returns receipt", async () => {
   await new Promise((r) => setTimeout(r, 100));
 
   const statusTool = tools.find((t) => t.name === "bg_status")!;
-  const statusRes = await statusTool.execute("call_2", { taskId });
+  const statusRes = await statusTool.execute("call_2", { taskId }, undefined, undefined, ctx);
   assert.ok(statusRes.content[0].text.includes("completed"));
 
   const logsTool = tools.find((t) => t.name === "bg_logs")!;
-  const logsRes = await logsTool.execute("call_3", { taskId });
+  const logsRes = await logsTool.execute("call_3", { taskId }, undefined, undefined, ctx);
   assert.ok(logsRes.content[0].text.includes("hello from bg"));
 
   manager.dispose();
 });
 
 test("bg_kill: terminates a running task", async () => {
-  const manager = new BackgroundProcessManager();
+  const manager = new BackgroundProcessManager({ hostSessionId: "host-app" });
   const tools = createBackgroundTools(manager);
   const bgRun = tools.find((t) => t.name === "bg_run")!;
 
   const result = await bgRun.execute("call_1", {
     command: "sleep 60",
     name: "long sleep",
-  });
+  }, undefined, undefined, ctx);
   const taskId = result.details.task.id;
 
   const killTool = tools.find((t) => t.name === "bg_kill")!;
-  const killRes = await killTool.execute("call_2", { taskId });
+  const killRes = await killTool.execute("call_2", { taskId }, undefined, undefined, ctx);
   assert.ok(killRes.content[0].text.includes("Stopped background task"));
 
   const statusTool = tools.find((t) => t.name === "bg_status")!;
-  const statusRes = await statusTool.execute("call_3", { taskId });
+  const statusRes = await statusTool.execute("call_3", { taskId }, undefined, undefined, ctx);
   assert.ok(statusRes.content[0].text.includes("cancelled"));
 
   manager.dispose();
 });
 
 test("handleJobCommand: handles jobs_list, job_logs, and job_kill", async () => {
-  const manager = new BackgroundProcessManager();
+  const manager = new BackgroundProcessManager({ hostSessionId: "host-app" });
   const messages: ServerMessage[] = [];
   const broadcast = (msg: ServerMessage) => { messages.push(msg); };
 
-  const task = manager.startTask("echo 'handled via job command'", { name: "test cmd" });
+  const task = manager.startTask("echo 'handled via job command'", {
+    sessionId: "host-app",
+    name: "test cmd",
+  });
   await new Promise((r) => setTimeout(r, 100));
 
   // 1. jobs_list
@@ -97,7 +104,7 @@ test("handleJobCommand: handles jobs_list, job_logs, and job_kill", async () => 
   }
 
   // 3. job_kill
-  const sleepTask = manager.startTask("sleep 60");
+  const sleepTask = manager.startTask("sleep 60", { sessionId: "host-app" });
   handleJobCommand({ type: "job_kill", jobId: sleepTask.id }, manager, broadcast);
   assert.equal(messages.length, 3);
   assert.equal(messages[2].type, "notice");

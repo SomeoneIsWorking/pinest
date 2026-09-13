@@ -15,8 +15,23 @@ test("reserveTokensFor: 1M window compacts at ~400k", () => {
   assert.ok(GLM_CONTEXT_WINDOW - reserve === DEFAULT_COMPACT_AT_TOKENS);
 });
 
-test("reserveTokensFor: smaller windows clamp at 0 instead of compacting always", () => {
-  assert.equal(reserveTokensFor(262_144), 0);
+test("reserveTokensFor: the configured threshold is what pi is told", () => {
+  // One conversion, used by provisioning AND by /autocompact: the value the
+  // user sets must be the value that compacts. A hardcoded default here is how
+  // "300k" kept behaving like 400k.
+  assert.equal(reserveTokensFor(1_000_000, 300_000), 700_000);
+  assert.equal(reserveTokensFor(262_144, 200_000), 62_144);
+});
+
+test("reserveTokensFor: a threshold that cannot fit the window is refused", () => {
+  // Silently reserving 0 meant "compact only at the window limit" — a setting
+  // the user never chose, reported as if it had been applied.
+  assert.throws(
+    () => reserveTokensFor(262_144, 400_000),
+    /not below the 262144-token window/,
+  );
+  assert.throws(() => reserveTokensFor(1_000_000, 0), /invalid compactAtTokens/);
+  assert.throws(() => reserveTokensFor(1_000_000, 1_000_000), /not below/);
 });
 
 test("reserveTokensFor: invalid windows throw", () => {
