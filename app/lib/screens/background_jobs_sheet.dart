@@ -154,7 +154,7 @@ class _JobsListSheetState extends State<_JobsListSheet> {
                         widget.svc.killJob(job.id, sessionId: widget.sessionId);
                         setState(() {});
                       },
-                      onViewLogs: () => _showJobLogsDialog(context, widget.svc, job),
+                      onViewLogs: () => _showJobLogsDialog(context, widget.svc, job, widget.sessionId),
                     );
                   },
                 ),
@@ -261,18 +261,24 @@ class _JobTile extends StatelessWidget {
   }
 }
 
-void _showJobLogsDialog(BuildContext context, AgentService svc, BackgroundJob job) {
+void _showJobLogsDialog(
+  BuildContext context,
+  AgentService svc,
+  BackgroundJob job,
+  String? sessionId,
+) {
   showDialog(
     context: context,
-    builder: (ctx) => _JobLogsDialog(svc: svc, job: job),
+    builder: (ctx) => _JobLogsDialog(svc: svc, job: job, sessionId: sessionId),
   );
 }
 
 class _JobLogsDialog extends StatefulWidget {
   final AgentService svc;
   final BackgroundJob job;
+  final String? sessionId;
 
-  const _JobLogsDialog({required this.svc, required this.job});
+  const _JobLogsDialog({required this.svc, required this.job, this.sessionId});
 
   @override
   State<_JobLogsDialog> createState() => _JobLogsDialogState();
