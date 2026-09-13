@@ -18,7 +18,12 @@ import { hostname, homedir } from "node:os";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { extractUserText, extractText } from "./logic.ts";
-import { HostPendingQueue } from "./pending-queue.ts";
+import {
+  HostPendingQueue,
+  clearSessionQueue,
+  piQueueSession,
+  syncSessionQueue,
+} from "./pending-queue.ts";
 import { createMessageSubmitter, type MessageSubmitter } from "./submit.ts";
 import { createFirebase } from "./auth.ts";
 import type { FirebaseAuth } from "./auth.ts";
@@ -749,32 +754,27 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
       break;
     }
     case "queue_clear":
-      try {
-        const anySession = (_ctx as any)?.session ?? (_ctx as any)?._session ?? (_pi as any)?.session;
-        anySession?.clearQueue?.();
-      } catch { /* getter-absent session */ }
+      clearSessionQueue(piQueueSession(_ctx, _pi));
       _pending.clear();
       _publisher.upsert(_sessionId, HostPendingQueue.emptySnapshot());
       break;
-    case "queue_delete":
-      try {
-        const anySession = (_ctx as any)?.session ?? (_ctx as any)?._session ?? (_pi as any)?.session;
-        if (typeof anySession?.clearQueue === "function") {
-          const { steering, followUp } = anySession.clearQueue();
-          const target = cmd.text;
-          const remainingSteer = (steering ?? []).filter((t: string) => t !== target);
-          const remainingFollow = (followUp ?? []).filter((t: string) => t !== target);
-          for (const t of remainingSteer) {
-            anySession.prompt(t, { streamingBehavior: "steer", source: "extension" });
-          }
-          for (const t of remainingFollow) {
-            anySession.prompt(t, { streamingBehavior: "followUp", source: "extension" });
-          }
-        }
-      } catch { /* getter-absent session */ }
-      _pending.delete(cmd.text);
+    case "queue_delete": {
+      // Delete ONE entry by its position in our own ordered queue, then make pi
+      // hold exactly that queue. The drained texts are not the source of truth
+      // for what remains: rebuilding from them lost queue order and the steering
+      // flags, and matching by text removed every duplicate of the message.
+      if (!_pending.deleteAt(cmd.index)) {
+        broadcast({
+          type: "error",
+          sessionId: _sessionId,
+          message: "no queued message at that position",
+        });
+        break;
+      }
+      syncSessionQueue(piQueueSession(_ctx, _pi), _pending.entries());
       _publisher.upsert(_sessionId, _pending.snapshot());
       break;
+    }
     case "session_tree_get": {
       try {
         const sm = (_ctx as any)?.sessionManager ?? (_pi as any)?.sessionManager;

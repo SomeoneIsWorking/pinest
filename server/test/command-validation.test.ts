@@ -38,7 +38,7 @@ test("every ClientCommand discriminant has a validated route shape", () => {
     { type: "list_models", sessionId: "child-1" },
     { type: "get_history", sessionId: "child-1", limit: 50, cursor: 0 },
     { type: "queue_clear", sessionId: "child-1" },
-    { type: "queue_delete", sessionId: "child-1", text: "cancel this steer" },
+    { type: "queue_delete", sessionId: "child-1", index: 0 },
     { type: "session_tree_get", sessionId: "child-1", id: "tree-1" },
     { type: "session_tree_navigate", sessionId: "child-1", entryId: "entry-1", summarize: false, id: "tree-2" },
     { type: "session_rewind", sessionId: "child-1", entryId: "entry-1", id: "rewind-1" },
