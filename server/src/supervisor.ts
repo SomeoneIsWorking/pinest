@@ -826,7 +826,7 @@ export class Supervisor {
         // The assistant stopped talking to run a tool: PROMOTE the streamed
         // text into a finished segment so it stays on screen while the tool
         // runs (it used to vanish, and reappeared only when text resumed).
-        const promoted = s.segmenter.onToolStart();
+        const promoted = s.segmenter.onToolStart(event.toolCallId);
         if (promoted) {
           this.callbacks.broadcast({ type: "stream", sessionId: id, ...promoted, status: "working" });
         }

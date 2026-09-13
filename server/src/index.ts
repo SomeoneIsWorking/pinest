@@ -1001,7 +1001,7 @@ function bridge(pi: ExtensionAPI): void {
   pi.on("tool_execution_start", (event: any) => {
     // Assistant stopped talking to run a tool: promote the streamed text into
     // a finished segment so it stays visible while the tool runs.
-    const promoted = segmenter.onToolStart();
+    const promoted = segmenter.onToolStart(event.toolCallId);
     if (promoted) broadcast({ type: "stream", sessionId: _sessionId, ...promoted, status: "working" });
     broadcast({ type: "tool", sessionId: _sessionId, tool: {
       callId: event.toolCallId, name: event.toolName || "?", args: event.args, running: true, timestamp: Date.now(),

@@ -29,9 +29,8 @@ function parkedSession(segmenter: unknown): LiveSession {
 /** What the previous build's `captureState()` handed over: data only. */
 const carriedState: StreamSegmenterState = {
   text: "half a sentence",
-  segments: [{ text: "Streamed ", atTool: 0 }],
+  segments: [{ text: "Streamed ", afterToolId: "call-a" }],
   thinking: "why",
-  toolCount: 1,
 };
 
 test("adoption rebuilds a foreign segmenter instead of carrying the old instance", () => {
@@ -47,19 +46,19 @@ test("adoption rebuilds a foreign segmenter instead of carrying the old instance
   assert.equal(session.segmenter.captureState().thinking, "whyreasoning", "carried thinking continues");
 });
 
-test("the streamed text survives as DATA, and the tool count keeps interleaving right", () => {
+test("the streamed text and its tool anchor survive as DATA", () => {
   const session = parkedSession({ onTextDelta: () => ({ text: "", segments: [] }) });
 
   normaliseAdopted("s2", session, carriedState);
 
   assert.equal(session.segmenter.captureState().thinking, "why");
-  assert.deepEqual(session.segmenter.captureState().segments, [{ text: "Streamed ", atTool: 0 }]);
-  // toolCount survives, so a later segment still names the tool it preceded,
+  assert.deepEqual(session.segmenter.captureState().segments, [{ text: "Streamed ", afterToolId: "call-a" }]);
+  // The anchor survives, so a later segment still names the tool it preceded,
   // and the text carried across the reload keeps accumulating.
   session.segmenter.onTextDelta("after the tool");
-  assert.deepEqual(session.segmenter.onToolStart()?.segments, [
-    { text: "Streamed ", atTool: 0 },
-    { text: "half a sentenceafter the tool", atTool: 1 },
+  assert.deepEqual(session.segmenter.onToolStart('call-b')?.segments, [
+    { text: "Streamed ", afterToolId: "call-a" },
+    { text: "half a sentenceafter the tool", afterToolId: "call-b" },
   ]);
 });
 
@@ -70,7 +69,7 @@ test("a session parked by a build that could not capture state starts clean", ()
 
   assert.ok(session.segmenter instanceof StreamSegmenter);
   assert.ok(missing.includes("segmenter"));
-  assert.deepEqual(session.segmenter.captureState(), { text: "", segments: [], thinking: "", toolCount: 0 });
+  assert.deepEqual(session.segmenter.captureState(), { text: "", segments: [], thinking: "" });
 });
 
 test("an instance that already belongs to this build is kept, so a live run keeps streaming", () => {
