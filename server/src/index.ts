@@ -1,6 +1,7 @@
 import type { HttpHistoryRunner } from "./http-api.ts";
-import { startP2PHost } from "./p2p.ts";
-import { bridgeToLoopback } from "./p2p-bridge.ts";
+import { offerDirectTransport } from "./direct-transport.ts";
+import { createSessionLifecycle } from "./session-lifecycle.ts";
+import { listModels as queryModels, sessionHistory as querySessionHistory } from "./pi-context-queries.ts";
 import { createP2PSignaling } from "./p2p-signaling.ts";
 import debug from "./log.ts";
 /**
@@ -34,7 +35,7 @@ import type { FirebaseAuth } from "./auth.ts";
 import { WSServer } from "./wsserver.ts";
 import { Supervisor } from "./supervisor.ts";
 import { SessionRegistry } from "./registry.ts";
-import { mapModel, deriveSessionName, historyWithEmbeds, embedImages, extractSessionMessages, extractToolResult, listPaths, resolvePathInput, pageHistory, lookupImage } from "./logic.ts";
+import { deriveSessionName, extractToolResult, listPaths, resolvePathInput, pageHistory, lookupImage, embedImages } from "./logic.ts";
 import { createDefaultBackgroundManager, registerBashIntegration, toJobSummary, type BackgroundProcessManager } from "./bash-tool.ts";
 import { registerBackgroundTools, handleJobCommand } from "./background-tools.ts";
 import { StreamSegmenter } from "./stream.ts";
@@ -410,7 +411,7 @@ async function bootstrap(): Promise<void> {
         renderFooter();
       });
   };
-  await restorePersistedSessions();
+  await sessions.restorePersisted();
   // Do not admit commands while durable sessions are still being restored:
   // an early session_resume could otherwise open the same pi transcript twice.
   await _ws.start();
@@ -548,6 +549,23 @@ async function bootstrap(): Promise<void> {
  * Opt-in through config `p2p`. Nothing about it replaces the tunnel: the app
  * decides which transport to use, and a punch that fails is a failure to
  * report, not a silent switch. */
+/** Session lifecycle operations, bound to the host's live owners. The owner
+ * accessors are read at call time: the supervisor, registry, and selected
+ * session all appear (and change) after this is constructed. */
+const sessions = createSessionLifecycle({
+  supervisor: () => _supervisor,
+  registry: () => _registry,
+  publisher: () => _publisher,
+  broadcast,
+  broadcastState,
+  contextWindow: () => (hostContext.contextUsage() as { contextWindow?: number } | undefined)?.contextWindow,
+  contextUsage: () => hostContext.contextUsage(),
+  onSelected: (id) => { _activeSessionId = id; },
+  hostSessionId: _sessionId,
+});
+
+/** Direct (no-tunnel) transport wiring. Off unless config says otherwise, and
+ * only once the control port is real: the bridge dials it. */
 async function startDirectTransport(): Promise<void> {
   if (loadConfig().p2p !== true) return;
   const port = _ws?.controlPort;
@@ -556,29 +574,24 @@ async function startDirectTransport(): Promise<void> {
     return;
   }
   try {
-    const signaling = createP2PSignaling({
-      writeOffer: async (sdp, ts) => {
-        if (!_fb || !_ownerUid) throw new Error("no owner record to publish an offer to");
-        await _fb.patchUserDoc(_ownerUid, { p2pOffer: sdp, p2pOfferTs: ts });
-      },
-      readAnswer: async () => {
-        if (!_fb || !_ownerUid) return null;
-        const doc = await _fb.readUserDoc(_ownerUid);
-        const sdp = doc?.p2pAnswer;
-        const ts = doc?.p2pAnswerTs;
-        if (typeof sdp !== "string" || typeof ts !== "number") return null;
-        return { sdp, ts };
-      },
+    await offerDirectTransport({
+      port,
+      signaling: createP2PSignaling({
+        writeOffer: async (sdp, ts) => {
+          if (!_fb || !_ownerUid) throw new Error("no owner record to publish an offer to");
+          await _fb.patchUserDoc(_ownerUid, { p2pOffer: sdp, p2pOfferTs: ts });
+        },
+        readAnswer: async () => {
+          if (!_fb || !_ownerUid) return null;
+          const doc = await _fb.readUserDoc(_ownerUid);
+          const sdp = doc?.p2pAnswer;
+          const ts = doc?.p2pAnswerTs;
+          if (typeof sdp !== "string" || typeof ts !== "number") return null;
+          return { sdp, ts };
+        },
+      }),
+      log: (message) => debug(`[remote-code] p2p: ${message}`),
     });
-    const peer = startP2PHost({ signaling, port });
-    void peer.channel.then((channel) => {
-      debug("[remote-code] p2p: channel open, bridging to the loopback server");
-      bridgeToLoopback(channel, port);
-    }).catch((error: Error) => {
-      debug(`[remote-code] p2p: no channel: ${error.message}`);
-    });
-    await peer.offerSdp;
-    debug("[remote-code] p2p: offer published");
   } catch (error) {
     debug(`[remote-code] p2p: direct transport unavailable: ${(error as Error).message}`);
   }
@@ -602,10 +615,12 @@ async function handleCommand(input: unknown): Promise<void> {
           throw new Error(`session ${cmd.sessionId} is no longer running`);
         }
       },
-      spawn: spawnSession, despawn: despawnSession,
+      spawn: (cmd) => sessions.spawn(cmd), despawn: (cmd) => sessions.despawn(cmd),
       sessionList: () => broadcast({ type: "session_list", sessions: mergedRegistryRows() }),
-      resume: resumeSession, rename: renameSession, select: selectSession, delete: deleteSession,
-      pathCheck: checkPath, folderCreate: createFolder, compactThreshold: setCompactThreshold,
+      resume: (cmd) => sessions.resume(cmd), rename: (cmd) => sessions.rename(cmd),
+      select: (cmd) => sessions.select(cmd), delete: (cmd) => sessions.remove(cmd),
+      pathCheck: checkPath, folderCreate: createFolder,
+      compactThreshold: (cmd) => sessions.setCompactThreshold(cmd),
       imageBudget: (cmd) => uiNotify(setImageBytesLimit(cmd.maxBytes)),
       jobsList: (cmd) => handleJobCommand(cmd, _supervisor?.bgManager ?? _bgManager, broadcast),
       jobKill: (cmd) => handleJobCommand(cmd, _supervisor?.bgManager ?? _bgManager, broadcast),
@@ -647,142 +662,6 @@ async function handleCommand(input: unknown): Promise<void> {
       ...(sessionId ? { sessionId } : {}),
     });
   }
-}
-
-async function spawnSession(cmd: Extract<ClientCommand, { type: "session_spawn" }>): Promise<void> {
-  await _supervisor!.spawn({
-    ...cmd,
-    cwd: cmd.cwd ? resolvePathInput(cmd.cwd) : undefined,
-  });
-  broadcastState();
-}
-
-async function despawnSession(cmd: Extract<ClientCommand, { type: "session_despawn" }>): Promise<void> {
-  if (_supervisor?.sessions.has(cmd.sessionId)) {
-    await _supervisor.despawn(cmd.sessionId);
-  } else {
-    // Not live (e.g. after host restart) — just close the registry row.
-    if (!_registry?.get(cmd.sessionId)) throw new Error(`unknown session ${cmd.sessionId}`);
-    _registry?.close(cmd.sessionId);
-    _publisher.remove(cmd.sessionId);
-  }
-}
-
-async function resumeSession(cmd: Extract<ClientCommand, { type: "session_resume" }>): Promise<void> {
-  if (!_registry) throw new Error("session registry unavailable");
-  const row = _registry.get(cmd.sessionId);
-  if (!row) throw new Error(`unknown session ${cmd.sessionId}`);
-  if (!row.piSessionPath) throw new Error(`session ${row.name ?? cmd.sessionId} has no pi session file to resume`);
-  if (_supervisor?.sessions.has(cmd.sessionId)) throw new Error("session is already running");
-  await _supervisor!.resume({
-    sessionId: cmd.sessionId,
-    piSessionPath: row.piSessionPath,
-    cwd: row.cwd,
-    name: row.name,
-  });
-  broadcastState();
-}
-
-/** Restore sessions that were alive before this host process restarted. */
-async function restorePersistedSessions(): Promise<void> {
-  const rows = _registry?.all().filter((row) =>
-    !row.isHost && row.status !== "closed" && !!row.piSessionPath && !!row.cwd) ?? [];
-  let restored = 0;
-  let nudged = 0;
-  for (const row of rows) {
-    // Adopted across a reload: already live in THIS supervisor. Re-opening the
-    // same pi session file would put two agents on one transcript (I-020).
-    if (_supervisor!.sessions.has(row.id)) {
-      debug(`[remote-code] restore: ${row.id} already live (adopted) — not re-opened`);
-      continue;
-    }
-    // "running" means the previous host went away mid-run: the work stopped
-    // where it stopped, so the restored session gets a nudge to continue.
-    const wasRunning = row.status === "running";
-    try {
-      await _supervisor!.resume({
-        sessionId: row.id,
-        piSessionPath: row.piSessionPath!,
-        cwd: row.cwd!,
-        name: row.name,
-      });
-      restored += 1;
-      if (wasRunning) {
-        await _supervisor!.handleSessionCommand({
-          type: "user_message",
-          sessionId: row.id,
-          text: RESUME_NUDGE,
-          deliverAs: "followUp",
-        });
-        nudged += 1;
-      }
-    } catch (e) {
-      debug(`[remote-code] could not restore session ${row.id}:`, (e as Error).message);
-      broadcast({
-        type: "error",
-        sessionId: row.id,
-        message: `could not restore ${row.name ?? row.id}: ${(e as Error).message}`,
-      });
-    }
-  }
-  debug(`[remote-code] restore: ${rows.length} candidate row(s) → ${restored} resumed, ${nudged} nudged to continue`);
-  if (rows.length) broadcastState();
-}
-
-/** Sent to a session that was mid-run when its host went away (reload that
- * could not be adopted, or a host restart). It must be explicit that the
- * interruption was environmental, not a user change of mind. */
-const RESUME_NUDGE =
-  "[pinest] Your host process reloaded/restarted while you were working, so your run was cut off. " +
-  "Re-check the current state of the files you were editing, then continue from where you left off.";
-
-async function renameSession(cmd: Extract<ClientCommand, { type: "session_rename" }>): Promise<void> {
-  if (_supervisor?.sessions.has(cmd.sessionId)) {
-    await _supervisor.rename(cmd.sessionId, cmd.name);
-  } else {
-    if (!_registry?.get(cmd.sessionId)) throw new Error(`unknown session ${cmd.sessionId}`);
-    _registry.upsert({ id: cmd.sessionId, name: cmd.name });
-    _publisher.upsert(cmd.sessionId, { name: cmd.name });
-  }
-  broadcastState();
-}
-
-function selectSession(cmd: Extract<ClientCommand, { type: "session_select" }>): void {
-  if (!_publisher.has(cmd.sessionId) && !_registry?.get(cmd.sessionId)) {
-    throw new Error(`unknown session ${cmd.sessionId}`);
-  }
-  _activeSessionId = cmd.sessionId;
-  saveConfig({ activeSessionId: cmd.sessionId });
-  broadcastState();
-}
-
-async function setCompactThreshold(cmd: Extract<ClientCommand, { type: "set_compact_threshold" }>): Promise<void> {
-  debug(`[remote-code] auto-compact threshold set to ${cmd.thresholdTokens} tokens`);
-  applyCompactThresholdCommand(
-    {
-      saveConfig,
-      agentDir: getAgentDir(),
-      contextWindow: () => (hostContext.contextUsage() as { contextWindow?: number } | undefined)?.contextWindow,
-      broadcast: (message) => broadcast(message as ServerMessage),
-      refreshUsage: () => _publisher.upsert(_sessionId, { contextUsage: hostContext.contextUsage() }),
-      hostSessionId: _sessionId,
-    },
-    cmd.thresholdTokens,
-  );
-  broadcastState();
-}
-
-async function deleteSession(cmd: Extract<ClientCommand, { type: "session_delete" }>): Promise<void> {
-  if (!_registry) throw new Error("session registry unavailable");
-  if (_supervisor?.sessions.has(cmd.sessionId)) {
-    await _supervisor.despawn(cmd.sessionId); // also closes the registry row
-  } else {
-    _registry.close(cmd.sessionId);
-    _publisher.remove(cmd.sessionId);
-  }
-  const gone = _registry.remove(cmd.sessionId, { deleteHistory: !!cmd.deleteHistory });
-  broadcast({ type: "session_deleted", sessionId: cmd.sessionId, deleted: gone });
-  broadcastState();
 }
 
 async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
@@ -848,10 +727,10 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
       break;
     }
     case "list_models":
-      void listModels().then((models) => broadcast({ type: "models", sessionId: _sessionId, models }));
+      void queryModels(_ctx).then((models) => broadcast({ type: "models", sessionId: _sessionId, models }));
       break;
     case "get_history": {
-      const paged = pageHistory(await getInteractiveHistory(), { limit: cmd.limit, cursor: cmd.cursor });
+      const paged = pageHistory(await querySessionHistory(_ctx), { limit: cmd.limit, cursor: cmd.cursor });
       broadcast({ type: "history", sessionId: _sessionId, ...paged });
       break;
     }
@@ -934,25 +813,6 @@ async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
   }
 }
 
-async function listModels(): Promise<ModelInfo[]> {
-  try {
-    const reg = (_ctx as any)?.modelRegistry;
-    const runtime = reg?.runtime ?? (_ctx as any)?.session?.modelRuntime ?? (_ctx as any)?._modelRuntime;
-    if (runtime) {
-      const avail = await runtime.getAvailable?.().catch(() => undefined);
-      if (Array.isArray(avail) && avail.length > 0) {
-        return avail.map(mapModel);
-      }
-      return (runtime.getAvailableSnapshot?.() ?? []).map(mapModel);
-    }
-    if (reg) {
-      await reg.refresh?.().catch(() => undefined);
-      return (reg.getAvailable?.() ?? []).map(mapModel);
-    }
-  } catch { return []; }
-  return [];
-}
-
 function checkPath(cmd: Extract<ClientCommand, { type: "path_check" }>): void {
   const path = resolvePathInput(cmd.path);
   const isDirectory = statSyncSafe(path);
@@ -969,24 +829,12 @@ function createFolder(cmd: Extract<ClientCommand, { type: "folder_create" }>): v
   }
 }
 
-async function getInteractiveHistory() {
-  try {
-    const sm = (_ctx as any)?.sessionManager;
-    if (!sm) return [];
-    const msgs = extractSessionMessages(sm);
-    return historyWithEmbeds(msgs, embedImages);
-  } catch (e) {
-    debug("[remote-code] getHistory failed:", (e as Error).message);
-    return [];
-  }
-}
-
 const hostContext = new HostContextController({
   getContext: () => _ctx as any,
   setContext: (ctx) => { _ctx = ctx as unknown as ExtensionContext; },
   getSessionId: () => _sessionId,
   compactAtTokens: () => loadConfig().compactAtTokens,
-  getHistory: getInteractiveHistory,
+  getHistory: () => querySessionHistory(_ctx),
   clearPending: () => {
     _pending.clear();
     _publisher.upsert(_sessionId, { pendingMessages: [], pendingSteering: [] });
@@ -1073,7 +921,7 @@ function bridge(pi: ExtensionAPI): void {
       }
       // The message just became part of the session — push history so the
       // client can drop its "queued" badge for it NOW instead of at agent_end.
-      getInteractiveHistory().then((h) => broadcast({ type: "history", sessionId: _sessionId, ...pageHistory(h) }));
+      querySessionHistory(_ctx).then((h) => broadcast({ type: "history", sessionId: _sessionId, ...pageHistory(h) }));
     } else if (event?.message?.role === "assistant") {
       // A fresh assistant message: current text is gone, promoted segments
       // stay on screen for the rest of the turn.
@@ -1095,7 +943,7 @@ function bridge(pi: ExtensionAPI): void {
     }
     if (event?.message?.role !== "user") return;
     setTimeout(() => {
-      getInteractiveHistory().then((h) =>
+      querySessionHistory(_ctx).then((h) =>
         broadcast({ type: "history", sessionId: _sessionId, ...pageHistory(h) }),
       );
     }, 100);
@@ -1152,7 +1000,7 @@ function bridge(pi: ExtensionAPI): void {
     });
     hostContext.maybeAutoCompact();
     // Send updated history so the completed message sticks
-    getInteractiveHistory().then((h) => broadcast({ type: "history", sessionId: _sessionId, ...pageHistory(h) }));
+    querySessionHistory(_ctx).then((h) => broadcast({ type: "history", sessionId: _sessionId, ...pageHistory(h) }));
   });
 
   pi.on("session_compact", (event: any) => { void hostContext.onCompacted(event); });
