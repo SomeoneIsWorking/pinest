@@ -133,6 +133,26 @@ function isValidDnsHostname(hostname: string): boolean {
   );
 }
 
+/** Feed a stream's chunks to `onLine`, carrying the partial last line forward.
+ *
+ * A tunnel prints its URL inside a banner that arrives in several writes.
+ * Splitting each chunk on newlines loses any line straddling a boundary - and
+ * that is exactly the line holding the URL. Measured on cloudflared's quick
+ * tunnel: the URL was never parsed, so no endpoint was ever published and the
+ * app could only ever report "No tunnel URL published".
+ */
+export function makeLineReader(onLine: (line: string) => void): (chunk: string) => void {
+  let pending = "";
+  return (chunk: string): void => {
+    pending += chunk;
+    const lines = pending.split("\n");
+    pending = lines.pop() ?? "";
+    for (const line of lines) {
+      onLine(line);
+    }
+  };
+}
+
 export function firstValidTunnelEndpoint(
   provider: TunnelEndpointProvider,
   output: string,
@@ -233,8 +253,10 @@ const cloudflaredProvider: TunnelProvider = {
           done(resolve)(handle);
         }
       };
-      proc.stdout!.on("data", (d: Buffer) => d.toString().split("\n").forEach(onLine));
-      proc.stderr!.on("data", (d: Buffer) => d.toString().split("\n").forEach(onLine));
+      const feedStdout = makeLineReader(onLine);
+      const feedStderr = makeLineReader(onLine);
+      proc.stdout!.on("data", (d: Buffer) => feedStdout(d.toString()));
+      proc.stderr!.on("data", (d: Buffer) => feedStderr(d.toString()));
       proc.on("exit", () => done(reject)(new Error("cloudflared exited before producing a URL") as unknown as void));
     });
   },
@@ -320,8 +342,10 @@ const ngrokProvider: TunnelProvider = {
         const endpoint = firstValidTunnelEndpoint("ngrok", line);
         if (!settled && endpoint) acceptUrl(endpoint);
       };
-      proc.stdout!.on("data", (d: Buffer) => d.toString().split("\n").forEach(onLine));
-      proc.stderr!.on("data", (d: Buffer) => d.toString().split("\n").forEach(onLine));
+      const feedStdout = makeLineReader(onLine);
+      const feedStderr = makeLineReader(onLine);
+      proc.stdout!.on("data", (d: Buffer) => feedStdout(d.toString()));
+      proc.stderr!.on("data", (d: Buffer) => feedStderr(d.toString()));
       // ngrok v3 may expose the endpoint through its local API without
       // emitting a URL in the selected log format. Poll the API as the
       // authoritative startup signal and match the forwarded local port.
