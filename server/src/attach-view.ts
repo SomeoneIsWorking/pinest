@@ -23,7 +23,6 @@
 import {
   Key,
   ScrollView,
-  Text,
   matchesKey,
   truncateToWidth,
   visibleWidth,
@@ -34,12 +33,12 @@ import type { KeybindingsManager } from "@earendil-works/pi-coding-agent";
 
 import { SessionTranscript, sourcesForSession } from "./session-transcript.ts";
 import type { TranscriptSession } from "./session-transcript.ts";
+import { frame, terminalRows } from "./tui-frame.ts";
 
 export interface AttachSessionEntry {
   /** The live agent session being viewed. */
   session: TranscriptSession & {
     subscribe: (listener: (event: any) => void) => () => void;
-    prompt?: (text: string, options?: unknown) => Promise<void>;
   };
   name: string;
   cwd: string;
@@ -77,8 +76,7 @@ class AttachView implements AttachComponent {
   private readonly transcript: SessionTranscript;
   private readonly scroll: ScrollView;
   private readonly editor: CustomEditor;
-  private readonly header: Text;
-  private readonly notice: Text;
+  private title = "";
   private readonly unsubscribe: () => void;
   private status: string;
   private feedback = "";
@@ -106,8 +104,6 @@ class AttachView implements AttachComponent {
       overscroll: "contain",
     });
 
-    this.header = new Text("", 0, 0);
-    this.notice = new Text("", 0, 0);
 
     this.editor = new CustomEditor(tui, editorTheme(opts.theme), keybindings, { paddingX: 0 });
     this.editor.onSubmit = (text: string) => this.submit(text);
@@ -150,23 +146,19 @@ class AttachView implements AttachComponent {
     this.opts.tui.requestRender();
   }
 
+  /** The frame's title: whose session this is, and what it is doing. A session
+   * view must never be mistakable for the terminal you are typing in. */
   private updateChrome(): void {
     const { entry, theme } = this.opts;
-    // Every colour goes through the guarded helpers: a theme that does not know
-    // a colour name must cost a colour, never the view.
+    // Every colour goes through the guarded helpers: a theme that does not know a
+    // colour name must cost a colour, never the view.
     const model = entry.modelName ?? entry.model ?? "";
     const dot = this.status === "working"
       ? safeFg(theme, "warning", "● working")
       : safeFg(theme, "muted", "○ idle");
-    const title = safeBold(theme, safeFg(theme, "accent", `● session: ${entry.name}`));
-    const where = safeFg(theme, "muted", truncate(entry.cwd, 40));
-    this.header.setText(
-      `${title}  ${dot}${model ? `  ${safeFg(theme, "muted", model)}` : ""}\n`
-      + `${where}\n`
-      + `${rawKeyHint("←", "sessions")}  ${rawKeyHint("esc", "detach")}  `
-      + `${rawKeyHint("pgup/pgdn", "scroll")}  ${rawKeyHint("enter", "send")}`,
-    );
-    this.notice.setText(this.feedback ? safeFg(theme, "warning", this.feedback) : "");
+    this.title = safeBold(theme, safeFg(theme, "accent", `● session: ${entry.name}`))
+      + `  ${dot}`
+      + (model ? `  ${safeFg(theme, "muted", model)}` : "");
   }
 
   private submit(text: string): void {
@@ -198,6 +190,11 @@ class AttachView implements AttachComponent {
   }
 
   render(width: number): string[] {
+    const height = terminalRows(this.opts.tui);
+    const chrome = 2 /* the frame's borders */ + 1 /* the directory line */ + 1 /* spacer */
+      + this.editor.render(width - 6).length + 1 /* notice */;
+    const viewport = Math.max(3, height - chrome);
+    const inner = width - 4;
     // An overlay is rendered by the host as one component at one width, and the
     // host then SLICES the result to the overlay's height. The layout engine
     // that normally gives a ScrollView its viewport does not run for an overlay
@@ -206,47 +203,55 @@ class AttachView implements AttachComponent {
     // impossible). So the window is cut here, with Pi's own ScrollView owning
     // the scroll position, the clamping and the follow-the-end behaviour, and a
     // one-column bar drawn beside it.
-    const height = this.viewportHeight(width);
-    const contentWidth = Math.max(10, this.scroll.getContentWidth(width) - 1);
+    // Two columns are reserved: one for the space before the scrollbar and one
+    // for the bar itself. Deciding the bar from the content's height would need
+    // the render that depends on it, so the columns are simply kept.
+    const contentWidth = Math.max(10, inner - 2);
     const content = this.transcript.root.render(contentWidth);
-    this.scroll.updateLayout(content.length, height, () => {
+    this.scroll.updateLayout(content.length, viewport, () => {
       this.opts.tui.requestRender();
     });
 
-    const out: string[] = [];
-    out.push(...this.header.render(width));
     const from = this.scroll.scrollTop;
-    const window = content.slice(from, from + height);
-    const bar = scrollbar(content.length, height, from);
-    for (let i = 0; i < height; i += 1) {
+    const window = content.slice(from, from + viewport);
+    const bar = scrollbar(content.length, viewport, from);
+    const body: string[] = [];
+    body.push(`  ${safeFg(this.opts.theme, "muted", this.opts.entry.cwd)}`);
+    for (let i = 0; i < viewport; i += 1) {
       const line = window[i];
       if (line === undefined) {
-        out.push(bar === null ? "" : ` ${bar[i] ?? " "}`);
+        body.push(bar === null ? "" : ` ${bar[i] ?? " "}`);
         continue;
       }
-      out.push(bar === null ? line : `${padTo(line, contentWidth)} ${bar[i] ?? " "}`);
+      body.push(bar === null ? line : `${padTo(line, contentWidth)} ${bar[i] ?? " "}`);
     }
-    out.push("");
-    out.push(...this.editor.render(width));
-    out.push(...this.notice.render(width));
-    return out;
+    body.push("");
+    // The prompt is OUTSIDE the scrolled window, so it stays put: a session you
+    // cannot type into is a session you cannot use.
+    // The editor is drawn at the same width as the transcript body, so its
+    // border lines up with the scrollbar column instead of wandering.
+    body.push(...this.editor.render(contentWidth));
+    body.push(this.feedback ? safeFg(this.opts.theme, "warning", `  ${this.feedback}`) : "");
+
+    const hint = [
+      rawKeyHint("enter", "send"),
+      rawKeyHint("pgup/pgdn", "scroll"),
+      rawKeyHint("←", "sessions"),
+      rawKeyHint("esc", "detach"),
+    ].join(safeFg(this.opts.theme, "muted", "  ·  "));
+    return frame({ title: this.title, hint, body, width, height }, (name, text) =>
+      safeFg(this.opts.theme, name, text));
   }
 
-  /** Rows the transcript may use: the terminal's height (or the overlay's
-   * share of it), less the fixed chrome the viewer must always see - the
-   * header, the prompt and the notice line. */
-  private viewportHeight(width: number): number {
-    const rows = this.opts.tui?.terminal?.rows ?? 24;
-    const overlay = Math.max(8, Math.floor(rows * 0.92));
-    const editorLines = this.editor.render(width).length;
-    const chrome = this.header.render(width).length + 1 /* spacer */ + editorLines + 1 /* notice */ + 1;
-    return Math.max(3, overlay - chrome);
+  /** How many rows the transcript window gets, for the page keys. */
+  private viewportRows(width: number): number {
+    const height = terminalRows(this.opts.tui);
+    const chrome = 2 + 1 + 1 + this.editor.render(width - 6).length + 1;
+    return Math.max(3, height - chrome);
   }
 
   invalidate(): void {
     this.transcript.root.invalidate();
-    this.header.invalidate();
-    this.notice.invalidate();
     this.editor.invalidate();
   }
 
@@ -279,13 +284,18 @@ class AttachView implements AttachComponent {
     this.opts.tui.requestRender();
   }
 
-  /** Scroll by one key press, or null when the key is not a scroll key. */
+  /** Scroll by one key press, or null when the key is not a scroll key.
+   *
+   * A page is a viewport with a two-line overlap, which is how Pi's own viewport
+   * scrolls: without the overlap the first line of the next page is the last line
+   * you just read. */
   private scrollBy(data: string): number | null {
+    const page = Math.max(1, this.viewportRows(this.opts.tui?.terminal?.columns ?? 100) - 2);
     if (matchesKey(data, Key.pageUp)) {
-      return this.scroll.scrollBy(-10);
+      return this.scroll.scrollBy(-page);
     }
     if (matchesKey(data, Key.pageDown)) {
-      return this.scroll.scrollBy(10);
+      return this.scroll.scrollBy(page);
     }
     if (matchesKey(data, Key.home)) {
       this.scroll.scrollToStart();
@@ -295,11 +305,12 @@ class AttachView implements AttachComponent {
       this.scroll.scrollToEnd();
       return 0;
     }
+    // Half a page, for reading a long tool output.
     if (matchesKey(data, Key.ctrl("u"))) {
-      return this.scroll.scrollBy(-10);
+      return this.scroll.scrollBy(-Math.max(1, Math.floor(page / 2)));
     }
     if (matchesKey(data, Key.ctrl("d"))) {
-      return this.scroll.scrollBy(10);
+      return this.scroll.scrollBy(Math.max(1, Math.floor(page / 2)));
     }
     return null;
   }

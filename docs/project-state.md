@@ -43,19 +43,24 @@ Atomic work and findings live in `docs/issues/`.
 
 The host terminal has its own two views, on Pi's own components rather than hand-drawn text: a
 session list built on `SelectList` (sized to the terminal with its own scroll indicator,
-type-to-filter over name/id/directory/model/status, an action menu per row, and a kill that asks
-again), and an overlay that renders another session's transcript with Pi's own message components
+type-to-filter over name/id/directory/model/status, Enter to open, Ctrl-D to kill after one
+confirmation), and an overlay that renders another session's transcript with Pi's own message components
 inside a windowed `ScrollView` (PgUp/PgDn/Home/End/Ctrl-U/Ctrl-D, a scrollbar, and the newest output
 following the end), prompts it through Pi's own `CustomEditor`, and returns to the list on the left
 arrow. Sending goes through the ONE owner of a user message (`session-submit.ts`), so the TUI, the
 host session and the app cannot disagree about what "sent" means; a send that cannot be delivered is
 shown rather than swallowed.
 
-Evidence: 18 rendered-line tests for the attach view (including a transcript taller than the overlay
+Both views are one bordered panel the size of the terminal (`server/src/tui-frame.ts` owns the
+geometry: every line exactly the terminal's width, wide characters counted as the cells they occupy,
+colours as none), because an overlay is sized from the lines a component returns.
+
+Evidence: 19 rendered-line tests for the attach view (including a transcript taller than the overlay
 keeping the prompt on screen and in the newest position, scrolling, back-on-left-arrow, and the
-disposed-view contract), 17 for the list, and 2 end-to-end flow tests (list → open a chosen session →
-prompt it → left arrow back → close). Both key mechanisms were verified to FAIL when broken: dropping
-the chosen session's id, and rendering the transcript unwindowed.
+disposed-view contract), 19 for the list, 7 for the frame's geometry, and 3 end-to-end flow tests
+(list → open a chosen session → prompt it → left arrow back → close). Four mechanisms were each
+verified to FAIL when broken: dropping the chosen session's id, rendering the transcript unwindowed,
+re-inserting a menu before the open, and returning only the content's own height.
 
 Gap: only the operator can see the real terminal, so this is confirmed by rendered lines and not yet
 by a person using it in a live TUI; a real terminal is also where the wheel, the key delivery, and

@@ -13,9 +13,11 @@
  * you type into, a confirmation before killing, and a footer whose hints come
  * from Pi's own `rawKeyHint`.
  */
-import { Key, SelectList, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { Key, SelectList, matchesKey } from "@earendil-works/pi-tui";
 import type { SelectItem, SelectListTheme } from "@earendil-works/pi-tui";
 import { rawKeyHint } from "@earendil-works/pi-coding-agent";
+
+import { frame, terminalRows } from "./tui-frame.ts";
 
 export interface SessionSummary {
   id: string;
@@ -54,8 +56,8 @@ export interface SessionsViewComponent {
 
 /** How many rows of list fit in an overlay of `rows` terminal rows. */
 export function visibleRows(rows: number, total: number): number {
-  // Header (2) + filter (1) + spacer + footer (1) + the overlay's own margins.
-  const chrome = 6;
+  // The frame's two border rows, plus a row for the filter and one for a notice.
+  const chrome = 4;
   const room = Math.max(3, rows - chrome);
   return Math.max(1, Math.min(room, Math.max(total, 1)));
 }
@@ -64,7 +66,6 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
   const { onSelect, onKill, onNew, onCancel } = opts;
   const theme = opts.theme ?? {};
   const fg = (color: string, text: string): string => colorize(theme, color, text);
-  const hint = (key: string, description: string): string => rawKeyHint(key, description);
   const bold = (text: string): string => {
     if (typeof theme.bold !== "function") {
       return text;
@@ -85,13 +86,12 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
    * were swallowed as commands while the user was typing a session's name into
    * the filter ("agent-2" arrived as "aget-2" and started a session).
    */
-  let mode: "list" | "actions" | "confirm" = "list";
+  let mode: "list" | "confirm" = "list";
   let confirming: SessionSummary | null = null;
-  let acting: SessionSummary | null = null;
   /** The sessions the footer and the list are showing right now. */
   let shown = sessions;
 
-  const rows = (): number => opts.rows ?? opts.tui?.terminal?.rows ?? 24;
+  const rows = (): number => opts.rows ?? terminalRows(opts.tui);
 
   const list = (): SelectList => {
     const items: SelectItem[] = shown.map(toItem);
@@ -111,32 +111,7 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
     return haystack.includes(needle.toLowerCase());
   };
 
-  /** What can be done to the selected session. A submenu rather than a raw key:
-   * killing a session ends real work, and nothing destructive should be one
-   * keystroke away from typing a name. */
-  const actions = (target: SessionSummary | null): SelectList => {
-    const items: SelectItem[] = target?.isHost
-      ? [{ value: "cancel", label: "Close this menu", description: "This is the terminal you are typing in" }]
-      : [
-        { value: "open", label: "Open", description: "View its transcript and send it a command" },
-        { value: "kill", label: "Kill", description: "Stop its run and end the session" },
-        { value: "cancel", label: "Cancel", description: "" },
-      ];
-    return new SelectList(items, Math.max(3, items.length), selectTheme(theme));
-  };
-
-  const confirmList = (): SelectList => new SelectList(
-    [
-      { value: "yes", label: "Kill it", description: "Its run stops and its session ends" },
-      { value: "no", label: "Keep it", description: "" },
-    ],
-    4,
-    selectTheme(theme),
-  );
-
   let view = list();
-  let actionView: SelectList | null = null;
-  let confirmView: SelectList | null = null;
 
   /** Rebuild the visible list, keeping the cursor on the same session when it
    * is still shown: a filter must not silently move the selection to another
@@ -149,129 +124,74 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
     view.setSelectedIndex(index >= 0 ? index : 0);
   };
 
+  const color = (name: string, text: string): string => fg(name, text);
+
   return {
     render(width: number): string[] {
-      const lines: string[] = [];
+      const height = rows();
       const count = filter.length > 0
         ? `${shown.length} of ${sessions.length} sessions`
         : `${sessions.length} session${sessions.length === 1 ? "" : "s"}`;
-      lines.push(
-        `${bold(fg("accent", "◆ Sessions"))}  ${fg("muted", count)}`
-        + `  ${fg("muted", "· this terminal and every agent this machine runs")}`,
-      );
-      lines.push(fg("muted", "─".repeat(Math.max(10, Math.min(width - 2, 78)))));
+      const title = `${bold(fg("accent", "◆ Sessions"))}  ${fg("muted", count)}`;
+      const hint = [
+        rawKeyHint("↑/↓", "move"),
+        rawKeyHint("enter", "open"),
+        rawKeyHint("ctrl+d", "kill"),
+        rawKeyHint("ctrl+n", "new"),
+        rawKeyHint("esc", "close"),
+      ].join(color("muted", "  ·  "));
 
-      if (mode === "confirm" && confirming && confirmView) {
-        lines.push(fg("warning", `Kill "${confirming.name}"? Its run stops and its session ends.`));
-        lines.push("");
-        lines.push(...confirmView.render(width));
-        lines.push(fg("muted", "─".repeat(Math.max(10, Math.min(width - 2, 78)))));
-        lines.push(`  ${hint("enter", "choose")}  ${hint("esc", "back")}`);
-        return lines.map((line) => truncateToWidth(line, width));
-      }
+      const body: string[] = [];
 
-      if (mode === "actions" && acting && actionView) {
-        lines.push(`${bold(fg("accent", "◆"))} ${acting.name}  ${fg("muted", shortenPath(acting.cwd))}`);
-        lines.push(fg("muted", "─".repeat(Math.max(10, Math.min(width - 2, 78)))));
-        lines.push(...actionView.render(width));
-        lines.push(fg("muted", "─".repeat(Math.max(10, Math.min(width - 2, 78)))));
-        lines.push(`  ${hint("enter", "choose")}  ${hint("esc", "back")}`);
-        return lines.map((line) => truncateToWidth(line, width));
-      }
-
-      if (sessions.length === 0) {
-        lines.push("");
-        lines.push(`  ${fg("muted", "No sessions yet. Press ctrl-n to start one in this directory.")}`);
-        lines.push("");
-        lines.push(fg("muted", "─".repeat(Math.max(10, Math.min(width - 2, 78)))));
-        headers(lines, fg);
-        return lines.map((line) => truncateToWidth(line, width));
+      // Killing asks once, in the border's own voice: Enter confirms, Esc keeps.
+      if (mode === "confirm" && confirming) {
+        body.push("");
+        body.push(`  ${fg("error", `Kill "${confirming.name}"? Its run stops and its session ends.`)}`);
+        body.push(`  ${rawKeyHint("enter", "yes, kill it")}  ${rawKeyHint("esc", "no, keep it")}`);
+        return frame({ title, hint, body, width, height }, color);
       }
 
       if (filter.length > 0) {
-        lines.push(`  ${fg("accent", "/")} ${filter}${fg("accent", "▌")}  ${fg("muted", "(backspace clears)")}`);
+        body.push(`  ${fg("accent", "/")} ${filter}${fg("accent", "▌")}`);
       }
-      lines.push(...view.render(width));
 
-      lines.push(fg("muted", "─".repeat(Math.max(10, Math.min(width - 2, 78)))));
-      if (feedback) {
-        lines.push(`  ${fg("warning", feedback)}`);
+      if (sessions.length === 0) {
+        body.push("");
+        body.push(`  ${fg("muted", "No sessions yet. Press ctrl-n to start one in this directory.")}`);
+      } else {
+        body.push(...view.render(width - 4));
       }
-      headers(lines, fg);
-      return lines.map((line) => truncateToWidth(line, width));
+
+      if (feedback) {
+        body.push(`  ${fg("warning", feedback)}`);
+      }
+      return frame({ title, hint, body, width, height }, color);
     },
 
     handleInput(data: string): void {
-      if (mode === "confirm" && confirmView && confirming) {
-        if (matchesKey(data, Key.escape) || matchesKey(data, Key.left)) {
-          mode = "list";
+      if (mode === "confirm" && confirming) {
+        if (matchesKey(data, Key.escape) || matchesKey(data, Key.left) || data === "q") {
           confirming = null;
+          mode = "list";
+          feedback = "";
           refresh();
           return;
         }
         if (matchesKey(data, Key.enter) || matchesKey(data, Key.return)) {
-          const choice = confirmView.getSelectedItem()?.value;
           const target = confirming;
-          mode = "list";
           confirming = null;
-          // Cancelling must leave the cursor where the user left it: rebuilding
-          // the list here reset the selection to the first row, so a second
-          // attempt acted on a different session than the one on screen.
-          if (choice !== "yes") {
-            feedback = "";
-            refresh();
-            return;
-          }
-          if (choice === "yes") {
-            sessions = sessions.filter((s) => s.id !== target.id);
-            view = list();
-            applyFilter();
-            feedback = `Killed "${target.name}"`;
-            void Promise.resolve(onKill?.(target)).catch((error: unknown) => {
-              feedback = `Kill failed: ${(error as Error).message}`;
-              refresh();
-            });
-          } else {
-            feedback = "";
-          }
-          refresh();
-          return;
-        }
-        confirmView.handleInput(data);
-        refresh();
-        return;
-      }
-
-      if (mode === "actions" && actionView && acting) {
-        if (matchesKey(data, Key.escape) || matchesKey(data, Key.left)) {
           mode = "list";
-          acting = null;
-          refresh();
-          return;
-        }
-        if (matchesKey(data, Key.enter) || matchesKey(data, Key.return)) {
-          const choice = actionView.getSelectedItem()?.value;
-          const target = acting;
-          acting = null;
-          if (choice === "open" && !target.isHost) {
-            mode = "list";
-            onSelect(target);
-            return;
-          }
-          if (choice === "kill" && !target.isHost && onKill) {
-            // A second, explicit answer: this ends a running session.
-            mode = "confirm";
-            confirming = target;
-            confirmView = confirmList();
+          sessions = sessions.filter((s) => s.id !== target.id);
+          shown = sessions.filter((s) => filter.length === 0 || matches(s, filter));
+          view = list();
+          feedback = `Killed "${target.name}"`;
+          void Promise.resolve(onKill?.(target)).catch((error: unknown) => {
+            feedback = `Kill failed: ${(error as Error).message}`;
             refresh();
-            return;
-          }
-          mode = "list";
+          });
           refresh();
           return;
         }
-        actionView.handleInput(data);
-        refresh();
         return;
       }
 
@@ -288,6 +208,18 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
         return;
       }
 
+      if (matchesKey(data, Key.backspace)) {
+        if (filter.length > 0) {
+          filter = filter.slice(0, -1);
+          applyFilter();
+          refresh();
+        }
+        return;
+      }
+
+      // Ctrl-N starts a session; Ctrl-D ends one. Both are Pi's own bindings for
+      // these actions, and neither can collide with the filter, because every
+      // plain character is a filter character.
       if (matchesKey(data, Key.ctrl("n"))) {
         void Promise.resolve(onNew?.()).catch((error: unknown) => {
           feedback = `New session failed: ${(error as Error).message}`;
@@ -296,10 +228,21 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
         return;
       }
 
-      if (matchesKey(data, Key.backspace)) {
-        if (filter.length > 0) {
-          filter = filter.slice(0, -1);
-          applyFilter();
+      if (matchesKey(data, Key.ctrl("d"))) {
+        const item = view.getSelectedItem();
+        const target = sessions.find((s) => s.id === item?.value);
+        if (!target) {
+          return;
+        }
+        if (target.isHost) {
+          feedback = "This is the terminal you are typing in; it cannot be killed from here.";
+          refresh();
+          return;
+        }
+        if (onKill) {
+          // Asked once, because killing a session ends real work.
+          confirming = target;
+          mode = "confirm";
           refresh();
         }
         return;
@@ -311,10 +254,12 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
         if (!target) {
           return;
         }
-        mode = "actions";
-        acting = target;
-        actionView = actions(target);
-        refresh();
+        if (target.isHost) {
+          feedback = "That is this terminal. Choose an agent session to open it.";
+          refresh();
+          return;
+        }
+        onSelect(target);
         return;
       }
 
@@ -342,17 +287,6 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
     opts.tui?.requestRender?.();
   }
 
-  function headers(lines: string[], color: (c: string, s: string) => string): void {
-    lines.push(
-      "  "
-      + [
-        rawKeyHint("↑/↓", "move"),
-        rawKeyHint("enter", "open or kill"),
-        rawKeyHint("ctrl+n", "new"),
-        color("muted", `${filter.length > 0 ? "type to filter  ·  " : "type to filter  ·  "}← esc to close`),
-      ].join(`  ${color("muted", "·")}  `),
-    );
-  }
 }
 
 /** One list row: what it is, where it runs, and what it is doing. */
