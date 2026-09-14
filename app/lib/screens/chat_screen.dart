@@ -10,6 +10,7 @@ import '../services/paste_bridge.dart';
 import '../services/user_preferences.dart';
 import '../models/session.dart';
 import '../logic/transcript_order.dart';
+import './goal_banner.dart';
 import '../models/chat_item.dart';
 import '../models/tool_call_view.dart';
 import 'app_toast.dart';
@@ -493,6 +494,12 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
           ),
+        if (svc.goal != null)
+          GoalBanner(
+            goal: svc.goal!,
+            onEdit: () => _editGoal(svc),
+            onClear: () => _clearGoal(svc),
+          ),
         ComposerBar(
           input: _input,
           working: working,
@@ -531,6 +538,63 @@ class _ChatScreenState extends State<ChatScreen> {
   /// live tool calls. The list and the "nothing here yet" hint must agree on
   /// this, otherwise a working agent shows a transcript and "send a message"
   /// at the same time.
+  /// Edit the standing objective. Reuses the composer's own `/goal` path so
+  /// the app never grows a second way to set one.
+  Future<void> _editGoal(AgentService svc) async {
+    final controller = TextEditingController(text: svc.goal?.text ?? '');
+    final edited = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Goal'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLines: 4,
+          minLines: 2,
+          decoration: const InputDecoration(
+            hintText: 'What should the agent work toward?',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
+            child: const Text('Set goal'),
+          ),
+        ],
+      ),
+    );
+    if (edited != null && edited.isNotEmpty) svc.setGoal(edited);
+  }
+
+  /// Clear the objective, after saying what that means.
+  Future<void> _clearGoal(AgentService svc) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Clear the goal?'),
+        content: const Text(
+          'The agent stops being told to work toward it. Nothing already done '
+          'is undone, and you can set it again at any time.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Keep'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Clear'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed ?? false) svc.clearGoal();
+  }
+
   List<Widget> _chatItems(
     List<Map<String, dynamic>> history,
     String? streaming,

@@ -14,6 +14,8 @@ export interface StateSnapshot {
   registry: SessionRow[];
   tunnelUrl: string | null;
   tunnelProvider: string | null;
+  /** The objective being worked toward; shown persistently by the app. */
+  goal: { text: string; setAt: number } | null;
 }
 
 export function buildStateMessage(snapshot: StateSnapshot): ServerMessage {
@@ -30,6 +32,7 @@ export function buildStateMessage(snapshot: StateSnapshot): ServerMessage {
     // So the app can show (and the user can verify) the live tunnel endpoint.
     tunnelUrl: snapshot.tunnelUrl,
     tunnelProvider: snapshot.tunnelProvider,
+    goal: snapshot.goal,
   };
 }
 
