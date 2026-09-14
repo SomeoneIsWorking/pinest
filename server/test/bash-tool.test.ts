@@ -181,3 +181,29 @@ test("a SILENT background task still has the log file its receipt points at", as
   manager.dispose();
   removeTempDir(dir);
 });
+
+test("a finished task is reported exactly once, however many paths notice", async () => {
+  // Both the process-close handler and the generic settle path observe the end
+  // of a background task, and each used to notify on its own: the agent got the
+  // same result twice. Counting the deliveries is the whole claim.
+  const deliveries: string[] = [];
+  const manager = new BackgroundProcessManager({
+    autoBgTimeoutMs: 150,
+    hostSessionId: "host-app",
+    notifyCompletion: (task) => { deliveries.push(task.id); },
+  });
+
+  const result = await manager.executeCommand("sleep 0.4; echo done", { sessionId: "host-app" });
+  assert.equal(result.isBackground, true);
+  const id = result.task!.id;
+
+  const deadline = Date.now() + 8000;
+  while (deliveries.length === 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  // Give any second path ample time to also fire before concluding.
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.deepEqual(deliveries, [id], "one completion, one report");
+  manager.dispose();
+});
+
