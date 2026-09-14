@@ -38,7 +38,7 @@ Future<(web.RTCPeerConnection, web.RTCDataChannel, String)> _offerPeer() async {
   if (pc.iceGatheringState != 'complete') {
     await gathered.future.timeout(const Duration(seconds: 10));
   }
-  return (pc, channel, pc.localDescription!.sdp!);
+  return (pc, channel, pc.localDescription!.sdp);
 }
 
 void main() {
@@ -65,9 +65,9 @@ void main() {
 
     // The answer must have reached the signaling channel before the exchange
     // can finish: a description nobody publishes is a peer nobody reaches.
-    expect(published, isNotNull);
-    final answerSdp = published!;
-    expect(answerSdp.startsWith('v=0'), isTrue);
+    final answerSdp = published;
+    expect(answerSdp, isNotNull);
+    expect(answerSdp!.startsWith('v=0'), isTrue);
     expect(answerSdp, contains('m='));
     expect(channel.endpoint, isNull, reason: 'a negotiated channel has no address');
 
@@ -140,7 +140,7 @@ void main() {
 
     await expectLater(
       connectDataChannel(
-        offerSdp: pc.localDescription!.sdp!,
+        offerSdp: pc.localDescription!.sdp,
         iceServers: kDirectIceServers,
         publishAnswer: (sdp) async => published = sdp,
       ),
