@@ -19,6 +19,9 @@ export interface TunnelHandle {
   stop: () => void;
   /** Fired when the tunnel process dies unexpectedly (auto-restart hook). */
   onDead?: () => void;
+  /** Fired when the tunnel's public URL changes while the process is still
+   * alive. The handle's `url` is already updated when this fires. */
+  onUrlChanged?: (url: string) => void;
 }
 
 export interface TunnelProvider {
@@ -133,6 +136,22 @@ function isValidDnsHostname(hostname: string): boolean {
   );
 }
 
+/** Adopt an endpoint seen in a live tunnel's output after the first one.
+ *
+ * Quick tunnels re-register under a NEW hostname when their connection
+ * re-establishes: the process stays alive, the old name stops resolving, and a
+ * host that captured the URL once keeps publishing a dead endpoint - measured:
+ * the published name failed DNS while the process was still running, and every
+ * connection attempt died on lookup. Returns true when the URL actually moved,
+ * so the caller can surface the change instead of republishing on every repeat
+ * of the same name.
+ */
+export function adoptTunnelEndpoint(handle: { url: string | null }, endpoint: string): boolean {
+  if (handle.url === endpoint) return false;
+  handle.url = endpoint;
+  return true;
+}
+
 /** Feed a stream's chunks to `onLine`, carrying the partial last line forward.
  *
  * A tunnel prints its URL inside a banner that arrives in several writes.
@@ -234,23 +253,33 @@ const cloudflaredProvider: TunnelProvider = {
       // MUST handle 'error' — a missing binary emits an unhandled 'error'
       // event on the child, crashing the process (the original bug).
       proc.on("error", done((err) => reject(new Error(`cloudflared spawn failed: ${err.message}`))));
+      let handle: TunnelHandle | null = null;
       const onLine = (line: string): void => {
         const endpoint = firstValidTunnelEndpoint("cloudflared", line);
-        if (endpoint) {
+        if (!endpoint) return;
+        if (!handle) {
           debug(`[remote-code] cloudflared tunnel: ${endpoint}`);
-          const handle: TunnelHandle = {
+          const created: TunnelHandle = {
             url: endpoint,
             stop: () => { stopped = true; killProc(); },
           };
+          handle = created;
           // Quick tunnels die eventually — surface it so the server can
           // restart automatically instead of publishing a dead URL forever.
           proc.once("exit", () => {
             if (!stopped) {
               debug("[remote-code] cloudflared exited — tunnel dead");
-              handle.onDead?.();
+              created.onDead?.();
             }
           });
-          done(resolve)(handle);
+          done(resolve)(created);
+          return;
+        }
+        // Still alive, but re-registered under a new name: the captured URL is
+        // dead from this moment, so the handle must move with it.
+        if (adoptTunnelEndpoint(handle, endpoint)) {
+          debug(`[remote-code] cloudflared re-registered: ${endpoint}`);
+          handle.onUrlChanged?.(endpoint);
         }
       };
       const feedStdout = makeLineReader(onLine);

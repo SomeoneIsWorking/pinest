@@ -1,3 +1,4 @@
+import type { HttpHistoryRunner } from "./http-api.ts";
 import debug from "./log.ts";
 /**
  * remote-code — WebSocket direct connection + tunnel.
@@ -237,8 +238,41 @@ function renderFooter(): void {
 
 // ── Broadcasting ────────────────────────────────────────────────────────────
 function broadcast(msg: ServerMessage): void {
+  observeHistoryReply(msg);
   _ws?.broadcast(msg);
 }
+
+/** A history request answered over HTTP waits for the frame the socket path
+ * would have pushed. Observing (not intercepting) means the push still happens,
+ * so a second device stays in sync and there is one implementation of history. */
+let _historyWait: { sessionId: string; resolve: (payload: Record<string, unknown>) => void } | null = null;
+
+function observeHistoryReply(msg: ServerMessage): void {
+  if (!_historyWait) return;
+  if (msg.type !== "history" || msg.sessionId !== _historyWait.sessionId) return;
+  const wait = _historyWait;
+  _historyWait = null;
+  wait.resolve(msg as unknown as Record<string, unknown>);
+}
+
+/** Ask for a session's history over HTTP: same dispatch, same paging, real
+ * answer. Returns a status rather than throwing, so the route reports what
+ * actually happened. */
+const historyRunner: HttpHistoryRunner = async (cmd) => {
+  const known = cmd.sessionId === _sessionId || _publisher.has(cmd.sessionId) || !!_supervisor?.sessions.has(cmd.sessionId);
+  if (!known) return { ok: false as const, status: 404, error: `no session ${cmd.sessionId}` };
+  const answered = new Promise<Record<string, unknown>>((resolve) => {
+    _historyWait = { sessionId: cmd.sessionId, resolve };
+  });
+  const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), 10_000));
+  await handleCommand({ ...cmd, type: "get_history" });
+  const payload = await Promise.race([answered, timeout]);
+  if (!payload) {
+    _historyWait = null;
+    return { ok: false as const, status: 504, error: "history request timed out" };
+  }
+  return { ok: true as const, payload };
+};
 
 function broadcastState(): void {
   _publisher.broadcast();
@@ -354,6 +388,13 @@ async function bootstrap(): Promise<void> {
   });
   _ws.on("command", (cmd) => { void handleCommand(cmd); });
   _ws.setStateProvider(() => _publisher.message());
+  // A moved tunnel URL is only useful once the app can see it: republish the
+  // discovery document the app watches, and refresh the local state snapshot.
+  _ws.tunnelUrlChanged = () => {
+    void publishCurrentPresence(true);
+    broadcastState();
+  };
+  _ws.setHistoryRunner(historyRunner);
   _ws.tunnelOnDead = () => {
     debug("[remote-code] tunnel died — restarting");
     _tunnelStarting = true;
