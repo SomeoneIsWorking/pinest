@@ -29,6 +29,10 @@ function harness() {
   const published: { sdp: string; ts: number }[] = [];
   const logs: string[] = [];
   let answerHandler: ((sdp: string, ts: number) => void) | null = null;
+  /** A gather the test can hold open, because gathering a whole description
+   * takes seconds in production and that window is the one under test. */
+  let gathering: Promise<void> | null = null;
+  let releaseGather: (() => void) | null = null;
 
   const startExchange = (
     publish: (sdp: string, ts: number) => Promise<void>,
@@ -56,6 +60,7 @@ function harness() {
       // records it here.
       offer: async (ts) => {
         const sdp = `v=0 offer ${ts}`;
+        if (gathering) await gathering;
         await publish(sdp, ts);
         return sdp;
       },
@@ -82,6 +87,15 @@ function harness() {
     published,
     logs,
     answer: (sdp: string) => answerHandler?.(sdp),
+    /** Hold the next exchange's gather open until the returned function runs. */
+    holdNextGather: () => {
+      gathering = new Promise<void>((resolve) => { releaseGather = resolve; });
+      return () => {
+        gathering = null;
+        releaseGather?.();
+        releaseGather = null;
+      };
+    },
     advance: (ms: number) => { clock += ms; },
   };
 }
@@ -217,5 +231,48 @@ test("two refreshes in flight do not publish two exchanges at once", async () =>
   await Promise.all([t.refreshIfStale(), t.refreshIfStale(), t.refreshIfStale()]);
   assert.equal(h.built.length, 2, "one replacement, not three");
   assert.equal(h.published.length, 2);
+  await t.close();
+});
+
+test("a punch that lands while its replacement is gathering is used, not stranded", async () => {
+  // NOTE: this harness cannot dial the loopback server (its port is a dummy),
+  // so the bridge below fails on its own. What is asserted here is the DECISION
+  // this test is about - that a landed punch is adopted and its exchange is not
+  // closed by the replacement - not the bridge's fate afterwards.
+  const h = harness();
+  const t = await h.transport;
+
+  // Gathering a description takes seconds, and the new exchange becomes `live`
+  // the moment it starts, long before its offer exists. A punch that lands in
+  // that window belongs to the exchange the driver already gave up on, and
+  // dropping it is what produced the worst live symptom of all: a channel that
+  // opened, carried nothing, and reported no error while the app kept retrying.
+  h.advance(OFFER_LIFETIME_MS + 1);
+  const finishGathering = h.holdNextGather();
+  const refreshing = t.refreshIfStale();
+  await Promise.resolve();
+  assert.equal(h.built.length, 2, "the replacement is gathering");
+
+  h.built[0]!.connect();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(t.status().channelOpen, true, "the landed punch is the connection now");
+  assert.equal(h.built[1]!.closed, true, "the replacement that nobody answered is withdrawn");
+  assert.equal(
+    h.built[0]!.closed,
+    false,
+    "and the exchange that is carrying this peer is left alone",
+  );
+
+  finishGathering();
+  await refreshing;
+  assert.match(
+    h.logs.join("\n"),
+    /punch landed while the replacement was gathering; keeping it/,
+    "the refresh keeps the exchange a punch just landed on",
+  );
+  assert.equal(h.built[0]!.closed, false, "which is still not closed by the refresh");
+
   await t.close();
 });

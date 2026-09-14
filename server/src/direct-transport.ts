@@ -141,7 +141,7 @@ export async function offerDirectTransport(
     void live.peer.acceptAnswer(sdp);
   });
 
-  const beginExchange = async (): Promise<string> => {
+  const beginExchange = async (): Promise<{ sdp: string; exchange: Live }> => {
     const ts = now();
     const build = options.startExchange ?? ((publish) => startP2PExchange({
       publish,
@@ -155,10 +155,25 @@ export async function offerDirectTransport(
 
     void peer.channels
       .then((channels) => {
-        if (closed || live !== current) {
-          // This exchange was replaced while its channel was still opening;
-          // the driver owns the current one.
+        if (closed) {
+          // The transport is going away: nothing is listening, and a peer
+          // left holding an open channel would wait forever for an answer.
+          current.peer.close();
           return;
+        }
+        if (live !== current) {
+          // The punch landed on an exchange the driver had already given up
+          // on - it looked stale while the answer was still in flight. The
+          // candidates just proved themselves reachable, so this IS the
+          // connection: adopt it and withdraw the offer nobody is answering.
+          // Stranding it here is what produced the worst live symptom of all:
+          // a channel that opened, carried nothing, and reported no error,
+          // while the app kept retrying against a machine that had already
+          // answered it.
+          log("direct transport: a superseded exchange's punch landed; using it");
+          const superseded = live;
+          live = current;
+          if (superseded) superseded.peer.close();
         }
         current.channelOpen = true;
         log("direct transport: both channels open, bridging to the loopback server");
@@ -200,10 +215,10 @@ export async function offerDirectTransport(
         log(`direct transport: no channel: ${error.message}`);
       });
 
-    return peer.offer(ts);
+    return { sdp: await peer.offer(ts), exchange: current };
   };
 
-  const offerSdp = await beginExchange();
+  const { sdp: offerSdp } = await beginExchange();
   log(`direct transport: offer published (${offerSdp.length} bytes), refreshed every ${OFFER_LIFETIME_MS / 1000}s while unconnected`);
 
   const refreshIfStale = async (): Promise<void> => {
@@ -219,9 +234,18 @@ export async function offerDirectTransport(
     refreshing = true;
     try {
       const replaced = live;
-      const next = await beginExchange();
-      replaced.peer.close();
-      log(`direct transport: replaced a ${Math.round((now() - replaced.offerTs) / 1000)}s-old offer (${next.length} bytes published)`);
+      // Gathering a whole description takes seconds, and a punch can land in
+      // that window: the peer answers the offer we already gave up on and its
+      // channel opens. If that happens the exchange is adopted (below) and is
+      // now the live one, so closing it here would end the only working
+      // connection this machine has.
+      const { sdp: next, exchange: created } = await beginExchange();
+      if (live !== created) {
+        log("direct transport: a punch landed while the replacement was gathering; keeping it");
+      } else {
+        replaced.peer.close();
+        log(`direct transport: replaced a ${Math.round((now() - replaced.offerTs) / 1000)}s-old offer (${next.length} bytes published)`);
+      }
     } finally {
       refreshing = false;
     }
