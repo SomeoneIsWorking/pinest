@@ -53,6 +53,15 @@ test("a DataChannel bridges to the loopback server in both directions", async ()
 
   const { exchange: host } = localExchange();
 
+  // The exchange must not claim a channel before there is one: a transport that
+  // trusts this resolves to "a peer is connected" the moment the offer is
+  // created, and then never refreshes, because it believes it already has
+  // someone. Nothing has been applied to this peer connection yet.
+  let claimed = false;
+  void host.channel.then(() => { claimed = true; }).catch(() => {});
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(claimed, false, "no channel exists before an answer is applied");
+
   const answering = new RTCPeerConnection();
   const remoteChannelReady = new Promise<RTCDataChannel>((resolve) => {
     answering.ondatachannel = (event) => resolve(event.channel);

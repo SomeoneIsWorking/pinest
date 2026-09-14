@@ -37,7 +37,13 @@ export interface P2PExchange {
   /** Gather this exchange's candidates and publish its offer. */
   offer(ts: number): Promise<string>;
   acceptAnswer(sdp: string): Promise<void>;
-  /** The DataChannel once ICE and DTLS complete it — for this exchange only. */
+  /** The DataChannel once it is genuinely OPEN — for this exchange only.
+   *
+   * Not when the channel is created: `createDataChannel` returns a channel in
+   * "connecting" immediately, and resolving there reported a peer as
+   * connected before ICE, DTLS or SCTP had done anything, so a transport would
+   * believe it was serving someone when nobody was there. A channel that closes
+   * before it opens rejects instead. */
   channel: Promise<RTCDataChannel>;
   close(): void;
 }
@@ -72,13 +78,35 @@ export function startP2PExchange(options: P2PExchangeOptions): P2PExchange {
   });
 
   let resolveChannel: (channel: RTCDataChannel) => void = () => {};
-  const channel = new Promise<RTCDataChannel>((resolve) => {
+  let rejectChannel: (error: Error) => void = () => {};
+  const channel = new Promise<RTCDataChannel>((resolve, reject) => {
     resolveChannel = resolve;
+    rejectChannel = reject;
   });
+
+  /** Only the FIRST channel of this exchange is adopted, and it resolves this
+   * promise when it is actually open rather than when it is created: an
+   * exchange that reports a channel before ICE has run is reporting a peer that
+   * is not there. */
+  let adopted = false;
+  const adoptChannel = (dataChannel: RTCDataChannel): void => {
+    if (adopted) return;
+    adopted = true;
+    if (dataChannel.readyState === "open") {
+      resolveChannel(dataChannel);
+      return;
+    }
+    dataChannel.stateChange.subscribe((state) => {
+      if (state === "open") {
+        resolveChannel(dataChannel);
+      } else if (state === "closed" || state === "closing") {
+        rejectChannel(new Error(`the data channel ${state} before it opened`));
+      }
+    });
+  };
   // The offerer's own channel never passes through ondatachannel - that event
-  // fires for channels created by the remote side only - so the created
-  // channel resolves the promise directly.
-  pc.ondatachannel = (event) => resolveChannel(event.channel);
+  // fires for channels created by the remote side only.
+  pc.ondatachannel = (event) => adoptChannel(event.channel);
 
   const gatherComplete = new Promise<void>((resolve) => {
     if (pc.iceGatheringState === "complete") {
@@ -124,8 +152,7 @@ export function startP2PExchange(options: P2PExchangeOptions): P2PExchange {
     channel,
     acceptAnswer,
     offer: async (ts: number) => {
-      const created = pc.createDataChannel("pinest");
-      resolveChannel(created);
+      adoptChannel(pc.createDataChannel("pinest"));
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       await gatherComplete;
