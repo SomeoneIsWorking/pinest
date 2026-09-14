@@ -78,8 +78,15 @@ def request_status(
     *,
     method: str = "GET",
     body: bytes | None = None,
+    update_mask: list[str] | None = None,
     open_request: Callable[..., Any] = urlopen,
 ) -> int:
+    if update_mask:
+        # A PATCH without an updateMask REPLACES the document, which is not what
+        # the machine or the app ever does; asking for a merge is the only way
+        # to verify the rule that governs a merge.
+        query = "&".join(f"updateMask.fieldPaths={field}" for field in update_mask)
+        url = f"{url}?{query}"
     request = Request(
         url,
         data=body,
@@ -116,12 +123,48 @@ def verify_boundary(project_id: str, token: str, uid: str) -> dict[str, int]:
                 {"fields": {"online": {"booleanValue": True}}}
             ).encode(),
         ),
+        # Signaling must work in BOTH directions, or the direct (no-tunnel)
+        # transport cannot exist. The timestamp is deliberately ancient so the
+        # host's poller ignores the probe answer instead of applying it to a
+        # live exchange; the rules only require it to be an int.
+        "valid_signaling_write": request_status(
+            f"{base}/users/{uid}",
+            token,
+            method="PATCH",
+            update_mask=["p2pAnswer", "p2pAnswerTs"],
+            body=json.dumps(
+                {
+                    "fields": {
+                        "p2pAnswer": {
+                            "stringValue": "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n"
+                        },
+                        "p2pAnswerTs": {"integerValue": "1"},
+                    }
+                }
+            ).encode(),
+        ),
+        "invalid_signaling_write": request_status(
+            f"{base}/users/{uid}",
+            token,
+            method="PATCH",
+            update_mask=["p2pAnswer", "p2pAnswerTs"],
+            body=json.dumps(
+                {
+                    "fields": {
+                        "p2pAnswer": {"stringValue": "not-an-sdp"},
+                        "p2pAnswerTs": {"integerValue": "1"},
+                    }
+                }
+            ).encode(),
+        ),
     }
     expected = {
         "own_document_get": 200,
         "foreign_document_get": 403,
         "collection_list": 403,
         "invalid_own_write": 403,
+        "valid_signaling_write": 200,
+        "invalid_signaling_write": 403,
     }
     for name, actual in checks.items():
         if actual != expected[name]:

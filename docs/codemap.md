@@ -13,7 +13,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Untrusted client-command parsing, limits, target authorization, exhaustive dispatch, lifecycle-ID reservations | `server` | `server/src/command-validation.ts` |
 | Authenticated WS admission, token-expiry/resource policy, outbound backpressure, per-connect snapshot | `server` | `server/src/wsserver.ts` |
 | Tunnel executable resolution, provider lifecycle, provider-specific public-endpoint validation | `server` | `server/src/tunnel.ts` |
-| Firebase backends (HOSTED zero-config + ADMIN self-host), owner identity verification, presence publish | `server` | `server/src/auth.ts` |
+| Firebase backends (HOSTED zero-config + ADMIN self-host), owner identity verification, discovery-doc read/merge with the single value encoding | `server` | `server/src/auth.ts` |
 | Private atomic hosted refresh-credential storage | `server` | `server/src/auth-cache.ts` |
 | Nonce-bound canonical-loopback browser pairing | `server` | `server/src/browser-login.ts`, `server/src/login.html` |
 | Same-owner credential rotation and verified-token mapping | `server` | `server/src/owner-runtime.ts` |
@@ -70,6 +70,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Host control from outside the TUI (reload request + verification) | `tools` | `tools/reload_host.py` |
 | Session state, its wire shape, and broadcast policy | `server` | `server/src/state-publisher.ts` (`StatePublisher`) |
 | Owner presence publishing | `server` | `server/src/presence.ts` (`publishPresence`) |
+| Direct (no-tunnel) WebRTC transport | `server` | `server/src/p2p.ts` (peer + channel), `server/src/p2p-bridge.ts` (channel ⇄ loopback WS), `server/src/p2p-signaling.ts` (offer/answer via the discovery doc); opt-in config `p2p`, wired by `startDirectTransport` in `server/src/index.ts` |
 | Generated Flutter platform runner projects and packaging shells | `app` | `app/android/`, `app/ios/`, `app/linux/`, `app/macos/`, `app/windows/` |
 | Auto-backgrounding bash tool & task lifecycle manager | `server` | `server/src/bash-tool.ts` (`BackgroundProcessManager`, `createAutoBackgroundBashTool`) |
 | First-party background tools (`bg_run`, `bg_status`, `bg_logs`, `bg_kill`) & job commands | `server` | `server/src/background-tools.ts` (`createBackgroundTools`, `registerBackgroundTools`, `handleJobCommand`) |
@@ -85,7 +86,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Pending-queue state — the AGENT's own queue, mirrored | `server` | supervisor: `queue_update` events from `AgentSession`; host: pop at `message_start` mirroring pi's dequeue (`_pendingMessages` in `server/src/index.ts`) |
 | Firebase web config (public) for the app | `app` | `app/lib/firebase_options.dart` |
 | Provider entry (OpenCode Go / glm-5.3-flash), compact settings + auth-store provisioning | user machine config | `server/scripts/provision.ts` (I-005) writes pi's resolved user configuration |
-| Hosted discovery rules (owner-only get + tightly shaped owner writes) | repo root | `firestore.rules` — deploy to pinest-app (I-008, I-030) |
+| Hosted discovery + signaling rules (owner-only get; shaped presence writes; validated WebRTC signaling writes) | `app` | `app/firestore.rules` — deploy: `firebase deploy --only firestore:rules --project pinest-app` (I-008, I-030) |
 | Public security model, trust boundaries, and private reporting route | repo root | `docs/security.md`, `SECURITY.md` |
 | Authenticated web-origin CSP and browser security headers | `app` | `app/firebase.json`, `app/web/index.html`, `app/test/web_security_config_test.dart` |
 | Source-size structure gate (1,200 default + non-growing legacy ceilings) | repo root | `tools/check_structure.py`, `tools/test_check_structure.py`; entered by root `package.json` |

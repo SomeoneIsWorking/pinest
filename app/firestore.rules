@@ -1,0 +1,106 @@
+rules_version = '2';
+
+// remote-code Firestore rules — hosted discovery backend (pinest-app).
+//
+// Firebase holds auth + discovery ONLY: one tiny doc per user. Chat content
+// never touches Firestore. The doc carries two things:
+//   * presence: who is online, and the tunnel URL to reach them;
+//   * WebRTC signaling: the host's offer and the app's answer, so a direct
+//     connection needs no second service.
+//
+// The hosted machine authenticates as the user and writes its own doc. The
+// Admin-SDK self-host path bypasses rules.
+//
+// Deploy once with: firebase deploy --only firestore:rules --project pinest-app
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function hasValidHttpsUrl(url) {
+      return url == null || (url is string
+        && url.size() <= 2048
+        && url.matches(
+          'https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(/[A-Za-z0-9._~!$&()*+,;=:@%/-]*)?'
+        ));
+    }
+
+    // Signaling descriptions are bounded, must look like SDP, and are never
+    // read by anyone but the owner: they contain the host's own addresses for
+    // the duration of an exchange.
+    function hasValidDescription(value) {
+      return value is string
+        && value.size() >= 4
+        && value.size() <= 20000
+        && value.matches('v=0[\\s\\S]*');
+    }
+
+    function hasValidSignaling() {
+      let data = request.resource.data;
+      return (!data.keys().hasAny(['p2pOffer'])
+          || (hasValidDescription(data.p2pOffer)
+              && data.keys().hasAny(['p2pOfferTs'])
+              && data.p2pOfferTs is int))
+        && (!data.keys().hasAny(['p2pOfferTs']) || data.p2pOfferTs is int)
+        && (!data.keys().hasAny(['p2pAnswer'])
+          || (hasValidDescription(data.p2pAnswer)
+              && data.keys().hasAny(['p2pAnswerTs'])
+              && data.p2pAnswerTs is int))
+        && (!data.keys().hasAny(['p2pAnswerTs']) || data.p2pAnswerTs is int);
+    }
+
+    function hasValidPresenceShape() {
+      let data = request.resource.data;
+      let now = request.time.toMillis();
+      return data.keys().hasAll(['url', 'online', 'ts'])
+        && data.keys().hasOnly(
+          ['url', 'online', 'ownerEmail', 'hostname', 'ts',
+           'p2pOffer', 'p2pOfferTs', 'p2pAnswer', 'p2pAnswerTs'])
+        && hasValidHttpsUrl(data.url)
+        && data.online is bool
+        && (!data.keys().hasAny(['ownerEmail'])
+          || (data.ownerEmail is string
+              && data.ownerEmail.size() >= 3
+              && data.ownerEmail.size() <= 320
+              && request.auth.token.email is string
+              && data.ownerEmail == request.auth.token.email))
+        && (!data.keys().hasAny(['hostname'])
+          || (data.hostname is string
+              && data.hostname.size() >= 1
+              && data.hostname.size() <= 255))
+        && data.ts is int
+        && data.ts >= now - 120000
+        && data.ts <= now + 120000
+        && hasValidSignaling();
+    }
+
+    // A write that only touches signaling fields is judged as signaling: the
+    // app answers an offer without having to re-assert the machine's presence
+    // freshness, which it does not own.
+    function touchesOnlySignaling() {
+      let affected = request.resource.data.diff(resource.data).affectedKeys();
+      return affected.hasOnly(['p2pAnswer', 'p2pAnswerTs'])
+        && (affected.hasAny(['p2pAnswer', 'p2pAnswerTs']));
+    }
+
+    // ── Discovery + signaling doc ─────────────────────────────────────────
+    // The app reads it and writes its answer; the machine writes presence and
+    // its offer. Both authenticate as the owner, and both are shape-checked.
+    match /users/{uid} {
+      allow get: if isOwner(uid);
+      allow create: if isOwner(uid) && hasValidPresenceShape();
+      allow update: if isOwner(uid)
+        && hasValidSignaling()
+        && (touchesOnlySignaling()
+            || (hasValidPresenceShape()
+                && (!request.resource.data.keys().hasAny(['ownerEmail'])
+                    || request.resource.data.ownerEmail == resource.data.ownerEmail)));
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
