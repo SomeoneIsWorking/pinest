@@ -29,6 +29,8 @@ export interface P2PHostOptions {
   port: number;
   /** Stateless STUN servers for reflexive-address discovery only. */
   stunServers?: string[];
+  /** Report an ignored or failed exchange step. Nothing here is fatal. */
+  log?: (message: string) => void;
 }
 
 export interface P2PHost {
@@ -41,6 +43,21 @@ export interface P2PHost {
 }
 
 const DEFAULT_STUN = ["stun:stun.l.google.com:19302"];
+
+/** An answer that has not been applied by now never will be. */
+const ANSWER_APPLY_TIMEOUT_MS = 10_000;
+
+/** Bound an operation that is not allowed to hang the exchange. */
+function withTimeout<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out ${what}`)), ms);
+    timer.unref?.();
+    work.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error as Error); },
+    );
+  });
+}
 
 export function startP2PHost(options: P2PHostOptions): P2PHost {
   const pc = new RTCPeerConnection({
@@ -78,8 +95,34 @@ export function startP2PHost(options: P2PHostOptions): P2PHost {
     return local.sdp;
   })();
 
+  // One exchange, one answer. The app answers from state it does not persist
+  // across a page reload, so the same offer being answered twice is normal
+  // rather than hostile - and applying the second one throws, because a peer
+  // connection that has already left "have-local-offer" cannot take another
+  // answer. Ignoring it is correct; letting it escape is not: the rejection
+  // reached the host's crash reporter as a fatal error while nothing was
+  // actually wrong.
+  let answerApplied = false;
   const acceptAnswer = async (sdp: string): Promise<void> => {
-    await pc.setRemoteDescription(new RTCSessionDescription(sdp, "answer"));
+    if (answerApplied) {
+      options.log?.("answer already applied; ignoring a repeated answer for this offer");
+      return;
+    }
+    try {
+      // Bounded, so an exchange step that never completes is reported as a
+      // failure instead of leaving the peer silently waiting: an answer that
+      // arrives in the wrong state must be observable either way.
+      await withTimeout(
+        pc.setRemoteDescription(new RTCSessionDescription(sdp, "answer")),
+        ANSWER_APPLY_TIMEOUT_MS,
+        "applying the answer",
+      );
+      answerApplied = true;
+    } catch (error) {
+      // Report and stay alive: a signaling race is not a reason to end the
+      // process, and the tunnel path is untouched either way.
+      options.log?.(`could not apply answer (${pc.signalingState}): ${(error as Error).message}`);
+    }
   };
   // Answers arrive through signaling; acceptAnswer stays exposed for callers
   // that deliver them directly.

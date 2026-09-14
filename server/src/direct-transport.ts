@@ -42,7 +42,7 @@ export async function offerDirectTransport(
   options: DirectTransportOptions,
 ): Promise<DirectTransport> {
   const { port, signaling, log } = options;
-  const peer = startP2PHost({ signaling, port });
+  const peer = startP2PHost({ signaling, port, log });
 
   void peer.channel
     .then((channel) => {
