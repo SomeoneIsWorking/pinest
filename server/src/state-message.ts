@@ -23,6 +23,8 @@ export interface StateSnapshot {
   p2p: DirectTransportStatus | null;
   /** The app's own report, as the machine read it. */
   client: ClientReportView | null;
+  /** Why this machine cannot publish its own presence, when that is failing. */
+  presenceError: string | null;
 }
 
 export function buildStateMessage(snapshot: StateSnapshot): ServerMessage {
@@ -42,6 +44,7 @@ export function buildStateMessage(snapshot: StateSnapshot): ServerMessage {
     localUrl: snapshot.localUrl,
     p2p: snapshot.p2p,
     client: snapshot.client,
+    presenceError: snapshot.presenceError,
   };
 }
 
