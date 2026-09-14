@@ -207,3 +207,45 @@ test("a finished task is reported exactly once, however many paths notice", asyn
   manager.dispose();
 });
 
+test("a bash command that asked not to be reported is not reported", async () => {
+  // The delivery guard tests for an explicit `false`, and this path never
+  // recorded the flag at all - so a task that asked for silence was reported
+  // anyway, which is what an agent sees as "I said not to notify me".
+  const deliveries: string[] = [];
+  const manager = new BackgroundProcessManager({
+    autoBgTimeoutMs: 100,
+    hostSessionId: "host-app",
+    notifyCompletion: (task) => { deliveries.push(task.id); },
+  });
+
+  const result = await manager.executeCommand("sleep 0.5; echo done", {
+    sessionId: "host-app",
+    notifyOnCompletion: false,
+  });
+  assert.equal(result.isBackground, true, "it did auto-background");
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  assert.deepEqual(deliveries, [], "silence was requested and honored");
+  assert.equal(
+    manager.getTask(result.task!.id)?.notifyOnCompletion,
+    false,
+    "the task records the policy it was given, rather than leaving it undefined",
+  );
+  manager.dispose();
+});
+
+test("the same command without the flag is still reported exactly once", async () => {
+  const deliveries: string[] = [];
+  const manager = new BackgroundProcessManager({
+    autoBgTimeoutMs: 100,
+    hostSessionId: "host-app",
+    notifyCompletion: (task) => { deliveries.push(task.id); },
+  });
+  const result = await manager.executeCommand("sleep 0.3; echo done", { sessionId: "host-app" });
+  const deadline = Date.now() + 5000;
+  while (deliveries.length === 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.deepEqual(deliveries, [result.task!.id], "the default is still to report");
+  manager.dispose();
+});
