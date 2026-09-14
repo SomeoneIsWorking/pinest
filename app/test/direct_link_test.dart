@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pinest_app/services/control_channel.dart';
 import 'package:pinest_app/services/direct_link.dart';
@@ -108,6 +110,57 @@ void main() {
         reason: 'the failed attempt is not repeated for the same offer');
     expect(await h.link.tryConnect({'p2pOffer': _offer, 'p2pOfferTs': 1000}), isFalse);
     expect(h.attempts, hasLength(2), reason: 'a new offer is a new attempt');
+  });
+
+  test('a lost channel stops claiming direct, and does not re-fight the offer', () async {
+    // The machine applies one answer per offer and ignores a repeat, so
+    // re-answering the same one could never give a channel back: only a newer
+    // offer can.
+    final h = build();
+    final doc = {'p2pOffer': _offer, 'p2pOfferTs': 900};
+    await h.link.tryConnect(doc);
+    expect(h.link.active, isTrue);
+
+    h.link.channelLost();
+    expect(h.link.active, isFalse, reason: 'the tunnel is the data path again');
+    expect(await h.link.tryConnect(doc), isFalse);
+    expect(h.attempts, hasLength(1), reason: 'no second exchange for the same offer');
+
+    // The machine's next generation publishes a newer offer, which is answered.
+    expect(await h.link.tryConnect({'p2pOffer': _offer, 'p2pOfferTs': 2000}), isTrue);
+    expect(h.link.active, isTrue);
+    expect(h.attempts, hasLength(2));
+  });
+
+  test('a second attempt does not start while one is in flight', () async {
+    // Discovery updates every few seconds; an exchange takes tens of seconds.
+    // Two competing answers to the same machine is the failure this prevents.
+    final gate = Completer<void>();
+    final published = <String>[];
+    final attempts = <String>[];
+    final link = DirectLink(
+      available: () => true,
+      now: () => 1000,
+      iceServers: const ['stun:example'],
+      connect: ({required offerSdp, required publishAnswer, required iceServers}) async {
+        attempts.add(offerSdp);
+        await gate.future;
+        return _FakeChannel(offerSdp);
+      },
+      publishAnswer: (sdp, writtenAt) async => published.add(sdp),
+      open: (channel) async {},
+      onChanged: () {},
+    );
+
+    final first = link.tryConnect({'p2pOffer': _offer, 'p2pOfferTs': 900});
+    expect(attempts, hasLength(1));
+    expect(await link.tryConnect({'p2pOffer': _offer, 'p2pOfferTs': 1000}), isFalse,
+        reason: 'the caller keeps the tunnel it has while the punch settles');
+    expect(attempts, hasLength(1), reason: 'no second exchange');
+
+    gate.complete();
+    expect(await first, isTrue);
+    expect(link.active, isTrue);
   });
 
   test('reset makes the machine republish answerable again', () async {
