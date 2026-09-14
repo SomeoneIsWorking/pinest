@@ -2,153 +2,24 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'auth_service.dart';
 import 'correlated_request_broker.dart';
 import 'notification_bridge.dart';
 import 'image_store.dart';
 import 'outgoing_queue.dart';
+import 'server_http.dart';
 import 'session_cache.dart';
 import 'user_preferences.dart';
 import '../models/session.dart';
 import '../models/session_goal.dart';
 export '../models/session.dart' show PendingImage;
 import '../logic/endpoint_choice.dart';
+import '../logic/history_merge.dart';
 import '../models/chat_item.dart';
 import '../models/stream_segment.dart';
 import '../models/session_tree.dart';
 import '../models/background_job.dart';
-
-bool _itemsMatch(Map<String, dynamic> a, Map<String, dynamic> b) {
-  if (a['role'] != b['role']) return false;
-  if (a['text'] != b['text']) return false;
-  final aTools = a['tools'] as List?;
-  final bTools = b['tools'] as List?;
-  if ((aTools?.length ?? 0) != (bTools?.length ?? 0)) return false;
-  if (aTools != null && bTools != null && aTools.isNotEmpty) {
-    final at0 = aTools[0] as Map?;
-    final bt0 = bTools[0] as Map?;
-    if (at0?['id'] != bt0?['id']) return false;
-    if (at0?['name'] != bt0?['name']) return false;
-  }
-  return true;
-}
-
-/// Apply one server history page to the pages already loaded by the client.
-/// Ordinary replace-pages preserve a previously fetched prefix; compact and
-/// clear rewrite the transcript, so [reset] invalidates that prefix.
-List<Map<String, dynamic>> mergeHistoryPage({
-  required List<Map<String, dynamic>> existing,
-  required List<dynamic> page,
-  required String mode,
-  required int cursor,
-  required bool reset,
-}) {
-  final decoded = page
-      .map((item) => Map<String, dynamic>.from(item as Map))
-      .toList();
-  if (reset || existing.isEmpty) return decoded;
-  if (decoded.isEmpty) return existing;
-
-  if (mode == 'older') {
-    // Search for overlap where the suffix of decoded matches the prefix of existing.
-    for (var i = 0; i < decoded.length; i++) {
-      final overlapLen = decoded.length - i;
-      if (overlapLen > existing.length) continue;
-      var match = true;
-      for (var j = 0; j < overlapLen; j++) {
-        if (!_itemsMatch(decoded[i + j], existing[j])) {
-          match = false;
-          break;
-        }
-      }
-      if (match) {
-        return [...decoded.take(i), ...existing];
-      }
-    }
-    return [...decoded, ...existing];
-  }
-
-  // mode == 'replace':
-  // Search for overlap where the suffix of existing matches the prefix of decoded.
-  for (var i = 0; i < existing.length; i++) {
-    final overlapLen = existing.length - i;
-    if (overlapLen > decoded.length) continue;
-    var match = true;
-    for (var j = 0; j < overlapLen; j++) {
-      if (!_itemsMatch(existing[i + j], decoded[j])) {
-        match = false;
-        break;
-      }
-    }
-    if (match) {
-      return [...existing.take(i), ...decoded];
-    }
-  }
-
-  // Fallback if no direct overlap was detected:
-  if (cursor > 0 && cursor <= existing.length) {
-    return [...existing.take(cursor), ...decoded];
-  }
-  return decoded;
-}
-
-/// Convert a discovery document URL into the only socket endpoint we trust.
-///
-/// Discovery is data controlled outside the app process. Only a credential-
-/// free HTTPS URL without query or fragment data may receive a Firebase bearer
-/// token; the socket always uses WSS and never performs an HTTP downgrade.
-/// Accept the server-reported loopback endpoint, and nothing else.
-///
-/// The state frame is external data; a `localUrl` that pointed anywhere but the
-/// host's own loopback would aim the Firebase token at an arbitrary listener.
-/// So: ws only, a loopback host only, a numeric port only, and no query,
-/// fragment, or user info to smuggle anything past the authority.
-Uri? secureLoopbackUri(Object? rawUrl) {
-  if (rawUrl is! String || rawUrl.trim() != rawUrl) return null;
-  final uri = Uri.tryParse(rawUrl);
-  if (uri == null || uri.scheme.toLowerCase() != 'ws') return null;
-  if (uri.userInfo.isNotEmpty || uri.hasQuery || uri.hasFragment) return null;
-  final host = uri.host;
-  final loopback = host == '127.0.0.1' || host == 'localhost' || host == '::1' || host == '[::1]';
-  if (!loopback) return null;
-  final port = uri.port;
-  if (port <= 0 || port > 65535) return null;
-  return uri;
-}
-
-Uri? secureDiscoveryWebSocketUri(Object? rawUrl) {
-  if (rawUrl is! String ||
-      rawUrl.trim() != rawUrl ||
-      rawUrl.contains('?') ||
-      rawUrl.contains('#') ||
-      rawUrl.contains(r'\')) {
-    return null;
-  }
-  final authorityStart = rawUrl.indexOf('://');
-  if (authorityStart < 0) return null;
-  final pathStart = rawUrl.indexOf('/', authorityStart + 3);
-  final rawAuthority = rawUrl.substring(
-    authorityStart + 3,
-    pathStart < 0 ? rawUrl.length : pathStart,
-  );
-  if (rawAuthority.isEmpty ||
-      rawAuthority.contains('@') ||
-      rawAuthority.contains('%')) {
-    return null;
-  }
-  final uri = Uri.tryParse(rawUrl);
-  if (uri == null ||
-      uri.scheme.toLowerCase() != 'https' ||
-      !uri.hasAuthority ||
-      uri.host.isEmpty ||
-      uri.userInfo.isNotEmpty ||
-      uri.authority.contains('@')) {
-    return null;
-  }
-  return uri.replace(scheme: 'wss');
-}
 
 /// AgentService — connects to the PiNest server via WebSocket.
 ///
@@ -830,116 +701,68 @@ class AgentService extends ChangeNotifier {
   /// Secret the server issued to this connection, used on HTTP requests.
   String? _httpKey;
 
-  /// The HTTP side of the same origin the socket reached.
-  ///
-  /// Actions go here rather than over the socket: a request gets its own
-  /// connection and a status code, so an 11 KB image cannot queue behind a
-  /// screenshot and a send cannot queue behind either. The socket is left for
-  /// what the server PUSHES.
-  Uri? get httpBase {
-    final endpoint = _activeEndpoint ?? _lastEndpoint;
-    if (endpoint == null) return null;
-    return endpoint.replace(
-      scheme: endpoint.scheme == 'wss' || endpoint.scheme == 'ws' ? 'https' : 'http',
-      path: '',
-      query: '',
-      fragment: '',
-    );
-  }
-
-  /// The endpoint the socket actually connected on. The discovery endpoint
-  /// stays available as the fallback, but HTTP must follow the origin the
-  /// socket really reached, or images and messages go to a different host than
-  /// the pushes came from.
+  /// The endpoint the socket actually connected on. Discovery stays available
+  /// as the fallback, but HTTP must follow the origin the socket really reached,
+  /// or images and messages go to a different host than the pushes came from.
   Uri? _activeEndpoint;
 
   /// The server's own loopback endpoint, from its state frames. Validated as
-  /// strictly loopback: this field arrives from outside the app process and
-  /// must never be able to aim the auth token at an arbitrary host.
+  /// strictly loopback: this field arrives from outside the app process and must
+  /// never be able to aim the auth token at an arbitrary host.
   Uri? _localEndpoint;
 
   /// The loopback endpoint a dial already refused, within its server
-  /// generation: the browser is not on the host's machine, so stop preferring
-  /// it until the server reports a different port.
+  /// generation: the browser is not on the host's machine, so stop preferring it
+  /// until the server reports a different port.
   Uri? _localFailed;
+
+  /// The HTTP half of this channel: images and actions, over the origin the
+  /// socket actually reached.
+  late final ServerHttp _http = ServerHttp(
+    endpoint: () => _activeEndpoint ?? _lastEndpoint,
+    accessKey: () => _httpKey,
+    onImage: (imageId, data) {
+      images.received(imageId, data);
+      notifyListeners();
+    },
+    onImageMissing: (imageId, reason) {
+      images.missing(imageId, reason);
+      notifyListeners();
+    },
+    onOffline: (cmd) {
+      if (_outbox.length < 50) {
+        _outbox.add(cmd);
+      }
+      notifyListeners();
+    },
+    onRefused: _failSend,
+  );
+
+  /// The origin HTTP requests go to, derived from the endpoint the socket
+  /// reached.
+  Uri? get httpBase => ServerHttp.originOf(_activeEndpoint ?? _lastEndpoint);
 
   /// History images, fetched on demand over HTTP (never shipped with history).
   late final ImageStore images = ImageStore((imageId) {
-    unawaited(_fetchImage(imageId));
+    unawaited(_http.fetchImage(imageId));
   });
-
-  Future<void> _fetchImage(String imageId) async {
-    final base = httpBase;
-    final key = _httpKey;
-    if (base == null || key == null) {
-      images.missing(imageId, 'not connected yet');
-      return;
-    }
-    final url = base.replace(path: '/image/$imageId');
-    try {
-      final response = await http.get(url, headers: {'x-pinest-key': key});
-      if (response.statusCode == 200) {
-        images.received(imageId, base64.encode(response.bodyBytes));
-        return;
-      }
-      // The server's own words, so "unavailable" has a reason.
-      images.missing(imageId, 'HTTP ${response.statusCode}');
-    } catch (e) {
-      images.missing(imageId, 'request failed: $e');
-    }
-  }
 
   void _send(Map<String, dynamic> cmd) {
     // A user message is an ACTION, not an observation: it goes over HTTP so its
     // outcome is a status code the app can act on.
     if (cmd['type'] == 'user_message') {
-      unawaited(_postMessage(cmd));
+      unawaited(_http.postMessage(cmd, online: _connected));
       return;
     }
     _ws?.send({'type': 'command', 'cmd': cmd});
   }
 
-  /// Deliver a message over HTTP; the reply decides whether it was accepted.
-  Future<void> _postMessage(Map<String, dynamic> cmd) async {
-    final base = httpBase;
-    final key = _httpKey;
-    if (base == null || key == null || !_connected) {
-      if (_outbox.length < 50) _outbox.add(cmd);
-      notifyListeners();
-      return;
-    }
-    try {
-      final response = await http.post(
-        base.replace(path: '/message'),
-        headers: {'content-type': 'application/json', 'x-pinest-key': key},
-        body: json.encode(cmd),
-      );
-      if (response.statusCode == 202) {
-        // Accepted for delivery: the transcript entry arrives as a push.
-        return;
-      }
-      _failSend(cmd, _httpReason(response));
-    } catch (e) {
-      _failSend(cmd, 'could not reach the server: $e');
-    }
-  }
-
-  String _httpReason(http.Response response) {
-    try {
-      final body = json.decode(response.body);
-      if (body is Map && body['error'] is String) {
-        return 'HTTP ${response.statusCode}: ${body['error']}';
-      }
-    } catch (_) {
-      // Fall through to the status line.
-    }
-    return 'HTTP ${response.statusCode}';
-  }
-
   /// Mark the tracked send that matches this command as refused, with its reason.
   void _failSend(Map<String, dynamic> cmd, String reason) {
     final sessionId = cmd['sessionId'] as String?;
-    if (sessionId == null) return;
+    if (sessionId == null) {
+      return;
+    }
     for (final message in _outgoing.forSession(sessionId)) {
       if (message.command['text'] == cmd['text']) {
         message.failure = reason;
