@@ -392,6 +392,11 @@ def ask_repeatedly(token: str, port: int, deadline: float, interval: float) -> N
                 print(f"authentication failed: {reply}", flush=True)
                 time.sleep(2)
                 continue
+            # Follow no session. This tool watches the runtime record, not a
+            # transcript, so a busy session's stream deltas are pure waste — and
+            # measured, they were enough to have the host close this connection
+            # with 1013 "client too slow" before any ask could land.
+            ws.send_text(json.dumps({"type": "subscribe", "sessionIds": []}))
             status = "unknown"
             status_at = 0.0
             while time.time() < deadline:
@@ -513,6 +518,8 @@ def main() -> int:
         ws = WebSocket(ports[0], AUTH_TIMEOUT_S)
         ws.send_text(json.dumps({"type": "auth", "token": token}))
         recv_json(ws, time.time() + AUTH_TIMEOUT_S)
+        # Only global state is read here, so nothing session-scoped is wanted.
+        ws.send_text(json.dumps({"type": "subscribe", "sessionIds": []}))
         print("watching the host session status (state frames arrive on every change)", flush=True)
         deadline = time.time() + args.watch_status
         last = None
