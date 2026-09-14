@@ -66,6 +66,13 @@ export interface P2PSignaling {
   /** Called on every poll with what the app last said about itself, or with the
    * reason its report could not be read. */
   onReport(handler: (seen: { report: ClientReport } | { problem: string } | null) => void): void;
+  /** Why this machine cannot READ the discovery document, if it cannot.
+   *
+   * A refused read is why a punch dies with nothing said at either end: the
+   * machine never sees the app's answer, and the app never sees the machine's
+   * presence. Measured live, that was an exhausted Firestore quota, and it was
+   * completely invisible. */
+  readError(): string | null;
   stop(): void;
 }
 
@@ -91,15 +98,21 @@ export function createP2PSignaling(deps: P2PSignalingDeps): P2PSignaling {
   let reported: number | null | undefined;
   let reportedGarbage = false;
   let timer: NodeJS.Timeout | undefined;
+  let lastReadError: string | null = null;
 
   const poll = async (): Promise<void> => {
     let read: DiscoveryRead;
     try {
       read = await deps.readDiscovery();
+      if (lastReadError !== null) {
+        lastReadError = null;
+      }
     } catch (error) {
-      // A failed read is reported on every poll: it is the difference between
-      // "the app is not answering" and "this machine cannot look".
-      debug(`[pinest] p2p signaling: discovery read failed: ${(error as Error).message}`);
+      // A failed read is kept, not just logged: it is the difference between
+      // "the app is not answering" and "this machine cannot look", and only one
+      // of those is a problem the operator can act on.
+      lastReadError = (error as Error).message;
+      debug(`[pinest] p2p signaling: discovery read failed: ${lastReadError}`);
       return;
     }
     for (const handler of reportHandlers) handler(read.report);
@@ -180,6 +193,7 @@ export function createP2PSignaling(deps: P2PSignalingDeps): P2PSignaling {
     onReport: (handler) => {
       reportHandlers.push(handler);
     },
+    readError: () => lastReadError,
     stop: () => {
       if (timer) clearTimeout(timer);
       timer = undefined;

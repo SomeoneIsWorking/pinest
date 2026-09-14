@@ -162,6 +162,9 @@ let _submitter: MessageSubmitter | null = null;
  * diagnosis can never be silently empty. */
 let _clientReport: { report: ClientReport } | { problem: string } | null = null;
 
+/** The signaling poll's own handle, for the reason a read failed. */
+let _signaling: { readError(): string | null } | null = null;
+
 /** The app's own report, in the shape the wire and the app's Settings screen
  * use. Null until the first poll reads something. */
 function clientReportView(): ClientReportView | null {
@@ -212,6 +215,7 @@ const _publisher = new StatePublisher({
   p2p: () => _directTransport?.status() ?? null,
   client: () => clientReportView(),
   presenceError: () => _presenceError,
+  signalingError: () => _signaling?.readError() ?? null,
   refreshUsage: () => { _supervisor?.refreshUsage?.(false); },
   send: (msg) => broadcast(msg),
 });
@@ -685,6 +689,7 @@ async function startDirectTransport(): Promise<void> {
         return { answer: { sdp, offerTs: typeof named === "number" ? named : null }, report };
       },
     });
+    _signaling = signaling;
     signaling.onReport((seen) => {
       _clientReport = seen;
     });

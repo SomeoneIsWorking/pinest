@@ -25,6 +25,8 @@ export interface StateSnapshot {
   client: ClientReportView | null;
   /** Why this machine cannot publish its own presence, when that is failing. */
   presenceError: string | null;
+  /** Why this machine cannot read the app's answer, when that is failing. */
+  signalingError: string | null;
 }
 
 export function buildStateMessage(snapshot: StateSnapshot): ServerMessage {
@@ -45,6 +47,7 @@ export function buildStateMessage(snapshot: StateSnapshot): ServerMessage {
     p2p: snapshot.p2p,
     client: snapshot.client,
     presenceError: snapshot.presenceError,
+    signalingError: snapshot.signalingError,
   };
 }
 

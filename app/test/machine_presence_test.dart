@@ -18,6 +18,7 @@ void main() {
       machineSeenAt: now.millisecondsSinceEpoch - 3000,
       reason: 'irrelevant',
       machinePresenceError: null,
+      machineSignalingError: null,
       now: now,
     );
     expect(presence.headline, 'No sessions yet');
@@ -31,6 +32,7 @@ void main() {
       machineSeenAt: now.millisecondsSinceEpoch - 12_000,
       reason: 'host.example: Failed to connect WebSocket',
       machinePresenceError: null,
+      machineSignalingError: null,
       now: now,
     );
     expect(presence.headline, 'Machine online, not reachable');
@@ -48,6 +50,7 @@ void main() {
       machineSeenAt: now.millisecondsSinceEpoch - 300_000,
       reason: 'connection refused',
       machinePresenceError: null,
+      machineSignalingError: null,
       now: now,
     );
     expect(presence.headline, 'Supervisor offline');
@@ -63,6 +66,7 @@ void main() {
       machineSeenAt: 0,
       reason: 'the machine has not published anything for this account yet',
       machinePresenceError: null,
+      machineSignalingError: null,
       now: now,
     );
     expect(presence.detail, contains('never been seen reporting a machine'));
@@ -80,6 +84,7 @@ void main() {
       machineSeenAt: 0,
       reason: 'no endpoint was dialable',
       machinePresenceError: 'Quota exceeded.',
+      machineSignalingError: null,
       now: now,
     );
     expect(presence.headline, 'Machine cannot be found');
@@ -95,9 +100,39 @@ void main() {
       machineSeenAt: now.millisecondsSinceEpoch - 5_000,
       reason: 'the tunnel hostname did not resolve',
       machinePresenceError: null,
+      machineSignalingError: null,
       now: now,
     );
     expect(presence.headline, 'Machine online, not reachable');
     expect(presence.detail, isNot(contains('cannot publish')));
+  });
+
+  test('a machine that cannot read your answer says that, separately', () {
+    final presence = describeMachinePresence(
+      connected: false,
+      machinePublishing: true,
+      machineSeenAt: now.millisecondsSinceEpoch,
+      reason: 'no endpoint was dialable',
+      machinePresenceError: null,
+      machineSignalingError: 'Quota exceeded.',
+      now: now,
+    );
+    expect(presence.headline, 'Machine cannot be found');
+    expect(presence.detail, contains('cannot read your answer'));
+    expect(presence.detail, contains('Quota exceeded.'));
+  });
+
+  test('both failures are shown when both happen', () {
+    final presence = describeMachinePresence(
+      connected: false,
+      machinePublishing: false,
+      machineSeenAt: 0,
+      reason: 'nothing to dial',
+      machinePresenceError: 'Quota exceeded.',
+      machineSignalingError: 'Quota exceeded.',
+      now: now,
+    );
+    expect(presence.detail, contains('cannot publish itself'));
+    expect(presence.detail, contains('cannot read your answer'));
   });
 }

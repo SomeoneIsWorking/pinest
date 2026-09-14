@@ -36,6 +36,7 @@ MachinePresence describeMachinePresence({
   required int machineSeenAt,
   required String reason,
   String? machinePresenceError,
+  String? machineSignalingError,
   DateTime? now,
 }) {
   if (connected) {
@@ -46,9 +47,16 @@ MachinePresence describeMachinePresence({
   // explain why. Measured live: an exhausted Firebase quota refused every
   // presence write, so the app showed "offline" for hours while the machine was
   // running perfectly and saying nothing about it.
-  final refusal = machinePresenceError == null || machinePresenceError.isEmpty
-      ? null
-      : machinePresenceError;
+  // Both ends of a broken exchange: a machine that cannot publish itself is
+  // invisible, and one that cannot read never receives an answer. Either one
+  // makes the app look offline while the machine runs perfectly.
+  final refusals = <String>[
+    if (machinePresenceError != null && machinePresenceError.isNotEmpty)
+      'The machine cannot publish itself: $machinePresenceError',
+    if (machineSignalingError != null && machineSignalingError.isNotEmpty)
+      'The machine cannot read your answer: $machineSignalingError',
+  ];
+  final refusal = refusals.isEmpty ? null : refusals.join('\n');
   final headline = refusal != null
       ? 'Machine cannot be found'
       : machinePublishing

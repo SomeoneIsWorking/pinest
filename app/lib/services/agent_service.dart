@@ -105,6 +105,9 @@ class AgentService extends ChangeNotifier {
   /// something the operator can fix.
   String? _presenceError;
 
+  /// Why the machine cannot read this app's answer, in its own words.
+  String? _signalingError;
+
   /// What the machine says it read back about THIS browser, from the `client`
   /// field of the state it sends. The machine's half of a diagnosis is in
   /// `_directStatus`; this is the mirror, so both ends are visible in one place.
@@ -189,6 +192,13 @@ class AgentService extends ChangeNotifier {
   /// The machine's own words for why it cannot be found, or null when nothing
   /// is wrong.
   String? get machinePresenceError => _presenceError;
+
+  /// The machine's own words for why it cannot READ this app's answer, or null.
+  ///
+  /// Two ends, two failures: a machine that cannot publish is invisible, and a
+  /// machine that cannot read never receives an answer - and both looked like
+  /// "offline" from here.
+  String? get machineSignalingError => _signalingError;
 
   Future<void> _writeClientReport(Map<String, dynamic> payload) async {
     final uid = _boundUid;
@@ -568,6 +578,7 @@ class AgentService extends ChangeNotifier {
         _httpKey = (msg['httpKey'] as String?) ?? _httpKey;
         _machineSeesClient = (msg['client'] as Map?)?['summary'] as String?;
         _presenceError = (msg['presenceError'] as String?)?.trim();
+        _signalingError = (msg['signalingError'] as String?)?.trim();
         _localEndpoint = secureLoopbackUri(msg['localUrl']);
         _tunnelUrl = msg['tunnelUrl'] as String?;
         _tunnelProvider = msg['tunnelProvider'] as String?;
