@@ -13,6 +13,7 @@ class DirectStatus {
     required this.offerAge,
     required this.channelOpen,
     required this.exchanges,
+    required this.channelCloses,
     required this.lastError,
   });
 
@@ -28,6 +29,10 @@ class DirectStatus {
   /// How many exchanges the machine has published since it started.
   final int exchanges;
 
+  /// Channels that opened and then closed: a punch that landed and was lost
+  /// reads differently from one that never landed at all.
+  final int channelCloses;
+
   /// The last thing that went wrong on the machine's side, verbatim.
   final String? lastError;
 
@@ -40,6 +45,7 @@ class DirectStatus {
       offerAge: ageMs == null ? null : Duration(milliseconds: ageMs),
       channelOpen: raw['channelOpen'] == true,
       exchanges: (raw['exchanges'] as num?)?.toInt() ?? 0,
+      channelCloses: (raw['channelCloses'] as num?)?.toInt() ?? 0,
       lastError: (raw['lastError'] as String?)?.trim(),
     );
   }
@@ -57,7 +63,10 @@ class DirectStatus {
       return 'A peer is connected directly$age.';
     }
     final error = lastError == null || lastError!.isEmpty ? '' : ' Last error: $lastError';
-    return 'Offering a direct connection$age; no peer connected yet.$error';
+    final closings = channelCloses == 0
+        ? ''
+        : ' A channel opened and closed ${channelCloses == 1 ? 'once' : '$channelCloses times'}.';
+    return 'Offering a direct connection$age; no peer connected yet.$closings$error';
   }
 
   String _age() {

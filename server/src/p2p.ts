@@ -23,7 +23,6 @@
  * is checked against node_modules/werift/lib/webrtc/src/*.d.ts, not guessed. */
 
 import { RTCDataChannel, RTCPeerConnection, RTCSessionDescription } from "werift";
-import type { LoopbackChannels } from "./p2p-bridge.ts";
 
 export interface P2PExchangeOptions {
   /** Publish this exchange's offer, with the timestamp that identifies it. */
@@ -45,7 +44,7 @@ export interface P2PExchange {
    * connected before ICE, DTLS or SCTP had done anything, so a transport would
    * believe it was serving someone when nobody was there. A channel that closes
    * before it opens rejects instead. */
-  channels: Promise<LoopbackChannels>;
+  channels: Promise<P2PChannels>;
   close(): void;
 }
 
@@ -54,6 +53,36 @@ export interface P2PExchange {
  * in front of the user's next command, and those are different jobs. */
 export const PUSH_CHANNEL_LABEL = "pinest-push";
 export const ACTIONS_CHANNEL_LABEL = "pinest-actions";
+
+/** One channel of the exchange, as a consumer sees it.
+ *
+ * `attach` exists because a peer may speak the INSTANT its channel opens: the
+ * app sends its auth handshake as soon as `connect` returns, while this end
+ * resolves the channel promise at that same moment and builds the bridge a beat
+ * later. Attaching a handler in that window dropped the handshake, the machine's
+ * own server closed the socket for being unauthenticated after ten seconds, and
+ * the direct channel looked like a punch that never landed - measured live,
+ * where both channels opened and no frame ever arrived. The exchange therefore
+ * owns the handlers from the moment a channel exists: frames that arrive before
+ * anyone is listening are held, and `attach` delivers them in order. A channel
+ * that has already closed is reported to the attacher rather than lost. */
+export interface P2PChannel {
+  /** Send one framed message. Throws if the channel cannot send; the caller
+   * owns reporting that, because a channel that refuses to send is dead. */
+  send(data: Buffer): void;
+  /** Take over delivery, receiving everything already queued. */
+  attach(handlers: {
+    onMessage: (data: string | Buffer) => void;
+    onClosed: () => void;
+  }): void;
+}
+
+export interface P2PChannels {
+  /** Host → app: state, streams, notices. */
+  push: P2PChannel;
+  /** App → host: commands, requests. */
+  actions: P2PChannel;
+}
 
 /** Several independent STUN views of the same socket: a carrier that filters
  * one provider still yields a reflexive candidate from another, and each
@@ -84,13 +113,43 @@ export function startP2PExchange(options: P2PExchangeOptions): P2PExchange {
     iceServers: (options.stunServers ?? DEFAULT_STUN).map((urls) => ({ urls })),
   });
 
-  const opened = new Map<string, RTCDataChannel>();
-  let resolveChannels: (channels: LoopbackChannels) => void = () => {};
+  const opened = new Map<string, P2PChannel>();
+  let resolveChannels: (channels: P2PChannels) => void = () => {};
   let rejectChannels: (error: Error) => void = () => {};
-  const channels = new Promise<LoopbackChannels>((resolve, reject) => {
+  const channels = new Promise<P2PChannels>((resolve, reject) => {
     resolveChannels = resolve;
     rejectChannels = reject;
   });
+
+  /** Hold everything a channel says until a consumer takes over. */
+  const wrap = (dataChannel: RTCDataChannel): P2PChannel => {
+    const queue: (string | Buffer)[] = [];
+    let handlers: Parameters<P2PChannel["attach"]>[0] | null = null;
+    let closed = false;
+    dataChannel.onmessage = (event) => {
+      if (handlers) {
+        handlers.onMessage(event.data);
+      } else {
+        queue.push(event.data);
+      }
+    };
+    dataChannel.onclose = () => {
+      closed = true;
+      handlers?.onClosed();
+    };
+    return {
+      send: (data) => dataChannel.send(data),
+      attach: (next) => {
+        handlers = next;
+        for (const data of queue.splice(0)) {
+          next.onMessage(data);
+        }
+        if (closed) {
+          next.onClosed();
+        }
+      },
+    };
+  };
 
   /** Resolve once BOTH channels of this exchange are open. A channel that
    * closes before opening rejects: an exchange that reports channels before ICE
@@ -99,7 +158,7 @@ export function startP2PExchange(options: P2PExchangeOptions): P2PExchange {
     const label = dataChannel.label;
     if (opened.has(label)) return;
     const ready = (): void => {
-      opened.set(label, dataChannel);
+      opened.set(label, wrap(dataChannel));
       const push = opened.get(PUSH_CHANNEL_LABEL);
       const actions = opened.get(ACTIONS_CHANNEL_LABEL);
       if (push && actions) {

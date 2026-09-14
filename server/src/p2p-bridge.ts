@@ -21,30 +21,24 @@
 import WebSocket from "ws";
 import debug from "./log.ts";
 import { FrameError, FrameReader, FrameWriter } from "./p2p-framing.ts";
-import type { RTCDataChannel } from "werift";
+import type { P2PChannel, P2PChannels } from "./p2p.ts";
 
 export interface LoopbackBridge {
   close(): void;
 }
 
-/** The two directions of the transport, named for where their data goes: the
- * app receives on `push` and sends on `actions`. Only the directions differ;
- * both carry the same framed protocol. */
-export interface LoopbackChannels {
-  /** Host → app: state, streams, notices. */
-  push: RTCDataChannel;
-  /** App → host: commands, requests. */
-  actions: RTCDataChannel;
-}
-
 /** Told when the channel that feeds this bridge ends, so a transport can stop
- * believing it is still connected. */
+ * believing it is still connected, and when the bridge itself fails, so the
+ * machine can SAY so instead of leaving a stderr line nobody reads. The reason
+ * a direct channel opened and then went nowhere is exactly the kind of fact
+ * that has to be visible from outside. */
 export interface LoopbackBridgeEvents {
   onClosed?: () => void;
+  onError?: (message: string) => void;
 }
 
 export function bridgeToLoopback(
-  channels: LoopbackChannels,
+  channels: P2PChannels,
   port: number,
   events: LoopbackBridgeEvents = {},
 ): LoopbackBridge {
@@ -52,12 +46,17 @@ export function bridgeToLoopback(
   const writer = new FrameWriter();
   const reader = new FrameReader();
   const pending: (string | Buffer)[] = [];
+  /** Whether this end is closing, so a routine close is not read as a
+   * server-side refusal. */
+  let closing = false;
 
   /** A channel that refuses to send is dead: report it and end this bridge
    * rather than throwing through whoever called `send` - an uncaught throw here
    * took the whole agent process down. */
   const failed = (error: unknown): void => {
-    debug(`[pinest] p2p bridge: ${(error as Error).message}`);
+    const message = (error as Error).message;
+    debug(`[pinest] p2p bridge: ${message}`);
+    events.onError?.(message);
     close();
     events.onClosed?.();
   };
@@ -83,22 +82,27 @@ export function bridgeToLoopback(
     return Buffer.from(new Uint8Array(data));
   };
 
-  channels.actions.onmessage = (event) => {
-    try {
-      const payload = reader.accept(asBytes(event.data as string | Buffer | ArrayBuffer));
-      if (payload === null) {
-        return;
+  // `attach` hands over everything the channel has already said: the app speaks
+  // the moment its channel opens, which is before this bridge exists.
+  channels.actions.attach({
+    onMessage: (data) => {
+      try {
+        const payload = reader.accept(asBytes(data as string | Buffer | ArrayBuffer));
+        if (payload === null) {
+          return;
+        }
+        debug(`[pinest] p2p bridge: channel → server (${payload.length}b)`);
+        forwardToServer(payload);
+      } catch (error) {
+        failed(error);
       }
-      debug(`[pinest] p2p bridge: channel → server (${payload.length}b)`);
-      forwardToServer(payload);
-    } catch (error) {
-      failed(error);
-    }
-  };
-  channels.actions.onclose = () => {
-    socket.close();
-    events.onClosed?.();
-  };
+    },
+    onClosed: () => {
+      closing = true;
+      socket.close();
+      events.onClosed?.();
+    },
+  });
 
   socket.on("open", () => {
     for (const data of pending.splice(0)) {
@@ -117,27 +121,34 @@ export function bridgeToLoopback(
       failed(error);
     }
   });
-  socket.on("close", () => {
-    try {
-      channels.push.close();
-      channels.actions.close();
-    } catch {
-      /* already closed */
+  socket.on("close", (code: number, reason: Buffer) => {
+    // The channels belong to the exchange, which closes them: this bridge only
+    // reports that the pipe ended.
+    // A server-ended socket carries the reason the transport cannot otherwise
+    // see: an unauthenticated one is closed after ten seconds, which looks
+    // exactly like a peer that sent nothing. Routine closes (1000/1005, which
+    // is what this end's own close() produces) are not failures and are not
+    // reported as one.
+    if (!closing && code !== 1000 && code !== 1005) {
+      events.onError?.(
+        `the machine's own server ended the bridge socket (${code} ${reason?.toString() || "no reason"})`,
+      );
     }
+    events.onClosed?.();
   });
   // Fail loudly: a bridge that cannot reach the loopback server is a broken
   // transport, not a transient condition to retry silently.
   socket.on("error", (error: Error) => {
+    // The loopback server is where every frame must go; a bridge that cannot
+    // reach it carries nothing, and that is reported rather than logged.
     debug(`[pinest] p2p bridge socket error: ${error.message}`);
+    events.onError?.(
+      `the loopback bridge could not reach the machine's own server: ${error.message}`,
+    );
   });
 
   function close(): void {
-    try {
-      channels.push.close();
-      channels.actions.close();
-    } catch {
-      /* already closed */
-    }
+    closing = true;
     socket.close();
   }
 

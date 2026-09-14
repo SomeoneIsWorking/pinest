@@ -49,6 +49,9 @@ export interface DirectTransportStatus {
   channelOpen: boolean;
   /** How many exchanges have been published since startup. */
   exchanges: number;
+  /** How many times a direct channel has closed after opening, so a channel
+   * that opens and dies is not read as one that never opened. */
+  channelCloses: number;
   /** The last thing that went wrong, verbatim. Null when nothing has. */
   lastError: string | null;
 }
@@ -92,6 +95,10 @@ interface Live {
   offerTs: number;
   answeredAt: number;
   channelOpen: boolean;
+  /** The channel opened and then ended: this exchange is spent, and the app is
+   * waiting for a newer offer to retry against, so it is replaced at once
+   * rather than after the rest of its lifetime. */
+  dead: boolean;
 }
 
 export async function offerDirectTransport(
@@ -101,6 +108,7 @@ export async function offerDirectTransport(
   const now = options.now ?? Date.now;
   let live: Live | null = null;
   let exchanges = 0;
+  let channelCloses = 0;
   let lastError: string | null = null;
   let closed = false;
   let refreshing = false;
@@ -124,7 +132,7 @@ export async function offerDirectTransport(
       log: (message) => log(`direct transport: ${message}`),
     }));
     const peer = build(options.publishOffer);
-    const current: Live = { peer, offerTs: ts, answeredAt: 0, channelOpen: false };
+    const current: Live = { peer, offerTs: ts, answeredAt: 0, channelOpen: false, dead: false };
     live = current;
     exchanges += 1;
 
@@ -139,8 +147,20 @@ export async function offerDirectTransport(
         log("direct transport: both channels open, bridging to the loopback server");
         bridgeToLoopback(channels, port, {
           onClosed: () => {
-            current.channelOpen = false;
-            log("direct transport: channel closed; the next stale offer replaces it");
+            if (live !== current) {
+              return;
+            }
+            if (current.channelOpen) {
+              current.channelOpen = false;
+              channelCloses += 1;
+            }
+            current.dead = true;
+            peer.close();
+            log("direct transport: the direct channel ended; a fresh offer is published");
+          },
+          onError: (message) => {
+            lastError = message;
+            log(`direct transport: bridge failed: ${message}`);
           },
         });
       })
@@ -167,7 +187,7 @@ export async function offerDirectTransport(
     // The clock starts at the last activity, not at the offer: an answered
     // punch is still in flight and must be allowed to land.
     const since = Math.max(live.offerTs, live.answeredAt);
-    if (now() - since < OFFER_LIFETIME_MS) {
+    if (!live.dead && now() - since < OFFER_LIFETIME_MS) {
       return;
     }
     refreshing = true;
@@ -197,6 +217,7 @@ export async function offerDirectTransport(
       offerAgeMs: live ? now() - live.offerTs : null,
       channelOpen: live?.channelOpen ?? false,
       exchanges,
+      channelCloses,
       lastError,
     }),
     close: async () => {

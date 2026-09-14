@@ -147,6 +147,17 @@ is published and the channel carries the auth handshake, a command, and an
 inbound frame; a peer that never opens a channel fails as a timeout rather than
 hanging; a description that is not an offer is refused.
 
+The transport owns its channels from the moment they exist. A peer may speak the
+instant its channel opens - the app sends its auth handshake as `connect`
+returns, while the machine resolves its channel promise at that same moment and
+builds the bridge a beat later - so a handler attached after that loses the
+handshake, the machine's own server closes the socket for being unauthenticated
+after ten seconds, and the direct channel reads as a punch that never landed.
+Measured live: both channels opened and no frame ever arrived. The exchange now
+buffers what a channel says until a consumer attaches (and reports a channel
+that closed before anyone listened), which the regression test proves by sending
+the frame before the bridge exists.
+
 The transport carries the protocol's own messages, whatever their size. A
 DataChannel message is bounded by the SCTP maximum a peer advertises and werift
 enforces it by throwing; the machine's first push after a direct channel opened

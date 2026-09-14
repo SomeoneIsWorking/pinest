@@ -198,6 +198,9 @@ export interface DirectTransportWireStatus {
   offerAgeMs: number | null;
   channelOpen: boolean;
   exchanges: number;
+  /** Channels that opened and then closed: a punch that landed and was lost
+   * reads differently from one that never landed. */
+  channelCloses: number;
   lastError: string | null;
 }
 
