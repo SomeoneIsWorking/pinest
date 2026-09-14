@@ -12,7 +12,7 @@ import { WebSocketServer, WebSocket, type RawData } from "ws";
 import type { HttpHistoryRunner } from "./http-api.ts";
 import { createAccessKey, createHttpApi } from "./http-api.ts";
 import debug from "./log.ts";
-import { startTunnel as startProviderTunnel, type StartTunnelResult } from "./tunnel.ts";
+import { startTunnel as startProviderTunnel, type SpawnedAttempt, type StartTunnelResult } from "./tunnel.ts";
 import type { ServerMessage, ClientCommand } from "./protocol.ts";
 
 export interface VerifiedToken {
@@ -112,6 +112,8 @@ export class WSServer {
   private expectedUid: string;
   private wss: WebSocketServer | null = null;
   private httpServer: Server | null = null;
+  /** Processes from tunnel attempts that have not resolved yet. */
+  private tunnelAttempts: SpawnedAttempt[] = [];
   tunnel: StartTunnelResult | null = null;
   tunnelUrl: string | null = null;
   /** authenticated clients */
@@ -557,8 +559,29 @@ export class WSServer {
    * Returns the chosen provider name | null.
    */
   async startTunnel(preferred?: string): Promise<string | null> {
-    this.tunnel = await startProviderTunnel({ port: this.port, preferred });
+    // A tunnel can take minutes to verify, and a teardown during that window
+    // has no handle to stop. Every spawned process is tracked from the moment
+    // it exists so a reload cannot leave it running behind a dead port.
+    this.tunnel = await startProviderTunnel({
+      port: this.port,
+      preferred,
+      onSpawn: (attempt) => {
+        if (this.stopped) {
+          attempt.kill();
+          return;
+        }
+        this.tunnelAttempts.push(attempt);
+      },
+    });
+    if (this.stopped) {
+      // Torn down while this was starting: publish nothing and leave nothing
+      // running.
+      try { this.tunnel?.stop?.(); } catch { /* */ }
+      this.tunnel = null;
+      return null;
+    }
     this.tunnelUrl = this.tunnel?.url ?? null;
+    this.tunnelAttempts = [];
     if (this.tunnel) {
       this.tunnel.onDead = () => this.tunnelOnDead?.();
       // A quick tunnel can re-register under a new hostname while its process
@@ -590,6 +613,10 @@ export class WSServer {
   stop(): void {
     this.httpServer?.close();
     this.stopped = true;
+    for (const attempt of this.tunnelAttempts) {
+      attempt.kill();
+    }
+    this.tunnelAttempts = [];
     try { this.tunnel?.stop?.(); } catch { /* */ }
     this.tunnel = null;
     this.tunnelUrl = null;

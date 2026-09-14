@@ -12,6 +12,8 @@
 import { accessSync, constants as fsConstants, realpathSync } from "node:fs";
 import { delimiter, join, sep } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
+import https from "node:https";
+import type { IncomingMessage } from "node:http";
 import debug from "./log.ts";
 
 export interface TunnelHandle {
@@ -29,7 +31,11 @@ export interface TunnelProvider {
   label: string;
   available: () => boolean;
   installHint: string;
-  start: (opts: { port: number }) => Promise<TunnelHandle>;
+  start: (opts: {
+    port: number;
+    /** Report the spawned process so an owner can cancel a pending attempt. */
+    onSpawn?: (kill: () => void) => void;
+  }) => Promise<TunnelHandle>;
 }
 
 function isNodeModulesPath(path: string): boolean {
@@ -195,27 +201,129 @@ export function firstValidTunnelEndpoint(
  * proves the whole path - name, edge, tunnel, local server - so 401 from our
  * own auth boundary is success, not an error.
  */
-export async function endpointAnswers(
+/** Independent resolvers used to prove a public name resolves. The host's own
+ * resolver is NOT the oracle: measured on this connection, the local stub
+ * returns NXDOMAIN for a healthy `*.trycloudflare.com` name while public
+ * resolvers answer it. Judging the tunnel by the local resolver turned a
+ * working tunnel into a killed one and left the app with no URL at all. */
+export const PUBLIC_RESOLVERS = ["1.1.1.1", "8.8.8.8"];
+
+export interface EndpointProof {
+  /** The public path answered: name → edge → tunnel → this server. */
+  answered: boolean;
+  /** Which resolution proved it, for reporting rather than guessing. */
+  vantage: "local" | "public-dns" | "none";
+  /** The last failure reason, so "no URL published" is never unexplained. */
+  reason: string;
+}
+
+/** One HTTPS request to a specific address while presenting `servername`:
+ * certificate verification stays on (the certificate must match the tunnel's
+ * name); only the address lookup is bypassed. */
+function httpsRequest(options: { host: string; servername: string; path: string }): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      {
+        host: options.host,
+        servername: options.servername,
+        path: options.path,
+        method: "GET",
+        timeout: 5_000,
+        headers: { Host: options.servername },
+      },
+      (res: IncomingMessage) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      },
+    );
+    req.on("timeout", () => req.destroy(new Error("request timed out")));
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+/** Resolve a hostname through explicit resolvers, or return null. */
+async function resolveWith(hostname: string, servers: string[] | null): Promise<string | null> {
+  const dns = await import("node:dns/promises");
+  const resolver = new dns.Resolver({ timeout: 4_000, tries: 2 });
+  if (servers) resolver.setServers(servers);
+  const addresses = await resolver.resolve4(hostname).catch(() => null);
+  return addresses?.[0] ?? null;
+}
+
+/**
+ * Prove the public URL works, without trusting this machine's resolver.
+ *
+ * A name this host cannot resolve can be perfectly healthy for everyone else,
+ * so the check resolves through public resolvers, connects to the address they
+ * return with the tunnel's own name for TLS and Host, and accepts ANY HTTP
+ * status - a 401 from our own auth boundary proves the whole path, which is
+ * what has to work before the app is told to use the URL.
+ *
+ * The local resolver is still tried first, because when it works it is the
+ * cheapest and most faithful check.
+ */
+export async function probeEndpoint(
   url: string,
   deps: {
     fetchImpl?: typeof fetch;
+    requestImpl?: typeof httpsRequest;
+    resolveImpl?: (hostname: string, servers: string[] | null) => Promise<string | null>;
     sleepMs?: (ms: number) => Promise<void>;
     deadlineMs?: number;
+    publicResolvers?: string[];
   } = {},
-): Promise<boolean> {
+): Promise<EndpointProof> {
   const fetchImpl = deps.fetchImpl ?? fetch;
+  const resolveImpl = deps.resolveImpl ?? resolveWith;
   const sleep = deps.sleepMs ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const deadline = Date.now() + (deps.deadlineMs ?? 330_000);
+  const resolvers = deps.publicResolvers ?? PUBLIC_RESOLVERS;
+  let reason = "no attempt made";
   while (Date.now() < deadline) {
     try {
       const res = await fetchImpl(`${url}/image/tunnel-probe`, { signal: AbortSignal.timeout(5_000) });
-      if (res.status > 0) return true;
-    } catch {
-      // The name does not resolve yet; that is the normal early state.
+      if (res.status > 0) return { answered: true, vantage: "local", reason: "" };
+      reason = "local request returned no status";
+    } catch (error) {
+      reason = `local request failed: ${(error as Error).message}`;
+    }
+
+    // An empty resolver list means "decide locally only": tests use it to stay
+    // offline, and a caller that cannot reach public resolvers is not silently
+    // given a different verdict - it is given the local one.
+    if (resolvers.length === 0) {
+      await sleep(2_000);
+      continue;
+    }
+    const hostname = new URL(url).hostname;
+    const address = await resolveImpl(hostname, resolvers).catch((error: Error) => {
+      reason = `public resolution failed: ${error.message}`;
+      return null;
+    });
+    if (address) {
+      const status = await (deps.requestImpl ?? httpsRequest)({
+        host: address,
+        servername: hostname,
+        path: "/image/tunnel-probe",
+      }).catch((error: Error) => {
+        reason = `resolved to ${address} but no answer: ${error.message}`;
+        return 0;
+      });
+      if (status > 0) return { answered: true, vantage: "public-dns", reason: "" };
+      reason = `resolved to ${address} but it did not answer`;
     }
     await sleep(2_000);
   }
-  return false;
+  return { answered: false, vantage: "none", reason };
+}
+
+/** Whether the endpoint answers, for callers that only need the answer. */
+export async function endpointAnswers(
+  url: string,
+  deps: Parameters<typeof probeEndpoint>[1] = {},
+): Promise<boolean> {
+  return (await probeEndpoint(url, deps)).answered;
 }
 
 export function cloudflaredInstallHint(platform: NodeJS.Platform = process.platform): string {
@@ -267,7 +375,7 @@ const cloudflaredProvider: TunnelProvider = {
   label: "cloudflared",
   available: () => resolveCloudflaredBin() !== null,
   installHint: cloudflaredInstallHint(),
-  start({ port }) {
+  start({ port, onSpawn }) {
     const bin = resolveCloudflaredBin();
     if (!bin) {
       throw new Error(`cloudflared binary not found. Install it first: ${cloudflaredInstallHint()}`);
@@ -283,6 +391,7 @@ const cloudflaredProvider: TunnelProvider = {
         stdio: ["ignore", "pipe", "pipe"],
       });
       const killProc = makeProcKill(proc);
+      onSpawn?.(killProc);
       timer = setTimeout(
         // The budget covers URL capture (a few seconds) plus the reachability
         // verification, which must outwait a poisoned resolver cache: a name
@@ -511,13 +620,50 @@ export interface StartTunnelResult extends TunnelHandle {
  * order until one works. Never throws.
  * Returns { provider, url, stop }, with provider=null on failure.
  */
+export interface SpawnedAttempt {
+  /** Kill the process this attempt started, if it has one yet. */
+  kill(): void;
+  /** Mark the attempt abandoned: it must not be adopted when it resolves. */
+  cancel(): void;
+  /** Whether the attempt has been abandoned. */
+  cancelled(): boolean;
+}
+
 export async function startTunnel(opts: {
   port: number;
   preferred?: string;
   providers?: TunnelProvider[];
+  /** Called the moment a provider process exists, BEFORE the attempt resolves.
+   * A reload can tear the server down while a tunnel is still being verified,
+   * and at that point there is no handle to stop: without this hook the process
+   * survives its owner and keeps a public name pointed at a dead port
+   * (measured: one orphaned cloudflared per reload). */
+  onSpawn?: (attempt: SpawnedAttempt) => void;
 }): Promise<StartTunnelResult> {
   const { port, preferred } = opts;
   const registry = opts.providers ?? PROVIDERS;
+  const attempts: SpawnedAttempt[] = [];
+
+  const watch = (kill: () => void): SpawnedAttempt => {
+    let abandoned = false;
+    const attempt: SpawnedAttempt = {
+      kill: () => {
+        abandoned = true;
+        try {
+          kill();
+        } catch {
+          /* already gone */
+        }
+      },
+      cancel: () => {
+        abandoned = true;
+      },
+      cancelled: () => abandoned,
+    };
+    attempts.push(attempt);
+    opts.onSpawn?.(attempt);
+    return attempt;
+  };
 
   // An explicit "off" preference disables the tunnel entirely (local-only).
   // This is a deliberate choice, not a fallback, so honor it directly.
@@ -536,9 +682,25 @@ export async function startTunnel(opts: {
   for (const p of order) {
     if (p.name === "off") continue;
     if (!p.available()) continue;
+    let attempt: SpawnedAttempt | null = null;
     try {
       debug(`[remote-code] trying tunnel provider: ${p.name}`);
-      const { url, stop } = await p.start({ port });
+      const { url, stop } = await p.start({
+        port,
+        onSpawn: (kill) => {
+          attempt = watch(kill);
+        },
+      });
+      if (attempt !== null && (attempt as SpawnedAttempt).cancelled()) {
+        // The owner left while this was still being verified. Adopting it would
+        // publish a name that points at a server nobody is running.
+        try {
+          stop();
+        } catch {
+          /* already gone */
+        }
+        throw new Error("cancelled while starting");
+      }
       if (url) {
         debug(`[remote-code] tunnel up via ${p.name}: ${url}`);
         return { provider: p.name, url, stop };
@@ -546,6 +708,11 @@ export async function startTunnel(opts: {
     } catch (e) {
       debug(`[remote-code] ${p.name} failed: ${(e as Error).message}`);
     }
+  }
+  // Nothing succeeded. Any attempt whose process is still alive is killed here
+  // rather than left for the next generation to trip over.
+  for (const attempt of attempts) {
+    attempt.kill();
   }
   debug("[remote-code] no tunnel provider succeeded — running local-only");
   return { provider: null, url: null, stop: () => {} };

@@ -8,6 +8,7 @@ import { delimiter, join } from "node:path";
 import {
   PROVIDERS, PROVIDER_NAMES, DEFAULT_PROVIDER, cloudflaredArgs, cloudflaredInstallHint,
   adoptTunnelEndpoint, endpointAnswers, firstValidTunnelEndpoint, getProvider, makeLineReader, ngrokArgs,
+  probeEndpoint, PUBLIC_RESOLVERS, type SpawnedAttempt, type TunnelProvider,
   readNgrokApiUrl,
   resolveRunnableSystemExecutable, resolveSystemExecutable, startTunnel,
   tailscaleInstallHint, validateTunnelEndpoint,
@@ -487,6 +488,7 @@ test("an endpoint is not confirmed until the public path answers", async () => {
     }) as typeof fetch,
     sleepMs: async (ms) => { sleeps.push(ms); },
     deadlineMs: 10_000,
+    publicResolvers: [],
   });
   assert.equal(ok, true, "a status code through the public path is reachability");
   assert.equal(attempts, 3);
@@ -498,6 +500,94 @@ test("an endpoint that never answers is refused, not published on faith", async 
     fetchImpl: (async () => { throw new TypeError("getaddrinfo ENOTFOUND"); }) as unknown as typeof fetch,
     sleepMs: async () => {},
     deadlineMs: 50,
+    publicResolvers: [],
   });
   assert.equal(ok, false);
+});
+
+test("a name THIS host cannot resolve is still proven through public DNS", async () => {
+  // Measured failure: the local stub returns NXDOMAIN for a healthy
+  // *.trycloudflare.com name while public resolvers answer it. Judging the
+  // tunnel by the local resolver killed a working tunnel and published nothing,
+  // so the check must be able to prove the path without it.
+  const probes: string[] = [];
+  const proof = await probeEndpoint("https://cfr-pasta-packed-jam.trycloudflare.com", {
+    fetchImpl: (async (input) => {
+      probes.push(String(input));
+      throw new TypeError("getaddrinfo ENOTFOUND cfr-pasta-packed-jam.trycloudflare.com");
+    }) as unknown as typeof fetch,
+    resolveImpl: async (hostname, servers) => {
+      assert.equal(hostname, "cfr-pasta-packed-jam.trycloudflare.com");
+      assert.deepEqual(servers, PUBLIC_RESOLVERS);
+      return "198.41.200.63";
+    },
+    requestImpl: async (options) => {
+      assert.equal(options.host, "198.41.200.63");
+      assert.equal(options.servername, "cfr-pasta-packed-jam.trycloudflare.com");
+      assert.equal(options.path, "/image/tunnel-probe");
+      return 401;   // our own auth boundary: the whole path works
+    },
+    sleepMs: async () => {},
+    deadlineMs: 5_000,
+  });
+  assert.equal(proof.answered, true);
+  assert.equal(proof.vantage, "public-dns");
+  assert.equal(probes.length, 1, "it tried locally first, then elsewhere");
+});
+
+test("nothing answering anywhere is refused, with the reason kept", async () => {
+  const proof = await probeEndpoint("https://never.example", {
+    fetchImpl: (async () => { throw new TypeError("getaddrinfo ENOTFOUND"); }) as unknown as typeof fetch,
+    resolveImpl: async () => null,
+    sleepMs: async () => {},
+    deadlineMs: 50,
+  });
+  assert.equal(proof.answered, false);
+  assert.equal(proof.vantage, "none");
+  assert.match(proof.reason, /resolution|local request/, "the reason is reported, not lost");
+});
+
+test("a cancelled attempt is never adopted, and its process is killed", async () => {
+  // A reload during verification leaves no handle to stop: without this the
+  // process outlives its server and a public name points at a dead port.
+  let killed = 0;
+  let attemptRef: SpawnedAttempt | null = null;
+  const fake: TunnelProvider = {
+    name: "cloudflared",
+    label: "cloudflared",
+    available: () => true,
+    installHint: "",
+    start: async ({ onSpawn }) => {
+      onSpawn?.(() => { killed++; });
+      await new Promise((r) => setTimeout(r, 10));
+      return { url: "https://late.example", stop: () => {} };
+    },
+  };
+  const result = await startTunnel({
+    port: 1,
+    preferred: "cloudflared",
+    providers: [fake],
+    onSpawn: (attempt) => { attemptRef = attempt; attempt.cancel(); },
+  });
+  assert.equal(result.provider, null, "a cancelled attempt does not become the tunnel");
+  assert.equal(result.url, null);
+  assert.equal(killed, 1, "the process it started was killed");
+  assert.ok(attemptRef !== null);
+});
+
+test("an attempt whose provider fails has its process killed, not leaked", async () => {
+  let killed = 0;
+  const fake: TunnelProvider = {
+    name: "cloudflared",
+    label: "cloudflared",
+    available: () => true,
+    installHint: "",
+    start: async ({ onSpawn }) => {
+      onSpawn?.(() => { killed++; });
+      return { url: null, stop: () => {} };
+    },
+  };
+  const result = await startTunnel({ port: 1, preferred: "cloudflared", providers: [fake] });
+  assert.equal(result.provider, null);
+  assert.equal(killed, 1);
 });
