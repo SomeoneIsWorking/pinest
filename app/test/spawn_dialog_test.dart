@@ -13,7 +13,6 @@ class _StubAgentService extends ChangeNotifier implements AgentService {
   Future<bool> checkPath(String path) async => true;
 
   @override
-  @override
   SessionGoal? get goal => null;
 
   @override
@@ -22,6 +21,7 @@ class _StubAgentService extends ChangeNotifier implements AgentService {
   @override
   void setGoal(String objective) {}
 
+  @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
