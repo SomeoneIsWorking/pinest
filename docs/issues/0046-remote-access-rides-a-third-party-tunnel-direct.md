@@ -22,3 +22,6 @@ WebRTC DataChannel as a transport beside the socket: browser-native, UDP/ICE hol
 
 ## Falsifier
 If ICE between this host's CGNAT and a phone's CGNAT fails without TURN more than rarely in real use, the no-third-party goal needs a self-hosted TURN server - a named follow-up, not a silent one.
+
+### Note (2026-09-14)
+Milestone 1 done: the host's offer is published through the real discovery document and a peer completes the exchange. Live evidence (2026-09-14): offer 812 bytes with 1 srflx candidate through the ISP CGNAT; the answering peer read the offer from the doc, wrote its answer back through the deployed rules, completed ICE/DTLS/SCTP, and a frame crossed the DataChannel into a loopback WS server and back (scratch/p2p-live-probe.mjs). app/firestore.rules now validates signaling writes (deployed); tools/verify_firestore_rules.py proves a valid answer write is accepted and a bogus one refused. Remaining: the browser RTCPeerConnection answer path, then action/response framing.

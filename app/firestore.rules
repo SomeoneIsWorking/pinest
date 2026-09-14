@@ -77,12 +77,15 @@ service cloud.firestore {
     }
 
     // A write that only touches signaling fields is judged as signaling: the
-    // app answers an offer without having to re-assert the machine's presence
-    // freshness, which it does not own.
+    // machine offers and the app answers without either having to re-assert the
+    // presence freshness that the machine's heartbeat owns. Both pairs count -
+    // restricting this to the answer refuses the machine's own offer.
     function touchesOnlySignaling() {
       let affected = request.resource.data.diff(resource.data).affectedKeys();
-      return affected.hasOnly(['p2pAnswer', 'p2pAnswerTs'])
-        && (affected.hasAny(['p2pAnswer', 'p2pAnswerTs']));
+      return affected.hasOnly(
+          ['p2pOffer', 'p2pOfferTs', 'p2pAnswer', 'p2pAnswerTs'])
+        && (affected.hasAny(
+          ['p2pOffer', 'p2pOfferTs', 'p2pAnswer', 'p2pAnswerTs']));
     }
 
     // ── Discovery + signaling doc ─────────────────────────────────────────

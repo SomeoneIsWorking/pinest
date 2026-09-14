@@ -16,3 +16,6 @@ config tunnelProvider is already cloudflared, but the cloudflared binary was not
 
 ## Done when
 The host runs a cloudflared tunnel, the state snapshot reports tunnelProvider cloudflared with a *.trycloudflare.com URL, and a POST /message reaches the server over it (a real status code, not a NetworkError).
+
+### Note (2026-09-14)
+Also found while working this: the app's CSP connect-src did not allow the tunnel origin, so images/messages/history fetched from https://<tunnel> were refused by the browser (the earlier 'NetworkError when attempting to fetch resource'). app/firebase.json now lists the tunnel suffixes; the hosting deploy is still pending.
