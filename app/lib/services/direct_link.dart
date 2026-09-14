@@ -49,6 +49,20 @@ class DirectLink {
   bool _attemptInFlight = false;
   int? _answeredOfferTs;
   String? _failure;
+  ControlChannel? _current;
+
+  /// The path this link is using, as the channel itself reports it. A direct
+  /// channel can name its ICE state, its open labels and the candidate pair it
+  /// settled on; the browser's own answer to "why did the punch fail" lives
+  /// here, and it is invisible from the machine.
+  String? get iceState => (_current as PathReporting?)?.iceState;
+
+  /// The channel labels that are open, so the app can show which half of the
+  /// two-channel protocol came up.
+  List<String> get openChannels => (_current as PathReporting?)?.openChannels ?? const [];
+
+  /// The candidate pairs ICE succeeded on, by type.
+  String? get candidatePairs => (_current as PathReporting?)?.candidatePairs;
 
   /// Whether the live channel reaches the machine directly.
   bool get active => _active;
@@ -66,11 +80,13 @@ class DirectLink {
   /// arrives. Clearing this here would make the app re-fight a lost exchange.
   void channelLost() {
     _active = false;
+    _current = null;
   }
 
   /// Forget everything, for a different account or machine.
   void reset() {
     _active = false;
+    _current = null;
     _attemptInFlight = false;
     _answeredOfferTs = null;
     _failure = null;
@@ -125,6 +141,7 @@ class DirectLink {
       // Marked before the handshake so a command sent during it takes the
       // direct path rather than going to a tunnel origin that may not exist.
       _active = true;
+      _current = channel;
       _failure = null;
       await _open(channel);
       _onChanged();
@@ -133,6 +150,7 @@ class DirectLink {
       // "The machine is not reachable directly" is information the user needs;
       // hiding it would make an unexplained tunnel look like the only option.
       _active = false;
+      _current = null;
       _failure = '$e';
       _onChanged();
       return false;

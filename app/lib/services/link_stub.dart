@@ -10,3 +10,6 @@ void openExternalUrl(String url) {
 
 /// Reloads the app page (web only; no-op elsewhere).
 void reloadPage() {}
+
+/// The platform's user agent, when it has a meaningful one.
+String platformUserAgent() => '';

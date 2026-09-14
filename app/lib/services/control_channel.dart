@@ -49,6 +49,23 @@ Future<void> awaitHandshake({
   );
 }
 
+/// A channel that can describe the network path it is using.
+///
+/// Only a negotiated (peer-to-peer) channel can say which pair of addresses its
+/// ICE agent chose, and that is the measurement that separates "connected" from
+/// "connected over a local shortcut that no phone could use". A WebSocket dial
+/// has no such thing.
+abstract class PathReporting {
+  /// The browser's own ICE state for this channel, or null when it has none.
+  String? get iceState;
+
+  /// The channel labels that are actually open.
+  List<String> get openChannels;
+
+  /// The candidate pairs ICE succeeded on, by type (e.g. "srflx↔host").
+  String? get candidatePairs;
+}
+
 abstract class ControlChannel {
   /// The endpoint this channel dials, when it dials one. A peer-to-peer channel
   /// has no address: it was negotiated, not dialed.
