@@ -69,6 +69,42 @@ function stopAll(server: WSServer, clients: WebSocket[]): void {
   }
 }
 
+test("a frame that follows auth is not processed before it", async (t) => {
+  // Measured live: a peer connected to the direct channel and sent its auth
+  // handshake immediately followed by the frame that depends on it. The token
+  // check awaits a network round trip, the subscribe behind it ran first, and
+  // the machine closed the socket with "subscribe before authentication" - a
+  // correct client refused by its own server. Ordering is the invariant.
+  let release: (() => void) | null = null;
+  const verified = new Promise<void>((resolve) => { release = resolve; });
+  const server = await startServer(async () => {
+    await verified;
+    return validToken();
+  });
+  const clients: WebSocket[] = [];
+  t.after(() => stopAll(server, clients));
+
+  const ws = await openClient(server);
+  clients.push(ws);
+  const closedEarly = nextClose(ws).then(({ code, reason }) => `${code} ${reason}`);
+
+  // Both frames in the same tick: exactly what a peer does when it has nothing
+  // to wait for.
+  ws.send(JSON.stringify({ type: "auth", token: "valid-token" }));
+  ws.send(JSON.stringify({ type: "subscribe", sessionIds: [] }));
+
+  release?.();
+  const authed = await nextMessage(ws);
+  assert.equal(authed.type, "authed", "the handshake completes");
+
+  // And the socket is still usable: the subscribe was applied, not refused.
+  const outcome = await Promise.race([
+    closedEarly,
+    new Promise<string>((resolve) => setTimeout(() => resolve("still open"), 500)),
+  ]);
+  assert.equal(outcome, "still open", `the socket closed instead: ${outcome}`);
+});
+
 test("binds only to loopback and admits a verified owner command", async (t) => {
   const server = await startServer();
   const clients: WebSocket[] = [];

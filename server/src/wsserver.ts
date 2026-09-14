@@ -42,6 +42,16 @@ interface AuthedSocket extends WebSocket {
    * while it is keeping up. Being behind briefly is normal; never draining is
    * the only thing that justifies ending the connection. */
   stalledSince?: number | null;
+  /** Frames are processed in the order they arrived, one at a time. A socket
+   * that pipelines `auth` and `subscribe` was previously handled CONCURRENTLY:
+   * the token check awaits a network round trip, and the subscribe behind it
+   * ran first and closed the socket for "subscribe before authentication" -
+   * measured live, where a peer that speaks immediately after connecting lost
+   * its own handshake. */
+  messageChain?: Promise<void>;
+  /** Frames waiting behind the one being processed, bounded so a peer cannot
+   * make this end queue without limit. */
+  queuedFrames?: number;
   authAttempted: boolean;
   acceptingMessages: boolean;
   authenticatedUid?: string;
@@ -105,6 +115,10 @@ function streamKeyOf(msg: ServerMessage): string | null {
 const MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
 const MAX_TOKEN_CHARS = 16 * 1024;
 const AUTH_DEADLINE_MS = 10_000;
+/** Frames one socket may have waiting behind the one being handled. A peer that
+ * pipelines more than this is not speaking the protocol politely, and unbounded
+ * queuing is how one client exhausts the machine. */
+const MAX_QUEUED_FRAMES = 256;
 const MAX_UNAUTHENTICATED_SOCKETS = 32;
 const MAX_CONCURRENT_VERIFICATIONS = 8;
 const MAX_VERIFICATIONS_PER_WINDOW = 30;
@@ -271,11 +285,35 @@ export class WSServer {
     ws.authDeadline.unref?.();
 
     ws.on("message", (data: RawData, isBinary: boolean) => {
-      void this.handleMessage(ws, data, isBinary).catch((error) => {
+      this.enqueueFrame(ws, data, isBinary);
+    });
+  }
+
+  /** Process one frame after every frame before it, on this socket alone.
+   *
+   * Ordering is a protocol invariant: any client may send `auth` and then the
+   * frame that depends on it without waiting, and a later frame overtaking an
+   * earlier one turns a correct client into a protocol error. */
+  private enqueueFrame(ws: AuthedSocket, data: RawData, isBinary: boolean): void {
+    const queued = (ws.queuedFrames ?? 0) + 1;
+    ws.queuedFrames = queued;
+    if (queued > MAX_QUEUED_FRAMES) {
+      this.closeSocket(ws, 1008, "too many frames at once");
+      return;
+    }
+    const run = async (): Promise<void> => {
+      try {
+        await this.handleMessage(ws, data, isBinary);
+      } catch (error) {
         debug("[remote-code] WS message failed:", (error as Error).message);
         this.closeSocket(ws, 1008, "invalid message");
-      });
-    });
+      } finally {
+        ws.queuedFrames = (ws.queuedFrames ?? 1) - 1;
+      }
+    };
+    const chain = ws.messageChain ? ws.messageChain.then(run, run) : run();
+    // The chain must not reject, or every later frame would be skipped.
+    ws.messageChain = chain.catch(() => { /* reported above */ });
   }
 
   private async handleMessage(ws: AuthedSocket, data: RawData, isBinary: boolean): Promise<void> {
