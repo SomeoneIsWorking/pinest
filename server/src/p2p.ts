@@ -51,6 +51,9 @@ export function startP2PHost(options: P2PHostOptions): P2PHost {
   const channel = new Promise<RTCDataChannel>((resolve) => {
     resolveChannel = resolve;
   });
+  // The offerer's own channel never passes through ondatachannel - that event
+  // fires for channels created by the remote side only - so the created
+  // channel resolves the promise directly.
   pc.ondatachannel = (event) => resolveChannel(event.channel);
 
   const gatherComplete = new Promise<void>((resolve) => {
@@ -64,7 +67,8 @@ export function startP2PHost(options: P2PHostOptions): P2PHost {
   });
 
   const offerSdp = (async () => {
-    pc.createDataChannel("pinest");
+    const created = pc.createDataChannel("pinest");
+    resolveChannel(created);
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     await gatherComplete;
@@ -74,12 +78,19 @@ export function startP2PHost(options: P2PHostOptions): P2PHost {
     return local.sdp;
   })();
 
+  const acceptAnswer = async (sdp: string): Promise<void> => {
+    await pc.setRemoteDescription(new RTCSessionDescription(sdp, "answer"));
+  };
+  // Answers arrive through signaling; acceptAnswer stays exposed for callers
+  // that deliver them directly.
+  options.signaling.onAnswer((sdp) => {
+    void acceptAnswer(sdp);
+  });
+
   return {
     offerSdp,
     channel,
-    acceptAnswer: async (sdp) => {
-      await pc.setRemoteDescription(new RTCSessionDescription(sdp, "answer"));
-    },
+    acceptAnswer,
     close: () => {
       try {
         pc.close();
