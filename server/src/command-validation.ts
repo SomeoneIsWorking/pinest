@@ -470,6 +470,9 @@ export function parseClientCommand(input: unknown): ClientCommand {
       }
       return { type: "goal_set", text: rawText.trim() };
     }
+    case "goal_clear":
+      rejectUnknownFields(command, ["type"]);
+      return { type: "goal_clear" };
     case "reload":
       rejectUnknownFields(command, ["type"]);
       return { type: "reload" };
@@ -631,6 +634,7 @@ export interface ClientCommandDispatcherDeps {
   jobLogs?: (command: Extract<ClientCommand, { type: "job_logs" }>) => void | Promise<void>;
   reload: () => void | Promise<void>;
   goalSet: (command: { text: string }) => void | Promise<void>;
+  goalClear: () => void | Promise<void>;
 }
 
 /** Validate, authorize the target, reserve new IDs, and dispatch exactly once. */
@@ -686,6 +690,7 @@ export async function dispatchClientCommand(
     case "job_logs": return void await deps.jobLogs?.(command);
     case "reload": return void await deps.reload();
     case "goal_set": return void await deps.goalSet(command);
+    case "goal_clear": return void await deps.goalClear();
     case "list_paths": return void await deps.host(command);
     case "ping": return;
   }

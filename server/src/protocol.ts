@@ -144,7 +144,7 @@ export type ServerMessage =
   /** Something the user asked for HAPPENED (compact/clear). Silence is what
    * made these look like no-ops; the client shows this as a snackbar. */
   | { type: "notice"; sessionId?: string; message: string }
-  | { type: "state"; online: boolean; hostname: string; homePath?: string; activeSessionId?: string | null; sessions: SessionSnapshot[]; registry: SessionRow[]; tunnelUrl?: string | null; tunnelProvider?: string | null; httpKey?: string }
+  | { type: "state"; online: boolean; hostname: string; homePath?: string; activeSessionId?: string | null; sessions: SessionSnapshot[]; registry: SessionRow[]; tunnelUrl?: string | null; tunnelProvider?: string | null; httpKey?: string; goal?: { text: string; setAt: number } | null }
   | { type: "session_list"; sessions: SessionRow[] }
   | { type: "session_deleted"; sessionId: string; deleted: boolean }
   | { type: "jobs_list"; sessionId?: string; jobs: BackgroundJobSummary[] }
@@ -210,4 +210,5 @@ export type ClientCommand =
   | { type: "job_logs"; jobId: string; maxBytes?: number; tail?: boolean; id?: string; sessionId?: string }
   | { type: "get_image"; imageId: string; id?: string }
   | { type: "reload" }
-  | { type: "goal_set"; text: string };
+  | { type: "goal_set"; text: string }
+  | { type: "goal_clear" };

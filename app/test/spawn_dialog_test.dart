@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pinest_app/models/session_goal.dart';
 import 'package:provider/provider.dart';
 import 'package:pinest_app/screens/spawn_dialog.dart';
 import 'package:pinest_app/services/agent_service.dart';
@@ -12,6 +13,15 @@ class _StubAgentService extends ChangeNotifier implements AgentService {
   Future<bool> checkPath(String path) async => true;
 
   @override
+  @override
+  SessionGoal? get goal => null;
+
+  @override
+  void clearGoal() {}
+
+  @override
+  void setGoal(String objective) {}
+
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 

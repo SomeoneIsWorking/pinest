@@ -34,7 +34,7 @@ import { mapModel, deriveSessionName, historyWithEmbeds, embedImages, extractSes
 import { createDefaultBackgroundManager, registerBashIntegration, toJobSummary, type BackgroundProcessManager } from "./bash-tool.ts";
 import { registerBackgroundTools, handleJobCommand } from "./background-tools.ts";
 import { StreamSegmenter } from "./stream.ts";
-import { loadConfig, saveConfig } from "./config.ts";
+import { clearGoal, currentGoal, loadConfig, saveConfig } from "./config.ts";
 import { registerHostCommands, showSessionsFlow, type HostCommandDeps } from "./host-commands.ts";
 import { PinestCustomEditor } from "./editor.ts";
 import { FooterManager } from "./footer.ts";
@@ -147,6 +147,7 @@ const _publisher = new StatePublisher({
   },
   tunnelUrl: () => _ws?.tunnelUrl ?? null,
   tunnelProvider: () => _ws?.tunnel?.provider ?? null,
+  goal: () => currentGoal(),
   refreshUsage: () => { _supervisor?.refreshUsage?.(false); },
   send: (msg) => broadcast(msg),
 });
@@ -521,6 +522,10 @@ async function handleCommand(input: unknown): Promise<void> {
       reload: () => {
         const r = queueReload(_pi, _ctx);
         if (!r.ok) broadcast({ type: "error", message: `[remote-code] ${r.message}` });
+      },
+      goalClear: () => {
+        clearGoal();
+        broadcastState();
       },
       goalSet: (cmd) => {
         // Ask pi to run ITS registered command rather than restating what the
