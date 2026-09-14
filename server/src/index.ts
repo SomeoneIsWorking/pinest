@@ -239,6 +239,7 @@ function getFooter(): FooterManager {
       },
       getTunnelUrl: () => _ws?.tunnelUrl ?? null,
       isTunnelStarting: () => _tunnelStarting,
+      isDirectConnected: () => _directTransport?.status().channelOpen ?? false,
     });
     if (_ui) _footer.setUi(_ui);
   }

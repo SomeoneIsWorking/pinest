@@ -6,6 +6,10 @@ export interface FooterStateProvider {
   getLiveSessionCount: () => { live: number; working: number };
   getTunnelUrl: () => string | null;
   isTunnelStarting: () => boolean;
+  /** Whether a DIRECT (no-tunnel) channel is carrying the session right now.
+   * Without it the footer names the configured provider even when nothing is
+   * going through it, which reads as "the tunnel is how you are connected". */
+  isDirectConnected: () => boolean;
 }
 
 const PINEST_ORIGINAL_SET_STATUS = Symbol.for("pinest.ui.original-set-status");
@@ -69,6 +73,14 @@ export class FooterManager {
       );
 
       const prov = loadConfig().tunnelProvider;
+      // Name the path that is actually carrying the session. The tunnel is a
+      // fallback and a bootstrap, and while a direct channel is up it is not
+      // what the app is talking to - reporting the provider there would credit
+      // the third party for a connection it is not part of.
+      if (this.state.isDirectConnected()) {
+        this.setStatus("pinest:url", "direct: connected");
+        return;
+      }
       const tunnelUrl = this.state.getTunnelUrl();
       const starting = this.state.isTunnelStarting();
       const url = tunnelUrl ?? (prov === "off" ? "off (local-only)" : starting ? "(starting…)" : "(local-only)");
