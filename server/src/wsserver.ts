@@ -147,6 +147,12 @@ export class WSServer {
     if (event === "command") this.handlers.command = handler;
   }
 
+  /** The port HTTP and WS actually listen on (resolved when 0 was requested).
+   * The direct transport bridges to it, so it must be the real one. */
+  get controlPort(): number | null {
+    return this.httpServer?.listening ? this.port : null;
+  }
+
   setHistoryRunner(runner: HttpHistoryRunner): void {
     this.historyRunner = runner;
   }

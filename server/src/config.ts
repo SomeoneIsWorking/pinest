@@ -24,6 +24,9 @@ export interface Config {
   activeSessionId?: string;
   /** The objective the agent is currently working toward, if one was set. */
   goal?: SessionGoal;
+  /** Offer a direct WebRTC transport (no tunnel in the data path) alongside the
+   * tunnel. Opt-in: the offer only appears in the discovery doc when enabled. */
+  p2p?: boolean;
   [key: string]: unknown;
 }
 

@@ -1,4 +1,7 @@
 import type { HttpHistoryRunner } from "./http-api.ts";
+import { startP2PHost } from "./p2p.ts";
+import { bridgeToLoopback } from "./p2p-bridge.ts";
+import { createP2PSignaling } from "./p2p-signaling.ts";
 import debug from "./log.ts";
 /**
  * remote-code — WebSocket direct connection + tunnel.
@@ -411,6 +414,9 @@ async function bootstrap(): Promise<void> {
   // Do not admit commands while durable sessions are still being restored:
   // an early session_resume could otherwise open the same pi transcript twice.
   await _ws.start();
+  // The direct transport bridges to the listening port, so it can only start
+  // once that port is real.
+  void startDirectTransport();
 
   // Presence: publish IMMEDIATELY (url may be null until the tunnel lands)
   // and republish when it does. The tunnel runs in the BACKGROUND — a slow
@@ -535,6 +541,49 @@ async function bootstrap(): Promise<void> {
 }
 
 // ── Command handling ────────────────────────────────────────────────────────
+
+/** Direct (no-tunnel) transport: publish an offer into the discovery doc, apply
+ * the app's answer, and pump whatever channel opens to the loopback server.
+ *
+ * Opt-in through config `p2p`. Nothing about it replaces the tunnel: the app
+ * decides which transport to use, and a punch that fails is a failure to
+ * report, not a silent switch. */
+async function startDirectTransport(): Promise<void> {
+  if (loadConfig().p2p !== true) return;
+  const port = _ws?.controlPort;
+  if (!port) {
+    debug("[remote-code] p2p: no control port yet, not offering a direct transport");
+    return;
+  }
+  try {
+    const signaling = createP2PSignaling({
+      writeOffer: async (sdp, ts) => {
+        if (!_fb || !_ownerUid) throw new Error("no owner record to publish an offer to");
+        await _fb.patchUserDoc(_ownerUid, { p2pOffer: sdp, p2pOfferTs: ts });
+      },
+      readAnswer: async () => {
+        if (!_fb || !_ownerUid) return null;
+        const doc = await _fb.readUserDoc(_ownerUid);
+        const sdp = doc?.p2pAnswer;
+        const ts = doc?.p2pAnswerTs;
+        if (typeof sdp !== "string" || typeof ts !== "number") return null;
+        return { sdp, ts };
+      },
+    });
+    const peer = startP2PHost({ signaling, port });
+    void peer.channel.then((channel) => {
+      debug("[remote-code] p2p: channel open, bridging to the loopback server");
+      bridgeToLoopback(channel, port);
+    }).catch((error: Error) => {
+      debug(`[remote-code] p2p: no channel: ${error.message}`);
+    });
+    await peer.offerSdp;
+    debug("[remote-code] p2p: offer published");
+  } catch (error) {
+    debug(`[remote-code] p2p: direct transport unavailable: ${(error as Error).message}`);
+  }
+}
+
 async function handleCommand(input: unknown): Promise<void> {
   try {
     await dispatchClientCommand(input, {
