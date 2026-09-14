@@ -167,7 +167,7 @@ export type ServerMessage =
        * starts must not ALSO be announced as the session finishing work. */
       kind?: "background-task";
     }
-  | { type: "state"; online: boolean; hostname: string; homePath?: string; activeSessionId?: string | null; sessions: SessionSnapshot[]; registry: SessionRow[]; tunnelUrl?: string | null; tunnelProvider?: string | null; httpKey?: string; localUrl?: string | null; p2p?: DirectTransportWireStatus | null; client?: ClientReportView | null }
+  | { type: "state"; online: boolean; hostname: string; homePath?: string; activeSessionId?: string | null; sessions: SessionSnapshot[]; registry: SessionRow[]; tunnelUrl?: string | null; tunnelProvider?: string | null; httpKey?: string; localUrl?: string | null; p2p?: DirectTransportWireStatus | null; client?: ClientReportView | null; presenceError?: string | null }
   | { type: "session_list"; sessions: SessionRow[] }
   | { type: "session_deleted"; sessionId: string; deleted: boolean }
   | { type: "jobs_list"; sessionId?: string; jobs: BackgroundJobSummary[] }

@@ -25,6 +25,9 @@ export interface StatePublisherDeps {
   p2p: () => DirectTransportWireStatus | null;
   /** What the app last said about itself, as this machine read it back. */
   client: () => ClientReportView | null;
+  /** Why the app cannot find this machine, when publishing its presence is
+   * failing. Null when nothing is wrong. */
+  presenceError: () => string | null;
   /** Cheap synchronous usage overlay, applied before each state message. */
   refreshUsage: () => void;
   send: (message: ServerMessage) => void;
@@ -97,6 +100,7 @@ export class StatePublisher {
       localUrl: this.deps.localUrl(),
       p2p: this.deps.p2p(),
       client: this.deps.client(),
+      presenceError: this.deps.presenceError(),
     });
   }
 

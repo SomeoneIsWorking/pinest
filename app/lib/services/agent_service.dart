@@ -99,6 +99,12 @@ class AgentService extends ChangeNotifier {
   int _machineSeenAt = 0;
   bool _machineSaidOnline = false;
 
+  /// Why this machine cannot publish its own presence, in its own words, from
+  /// the `presenceError` field. The machine being unable to reach Firebase and
+  /// the machine being off look identical from here, and only one of them is
+  /// something the operator can fix.
+  String? _presenceError;
+
   /// What the machine says it read back about THIS browser, from the `client`
   /// field of the state it sends. The machine's half of a diagnosis is in
   /// `_directStatus`; this is the mirror, so both ends are visible in one place.
@@ -179,6 +185,10 @@ class AgentService extends ChangeNotifier {
   /// has not said. Shown in Settings so the diagnosis is visible on the device
   /// that is having the problem.
   String? get machineSeesClient => _machineSeesClient;
+
+  /// The machine's own words for why it cannot be found, or null when nothing
+  /// is wrong.
+  String? get machinePresenceError => _presenceError;
 
   Future<void> _writeClientReport(Map<String, dynamic> payload) async {
     final uid = _boundUid;
@@ -557,6 +567,7 @@ class AgentService extends ChangeNotifier {
       case 'state':
         _httpKey = (msg['httpKey'] as String?) ?? _httpKey;
         _machineSeesClient = (msg['client'] as Map?)?['summary'] as String?;
+        _presenceError = (msg['presenceError'] as String?)?.trim();
         _localEndpoint = secureLoopbackUri(msg['localUrl']);
         _tunnelUrl = msg['tunnelUrl'] as String?;
         _tunnelProvider = msg['tunnelProvider'] as String?;

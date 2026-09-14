@@ -17,6 +17,7 @@ void main() {
       machinePublishing: true,
       machineSeenAt: now.millisecondsSinceEpoch - 3000,
       reason: 'irrelevant',
+      machinePresenceError: null,
       now: now,
     );
     expect(presence.headline, 'No sessions yet');
@@ -29,6 +30,7 @@ void main() {
       machinePublishing: true,
       machineSeenAt: now.millisecondsSinceEpoch - 12_000,
       reason: 'host.example: Failed to connect WebSocket',
+      machinePresenceError: null,
       now: now,
     );
     expect(presence.headline, 'Machine online, not reachable');
@@ -45,6 +47,7 @@ void main() {
       machinePublishing: false,
       machineSeenAt: now.millisecondsSinceEpoch - 300_000,
       reason: 'connection refused',
+      machinePresenceError: null,
       now: now,
     );
     expect(presence.headline, 'Supervisor offline');
@@ -59,9 +62,42 @@ void main() {
       machinePublishing: false,
       machineSeenAt: 0,
       reason: 'the machine has not published anything for this account yet',
+      machinePresenceError: null,
       now: now,
     );
     expect(presence.detail, contains('never been seen reporting a machine'));
     expect(presence.detail, contains('not published anything'));
+  });
+
+  test('a machine that cannot publish itself says so, in its own words', () {
+    // Measured live: an exhausted Firebase quota refused every presence write,
+    // so the app showed "offline" for hours while the machine was running
+    // perfectly. "Cannot be found" and "is not running" send the reader to
+    // different places.
+    final presence = describeMachinePresence(
+      connected: false,
+      machinePublishing: false,
+      machineSeenAt: 0,
+      reason: 'no endpoint was dialable',
+      machinePresenceError: 'Quota exceeded.',
+      now: now,
+    );
+    expect(presence.headline, 'Machine cannot be found');
+    expect(presence.detail, contains('Quota exceeded.'));
+    expect(presence.detail, contains('no endpoint was dialable'));
+    expect(presence.headline, isNot('Supervisor offline'));
+  });
+
+  test('a machine that is publishing fine is not called unfindable', () {
+    final presence = describeMachinePresence(
+      connected: false,
+      machinePublishing: true,
+      machineSeenAt: now.millisecondsSinceEpoch - 5_000,
+      reason: 'the tunnel hostname did not resolve',
+      machinePresenceError: null,
+      now: now,
+    );
+    expect(presence.headline, 'Machine online, not reachable');
+    expect(presence.detail, isNot(contains('cannot publish')));
   });
 }

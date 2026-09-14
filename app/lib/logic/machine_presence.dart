@@ -35,12 +35,31 @@ MachinePresence describeMachinePresence({
   required bool machinePublishing,
   required int machineSeenAt,
   required String reason,
+  String? machinePresenceError,
   DateTime? now,
 }) {
   if (connected) {
     return const MachinePresence(headline: 'No sessions yet', detail: '');
   }
-  final headline = machinePublishing ? 'Machine online, not reachable' : 'Supervisor offline';
+  // A machine that cannot publish itself is not a machine that is down: it is
+  // reachable in principle and invisible in practice, and only its own words
+  // explain why. Measured live: an exhausted Firebase quota refused every
+  // presence write, so the app showed "offline" for hours while the machine was
+  // running perfectly and saying nothing about it.
+  final refusal = machinePresenceError == null || machinePresenceError.isEmpty
+      ? null
+      : machinePresenceError;
+  final headline = refusal != null
+      ? 'Machine cannot be found'
+      : machinePublishing
+          ? 'Machine online, not reachable'
+          : 'Supervisor offline';
+  if (refusal != null) {
+    return MachinePresence(
+      headline: headline,
+      detail: 'The machine cannot publish itself: $refusal\n$reason',
+    );
+  }
   final seen = machineSeenAt == 0
       ? 'This account has never been seen reporting a machine.'
       : machinePublishing
