@@ -63,9 +63,17 @@ bool looksLikeSdp(Object? value) {
   return (sdp: sdp as String, ts: ts);
 }
 
-/// The fields this app writes back, as one description plus the time it was
-/// written so the machine can tell a fresh answer from a leftover.
-Map<String, Object> answerFields(String sdp, int now) => {
+/// The fields this app writes back: the description, when it was written, and
+/// the offer it answers.
+///
+/// The named offer is what makes the answer attributable. Comparing clocks
+/// instead - this device's write time against the machine's offer time - refuses
+/// a good answer whenever the two devices disagree by more than the age of the
+/// offer, and it does so silently: the punch simply never lands. [offerTs] is
+/// the timestamp of the offer this answer was produced from, so the machine can
+/// check identity rather than order.
+Map<String, Object> answerFields(String sdp, int writtenAt, int offerTs) => {
   'p2pAnswer': sdp,
-  'p2pAnswerTs': now,
+  'p2pAnswerTs': writtenAt,
+  'p2pAnswerOfferTs': offerTs,
 };

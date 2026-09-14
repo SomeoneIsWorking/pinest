@@ -7,8 +7,8 @@ import { createP2PSignaling, looksLikeSdp } from "../src/p2p-signaling.ts";
 
 interface Harness {
   writeOffer(sdp: string, ts: number): Promise<void>;
-  readAnswer(): Promise<{ sdp: string; ts: number } | null>;
-  answer: { sdp: string; ts: number } | null;
+  readAnswer(): Promise<{ sdp: string; offerTs: number | null } | null>;
+  answer: { sdp: string; offerTs: number | null } | null;
   offers: { sdp: string; ts: number }[];
   signaling: ReturnType<typeof createP2PSignaling>;
 }
@@ -29,8 +29,8 @@ function harness(pollMs = 5): Harness {
   return state;
 }
 
-/** The exchange's own timestamp: it identifies which offer an answer belongs
- * to, so the host owns it rather than the transport. */
+/** The exchange's own timestamp: an answer NAMES it to say which offer it
+ * describes, so the host owns the value rather than the transport. */
 const OFFER_TS = 1_000;
 
 const SDP = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n";
@@ -50,40 +50,63 @@ test("an offer is published with its timestamp, and answers are ignored until th
   h.signaling.stop();
 });
 
-test("a newer answer is delivered exactly once", async () => {
+test("the answer that names the live offer is delivered exactly once", async () => {
   const h = harness();
   const delivered: string[] = [];
   h.signaling.onAnswer((sdp) => delivered.push(sdp));
   await h.signaling.publishOffer(SDP, OFFER_TS);
 
-  h.answer = { sdp: SDP, ts: 1_001 };   // newer than the offer
+  h.answer = { sdp: SDP, offerTs: OFFER_TS };
   await settle();
   assert.equal(delivered.length, 1, "delivered once");
 
   // The same answer still sitting in the doc is not delivered again.
   await settle();
   assert.equal(delivered.length, 1, "a repeated poll of the same answer is not a new answer");
-
-  // A newer answer replaces it.
-  h.answer = { sdp: SDP, ts: 1_002 };
-  await settle();
-  assert.equal(delivered.length, 2);
   h.signaling.stop();
 });
 
-test("an answer older than the offer is refused: it belongs to a previous exchange", async () => {
+test("an answer that names another exchange is refused, not applied", async () => {
+  // Identity, not order. The app's write time is its OWN clock and the offer's
+  // is this machine's; comparing them silently refused a valid answer whenever
+  // the two devices disagreed by more than the age of the offer, which reads
+  // from outside as a direct connection that simply never works.
   const h = harness();
   const delivered: string[] = [];
   h.signaling.onAnswer((sdp) => delivered.push(sdp));
-  h.answer = { sdp: SDP, ts: 900 };   // written before the offer
   await h.signaling.publishOffer(SDP, OFFER_TS);
+
+  h.answer = { sdp: SDP, offerTs: OFFER_TS - 1 };  // the previous exchange
   await settle();
   assert.deepEqual(delivered, []);
 
-  // A newer one is still accepted afterwards.
-  h.answer = { sdp: SDP, ts: 1_001 };
+  h.answer = { sdp: SDP, offerTs: null };          // names no offer at all
+  await settle();
+  assert.deepEqual(delivered, [], "an unnameable answer cannot be attributed");
+
+  // The one that names this offer gets through.
+  h.answer = { sdp: SDP, offerTs: OFFER_TS };
   await settle();
   assert.equal(delivered.length, 1);
+  h.signaling.stop();
+});
+
+test("a new exchange resets what has been delivered, not the answer's age", async () => {
+  const h = harness();
+  const delivered: string[] = [];
+  h.signaling.onAnswer((sdp) => delivered.push(sdp));
+  await h.signaling.publishOffer(SDP, OFFER_TS);
+  h.answer = { sdp: SDP, offerTs: OFFER_TS };
+  await settle();
+  assert.equal(delivered.length, 1);
+
+  // The machine replaces a stale offer and publishes a new one. The app answers
+  // it - with an answer that names the NEW offer but was written at a time this
+  // machine would call older than that offer. It must still be applied.
+  await h.signaling.publishOffer(SDP, OFFER_TS + 100);
+  h.answer = { sdp: SDP, offerTs: OFFER_TS + 100 };
+  await settle();
+  assert.equal(delivered.length, 2, "the second exchange's answer is applied");
   h.signaling.stop();
 });
 
@@ -93,15 +116,15 @@ test("something that is not an SDP never reaches the peer", async () => {
   h.signaling.onAnswer((sdp) => delivered.push(sdp));
   await h.signaling.publishOffer(SDP, OFFER_TS);
 
-  h.answer = { sdp: "not an sdp at all", ts: 1_001 };
+  h.answer = { sdp: "not an sdp at all", offerTs: OFFER_TS };
   await settle();
   assert.deepEqual(delivered, [], "garbage is reported, not applied");
 
-  h.answer = { sdp: "v=0\r\n", ts: 1_002 };   // an SDP header with no media
+  h.answer = { sdp: "v=0\r\n", offerTs: OFFER_TS };   // an SDP header with no media
   await settle();
   assert.deepEqual(delivered, [], "an SDP with no media line cannot carry a channel");
 
-  h.answer = { sdp: SDP, ts: 1_003 };
+  h.answer = { sdp: SDP, offerTs: OFFER_TS };
   await settle();
   assert.equal(delivered.length, 1, "a valid answer still gets through");
   h.signaling.stop();

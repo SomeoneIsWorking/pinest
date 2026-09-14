@@ -147,6 +147,17 @@ is published and the channel carries the auth handshake, a command, and an
 inbound frame; a peer that never opens a channel fails as a timeout rather than
 hanging; a description that is not an offer is refused.
 
+An answer identifies the exchange it belongs to instead of being ordered against
+it. The machine's offer timestamp is the only value both sides agree on; the
+app's write time is a different device's clock, and comparing the two refuses a
+perfectly good answer whenever the devices disagree by more than the age of the
+offer - silently, because a refused answer is just a punch that never lands. The
+app now names the offer it answered (`p2pAnswerOfferTs`), the machine applies an
+answer only when the name matches the offer it is currently presenting, and the
+deployed rules require that name so an unattributable answer is refused at the
+boundary rather than guessed at (`tools/verify_firestore_rules.py` proves both
+the accepted write and the refusal).
+
 A failed punch is now visible from both sides: the app reports its own failure
 whenever a direct attempt fails (not only when offline), and Settings names what
 the MACHINE is doing - not offering, offering with nobody connected, or a peer

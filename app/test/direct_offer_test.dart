@@ -99,8 +99,18 @@ void main() {
     expect(looksLikeSdp('v=0 short'), isFalse);
   });
 
-  test('the answer is written as a description plus the time it was written', () {
-    final fields = answerFields('v=0\r\nm=x\r\n', 12345);
-    expect(fields, {'p2pAnswer': 'v=0\r\nm=x\r\n', 'p2pAnswerTs': 12345});
+  test('the answer names the offer it answers, not just when it was written', () {
+    // The machine matches an answer to an exchange by identity. Its own offer
+    // timestamp is the only value both sides agree on: the app's write time is
+    // a different clock, and comparing the two refuses a good answer silently
+    // whenever the devices disagree.
+    final fields = answerFields('v=0\r\nm=x\r\n', 12345, 900);
+    expect(fields, {
+      'p2pAnswer': 'v=0\r\nm=x\r\n',
+      'p2pAnswerTs': 12345,
+      'p2pAnswerOfferTs': 900,
+    });
+    expect(fields['p2pAnswerOfferTs'], 900, reason: 'the offer named is the one answered');
+    expect(fields['p2pAnswerOfferTs'], isNot(fields['p2pAnswerTs']));
   });
 }

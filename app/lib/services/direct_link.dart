@@ -24,7 +24,7 @@ class DirectLink {
   DirectLink({
     required ConnectDirect connect,
     required List<String> iceServers,
-    required Future<void> Function(String sdp, int writtenAt) publishAnswer,
+    required Future<void> Function(String sdp, int writtenAt, int offerTs) publishAnswer,
     required Future<void> Function(ControlChannel channel) open,
     required void Function() onChanged,
     bool Function()? available,
@@ -39,7 +39,7 @@ class DirectLink {
 
   final ConnectDirect _connect;
   final List<String> _iceServers;
-  final Future<void> Function(String sdp, int writtenAt) _publishAnswer;
+  final Future<void> Function(String sdp, int writtenAt, int offerTs) _publishAnswer;
   final Future<void> Function(ControlChannel channel) _open;
   final void Function() _onChanged;
   final bool Function() _available;
@@ -120,7 +120,7 @@ class DirectLink {
       final channel = await _connect(
         offerSdp: offer.sdp,
         iceServers: _iceServers,
-        publishAnswer: (sdp) => _publishAnswer(sdp, _now()),
+        publishAnswer: (sdp) => _publishAnswer(sdp, _now(), offer.ts),
       );
       // Marked before the handshake so a command sent during it takes the
       // direct path rather than going to a tunnel origin that may not exist.

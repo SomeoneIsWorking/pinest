@@ -14,20 +14,36 @@
 
 import debug from "./log.ts";
 
+/** An answer as it was written: a description plus the offer it describes.
+ *
+ * The app NAMES the offer it answered rather than timestamping its own write,
+ * because the app's clock is not this machine's clock. Comparing the two is how
+ * a perfectly good answer gets refused: the answer arrives with an earlier
+ * timestamp than the offer it answers, and the punch fails with nothing said.
+ * Identity cannot skew. */
+export interface SignalingAnswer {
+  sdp: string;
+  /** The offer this answer describes, or null when the writer named none - an
+   * app older than the field, whose answer cannot be attributed to an exchange
+   * and is therefore refused rather than guessed at. */
+  offerTs: number | null;
+}
+
 export interface P2PSignalingDeps {
   /** Merge the offer into the owner's discovery doc. */
   writeOffer(sdp: string, ts: number): Promise<void>;
   /** Read the current answer, or null when the app has not sent one. */
-  readAnswer(): Promise<{ sdp: string; ts: number } | null>;
+  readAnswer(): Promise<SignalingAnswer | null>;
   pollMs?: number;
 }
 
 export interface P2PSignaling {
-  /** Publish one exchange's offer. `ts` identifies the exchange: it is the
-   * floor an answer must be newer than, and the host owns it because only the
+  /** Publish one exchange's offer. `ts` identifies it: an answer is applied
+   * only when it names this one, and the host owns the value because only the
    * host knows when it replaced the previous exchange. */
   publishOffer(sdp: string, ts: number): Promise<void>;
-  onAnswer(handler: (sdp: string, ts: number) => void): void;
+  /** Called at most once per exchange, with an answer that names THIS offer. */
+  onAnswer(handler: (sdp: string) => void): void;
   stop(): void;
 }
 
@@ -42,13 +58,17 @@ export function looksLikeSdp(value: unknown): value is string {
 }
 
 export function createP2PSignaling(deps: P2PSignalingDeps): P2PSignaling {
-  const handlers: ((sdp: string, ts: number) => void)[] = [];
-  let offerTs = 0;
-  let deliveredTs = 0;
+  const handlers: ((sdp: string) => void)[] = [];
+  let liveOfferTs = 0;
+  let delivered = false;
+  /** The last nameless-or-mismatched answer reported, so a poll every two
+   * seconds does not repeat the same complaint forever. */
+  let reported: number | null | undefined;
+  let reportedGarbage = false;
   let timer: NodeJS.Timeout | undefined;
 
   const poll = async (): Promise<void> => {
-    let answer: { sdp: string; ts: number } | null = null;
+    let answer: SignalingAnswer | null = null;
     try {
       answer = await deps.readAnswer();
     } catch (error) {
@@ -57,18 +77,30 @@ export function createP2PSignaling(deps: P2PSignalingDeps): P2PSignaling {
     }
     if (!answer) return;
     if (!looksLikeSdp(answer.sdp)) {
-      // Report once per offending answer rather than every poll.
-      if (deliveredTs !== answer.ts) {
-        deliveredTs = answer.ts;
+      // Feed a malformed description to the peer and it stalls much later with
+      // no explanation. Report it once per exchange rather than every poll.
+      if (!reportedGarbage) {
+        reportedGarbage = true;
         debug("[pinest] p2p signaling: ignored an answer that is not an SDP");
       }
       return;
     }
-    // Only an answer newer than the offer can be for this offer, and only the
-    // newest is applied: a stale answer would describe a peer that has moved on.
-    if (answer.ts <= offerTs || answer.ts <= deliveredTs) return;
-    deliveredTs = answer.ts;
-    for (const handler of handlers) handler(answer.sdp, answer.ts);
+    if (answer.offerTs !== liveOfferTs) {
+      if (reported !== answer.offerTs) {
+        reported = answer.offerTs;
+        debug(
+          `[pinest] p2p signaling: ignored an answer that names ${
+            answer.offerTs === null ? "no offer" : `a different exchange (${answer.offerTs})`
+          }; the live offer is ${liveOfferTs}`,
+        );
+      }
+      return;
+    }
+    // One answer per exchange: a repeated poll of what is already in the doc is
+    // not a new answer, and applying it twice is refused by the peer anyway.
+    if (delivered) return;
+    delivered = true;
+    for (const handler of handlers) handler(answer.sdp);
   };
 
   const start = (): void => {
@@ -81,11 +113,13 @@ export function createP2PSignaling(deps: P2PSignalingDeps): P2PSignaling {
 
   return {
     publishOffer: async (sdp, ts) => {
-      // A new exchange resets the answer floor: the app's next answer describes
-      // THIS offer, and must not be filtered out as belonging to the previous.
-      offerTs = ts;
-      deliveredTs = 0;
-      await deps.writeOffer(sdp, offerTs);
+      // A new exchange resets what has been seen: the app's next answer names
+      // THIS offer, and must not be filtered out as the previous one's.
+      liveOfferTs = ts;
+      delivered = false;
+      reported = undefined;
+      reportedGarbage = false;
+      await deps.writeOffer(sdp, liveOfferTs);
       start();
     },
     onAnswer: (handler) => {

@@ -597,9 +597,11 @@ async function startDirectTransport(): Promise<void> {
         if (!_fb || !_ownerUid) return null;
         const doc = await _fb.readUserDoc(_ownerUid);
         const sdp = doc?.p2pAnswer;
-        const ts = doc?.p2pAnswerTs;
-        if (typeof sdp !== "string" || typeof ts !== "number") return null;
-        return { sdp, ts };
+        if (typeof sdp !== "string") return null;
+        // The offer the answer names, not when it was written: the app's clock
+        // is not this machine's clock.
+        const named = doc?.p2pAnswerOfferTs;
+        return { sdp, offerTs: typeof named === "number" ? named : null };
       },
     });
     _directTransport = await offerDirectTransport({

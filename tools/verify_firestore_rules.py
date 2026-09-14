@@ -124,10 +124,47 @@ def verify_boundary(project_id: str, token: str, uid: str) -> dict[str, int]:
             ).encode(),
         ),
         # Signaling must work in BOTH directions, or the direct (no-tunnel)
-        # transport cannot exist. The timestamp is deliberately ancient so the
-        # host's poller ignores the probe answer instead of applying it to a
-        # live exchange; the rules only require it to be an int.
+        # transport cannot exist. The named offer is deliberately one this
+        # machine is not offering, so the host's poller reports the probe answer
+        # instead of applying it to a live exchange; the rules only require the
+        # three fields to be shaped right.
         "valid_signaling_write": request_status(
+            f"{base}/users/{uid}",
+            token,
+            method="PATCH",
+            update_mask=["p2pAnswer", "p2pAnswerTs", "p2pAnswerOfferTs"],
+            body=json.dumps(
+                {
+                    "fields": {
+                        "p2pAnswer": {
+                            "stringValue": "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n"
+                        },
+                        "p2pAnswerTs": {"integerValue": "1"},
+                        "p2pAnswerOfferTs": {"integerValue": "1"},
+                    }
+                }
+            ).encode(),
+        ),
+        "invalid_signaling_write": request_status(
+            f"{base}/users/{uid}",
+            token,
+            method="PATCH",
+            update_mask=["p2pAnswer", "p2pAnswerTs", "p2pAnswerOfferTs"],
+            body=json.dumps(
+                {
+                    "fields": {
+                        "p2pAnswer": {"stringValue": "not-an-sdp"},
+                        "p2pAnswerTs": {"integerValue": "1"},
+                        "p2pAnswerOfferTs": {"integerValue": "1"},
+                    }
+                }
+            ).encode(),
+        ),
+        # An answer that names no offer cannot be matched to an exchange, so the
+        # machine would have to compare clocks to attribute it - the comparison
+        # that silently refuses a valid answer when two devices disagree. The
+        # boundary refuses the unattributable write instead.
+        "unidentified_signaling_write": request_status(
             f"{base}/users/{uid}",
             token,
             method="PATCH",
@@ -143,20 +180,6 @@ def verify_boundary(project_id: str, token: str, uid: str) -> dict[str, int]:
                 }
             ).encode(),
         ),
-        "invalid_signaling_write": request_status(
-            f"{base}/users/{uid}",
-            token,
-            method="PATCH",
-            update_mask=["p2pAnswer", "p2pAnswerTs"],
-            body=json.dumps(
-                {
-                    "fields": {
-                        "p2pAnswer": {"stringValue": "not-an-sdp"},
-                        "p2pAnswerTs": {"integerValue": "1"},
-                    }
-                }
-            ).encode(),
-        ),
     }
     expected = {
         "own_document_get": 200,
@@ -165,6 +188,7 @@ def verify_boundary(project_id: str, token: str, uid: str) -> dict[str, int]:
         "invalid_own_write": 403,
         "valid_signaling_write": 200,
         "invalid_signaling_write": 403,
+        "unidentified_signaling_write": 403,
     }
     for name, actual in checks.items():
         if actual != expected[name]:

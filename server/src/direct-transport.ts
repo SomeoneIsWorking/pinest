@@ -58,8 +58,9 @@ export interface DirectTransportOptions {
   port: number;
   /** Publish one exchange's offer, with its identifying timestamp. */
   publishOffer: (sdp: string, ts: number) => Promise<void>;
-  /** Answers from the app, each with the timestamp it was written. */
-  onAnswer: (handler: (sdp: string, ts: number) => void) => void;
+  /** Answers from the app that name the live offer (signaling owns that
+   * match, because it owns the protocol the answer is written in). */
+  onAnswer: (handler: (sdp: string) => void) => void;
   /** Stateless STUN servers; defaults to the shared list. */
   stunServers?: string[];
   log(message: string): void;
@@ -104,17 +105,13 @@ export async function offerDirectTransport(
   let closed = false;
   let refreshing = false;
 
-  options.onAnswer((sdp, ts) => {
+  options.onAnswer((sdp) => {
     if (!live) {
       log("direct transport: an answer arrived with no exchange published");
       return;
     }
-    if (ts <= live.offerTs) {
-      // An answer describes the offer it was written against. An older one
-      // belongs to a previous, already-replaced exchange.
-      log(`direct transport: ignoring an answer for a previous offer (${ts} <= ${live.offerTs})`);
-      return;
-    }
+    // The clock starts at the answer: this punch is in flight and deserves its
+    // remaining lifetime before the exchange is replaced.
     live.answeredAt = now();
     void live.peer.acceptAnswer(sdp);
   });

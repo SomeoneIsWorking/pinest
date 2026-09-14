@@ -52,7 +52,8 @@ class _FakeChannel implements ControlChannel {
       await publishAnswer('answer-for:$offerSdp');
       return _FakeChannel(offerSdp);
     },
-    publishAnswer: (sdp, writtenAt) async => published.add('$sdp@$writtenAt'),
+    publishAnswer: (sdp, writtenAt, offerTs) async =>
+        published.add('$sdp@$writtenAt#offer$offerTs'),
     open: (channel) async => connections.add(channel.endpoint?.toString() ?? 'direct'),
     onChanged: () => changes.add('changed'),
   );
@@ -72,8 +73,8 @@ void main() {
     expect(used, isTrue);
     expect(h.link.active, isTrue);
     expect(h.link.failure, isNull);
-    expect(h.published, ['answer-for:$_offer@1000'],
-        reason: 'the answer is published with its time');
+    expect(h.published, ['answer-for:$_offer@1000#offer900'],
+        reason: 'the answer names the offer it answers, and when it was written');
     expect(h.connections, hasLength(1), reason: 'the channel became the live one');
     expect(h.changes, isNotEmpty);
   });
@@ -87,8 +88,10 @@ void main() {
         reason: 'a repeat of the same offer starts no second exchange');
     expect(h.connections, hasLength(1));
 
-    // A genuinely new offer (the machine re-offered) is answered.
+    // A genuinely new offer (the machine re-offered) is answered, and the
+    // answer names THAT offer - which is what the machine matches it against.
     expect(await h.link.tryConnect({'p2pOffer': _offer, 'p2pOfferTs': 2000}), isTrue);
+    expect(h.published.last, 'answer-for:$_offer@1000#offer2000');
     expect(h.connections, hasLength(2));
   });
 
@@ -147,7 +150,7 @@ void main() {
         await gate.future;
         return _FakeChannel(offerSdp);
       },
-      publishAnswer: (sdp, writtenAt) async => published.add(sdp),
+      publishAnswer: (sdp, writtenAt, offerTs) async => published.add(sdp),
       open: (channel) async {},
       onChanged: () {},
     );
@@ -177,7 +180,7 @@ void main() {
         await gate.future;
         return _FakeChannel(offerSdp);
       },
-      publishAnswer: (sdp, writtenAt) async {},
+      publishAnswer: (sdp, writtenAt, offerTs) async {},
       open: (channel) async => opened += 1,
       onChanged: () {},
     );

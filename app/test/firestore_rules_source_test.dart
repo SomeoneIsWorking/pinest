@@ -2,6 +2,30 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
+/// Every field the rules recognise as signaling. Adding one here fails the
+/// source checks until the rules carry it in BOTH key lists.
+const List<String> signalingFields = [
+  'p2pOffer',
+  'p2pOfferTs',
+  'p2pAnswer',
+  'p2pAnswerTs',
+  'p2pAnswerOfferTs',
+];
+
+/// The field names in the first `hasOnly([...])` list that follows [marker].
+List<String> _keyList(String source, String marker) {
+  final start = source.indexOf(marker);
+  if (start < 0) {
+    throw StateError('the rules have no $marker list to compare');
+  }
+  final open = source.indexOf('[', start);
+  final close = source.indexOf(']', open);
+  return RegExp(r"'([A-Za-z0-9_]+)'")
+      .allMatches(source.substring(open, close))
+      .map((match) => match.group(1)!)
+      .toList();
+}
+
 void main() {
   // The rules file ships inside the Firebase project directory, which is what
   // `firebase deploy --only firestore:rules` reads.
@@ -63,7 +87,7 @@ void main() {
   );
 
   test('signaling fields are bounded and must look like SDP', () {
-    for (final field in ['p2pOffer', 'p2pOfferTs', 'p2pAnswer', 'p2pAnswerTs']) {
+    for (final field in signalingFields) {
       expect(
         rules,
         contains("'$field'"),
@@ -74,23 +98,38 @@ void main() {
     expect(normalized, contains("value.matches('v=0"));
     expect(normalized, contains('data.p2pAnswerTs is int'));
     expect(normalized, contains('data.p2pOfferTs is int'));
-    // The answer must not be writable without its timestamp: a description with
-    // no time cannot be told from one left over from an earlier exchange.
+    // An answer must not be writable without the offer it names: an answer that
+    // names nothing cannot be attributed to an exchange, so the machine would
+    // have to compare two devices' clocks to place it - the comparison that
+    // silently refuses a valid answer whenever they disagree.
     expect(
       normalized,
-      contains("data.keys().hasAny(['p2pAnswerTs'])"),
+      contains("data.keys().hasAny(['p2pAnswerOfferTs'])"),
     );
+    expect(normalized, contains('data.p2pAnswerOfferTs is int'));
+    // And the two field lists must be the SAME set: a signaling key that one
+    // list knows and the other does not is a write that is either refused or
+    // judged by presence shape, depending on which clause wins.
+    final presenceKeys = _keyList(normalized, 'data.keys().hasOnly(').toSet();
+    final signalingKeys = _keyList(normalized, 'affected.hasOnly(').toSet();
+    for (final field in signalingFields) {
+      expect(
+        presenceKeys,
+        contains(field),
+        reason: 'the document key whitelist does not allow $field',
+      );
+      expect(
+        signalingKeys,
+        contains(field),
+        reason: 'the signaling exemption does not cover $field, so a write of '
+            'it would be judged by presence shape and refused',
+      );
+    }
   });
 
   test('signaling-only writes are the only ones exempt from presence shape', () {
     // Both pairs: restricting the exemption to the answer refuses the machine's
     // own offer write (measured live: HTTP 403 on publish).
-    expect(
-      normalized,
-      contains(
-        "affected.hasOnly( ['p2pOffer', 'p2pOfferTs', 'p2pAnswer', 'p2pAnswerTs'])",
-      ),
-    );
     expect(
       normalized,
       contains("affected.hasAny( ['p2pOffer', 'p2pOfferTs', 'p2pAnswer', 'p2pAnswerTs'])"),

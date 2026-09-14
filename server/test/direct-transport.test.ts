@@ -78,7 +78,7 @@ function harness() {
     built,
     published,
     logs,
-    answer: (sdp: string, ts: number) => answerHandler?.(sdp, ts),
+    answer: (sdp: string) => answerHandler?.(sdp),
     advance: (ms: number) => { clock += ms; },
   };
 }
@@ -125,7 +125,7 @@ test("an answered punch gets its full lifetime before being replaced", async () 
   // The app answers just before the offer's own lifetime expires: the punch is
   // in flight now, and replacing the peer would kill it mid-negotiation.
   h.advance(OFFER_LIFETIME_MS - 1_000);
-  h.answer("v=0 answer", h.published[0]!.ts + 1);
+  h.answer("v=0 answer");
   h.advance(2_000);
   await t.refreshIfStale();
   assert.equal(h.built.length, 1, "the clock restarts at the answer, not the offer");
@@ -153,23 +153,20 @@ test("a connected channel is never refreshed out from under its user", async () 
   await t.close();
 });
 
-test("an answer for a previous exchange is refused, not applied", async () => {
+test("an answer reaches only the exchange that is live now", async () => {
+  // Which answer belongs to which offer is decided where the protocol says so,
+  // by the offer the answer names (see p2p-signaling.test.ts). What this driver
+  // owns is that the answer arrives at the CURRENT exchange, never a replaced
+  // one: applying an answer to a peer whose offer it does not describe throws
+  // and helps nobody.
   const h = harness();
   const t = await h.transport;
-  const firstOfferTs = h.published[0]!.ts;
   h.advance(OFFER_LIFETIME_MS + 1);
   await t.refreshIfStale();
 
-  // A late answer describing the replaced exchange would apply an answer meant
-  // for a different peer connection — which throws and helps nobody.
-  h.answer("v=0 stale answer", firstOfferTs + 1);
+  h.answer("v=0 current answer");
   await Promise.resolve();
-  assert.deepEqual(h.built[1]!.answers, []);
-  assert.match(h.logs.join("\n"), /answer for a previous offer/);
-
-  // The answer that describes the current offer is applied.
-  h.answer("v=0 current answer", h.published[1]!.ts + 1);
-  await Promise.resolve();
+  assert.deepEqual(h.built[0]!.answers, [], "the replaced exchange is closed to answers");
   assert.deepEqual(h.built[1]!.answers, ["v=0 current answer"]);
   await t.close();
 });
