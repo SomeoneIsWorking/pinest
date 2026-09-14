@@ -91,12 +91,31 @@ def probes() -> list[Probe]:
     ]
 
 
+def searchable(body: str) -> str:
+    """Everything the reply says, unescaped.
+
+    Substring-matching the raw body fails on JSON escaping - a reason containing
+    quotes arrives as `\"command\"`, and this checker called a correct answer
+    wrong because of it. The detail may also sit beside `error` rather than in
+    it, so every field counts.
+    """
+    try:
+        decoded = json.loads(body)
+    except ValueError:
+        return body
+    if isinstance(decoded, dict):
+        # Names and values both: a reply can put the detail in the key of a
+        # field ("imageId": ...) as easily as in its text.
+        return " | ".join(part for item in decoded.items() for part in (str(item[0]), str(item[1])))
+    return body
+
+
 def evaluate(probe: Probe, status: int, body: str) -> str | None:
     """None when the reply is what the app needs, otherwise why it is not."""
     if status != probe.expect_status:
         return f"HTTP {status}, expected {probe.expect_status} ({probe.why}): {body[:200]}"
-    if probe.expect_pattern not in body:
-        return f"HTTP {status} but the body does not name {probe.expect_pattern!r}: {body[:200]}"
+    if probe.expect_pattern not in searchable(body):
+        return f"HTTP {status} but the reply does not name {probe.expect_pattern!r}: {body[:200]}"
     return None
 
 
