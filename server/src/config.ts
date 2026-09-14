@@ -22,6 +22,8 @@ export interface Config {
   /** Largest image, in bytes, that may enter a session's context. */
   maxImageBytes?: number;
   activeSessionId?: string;
+  /** The objective the agent is currently working toward, if one was set. */
+  goal?: SessionGoal;
   [key: string]: unknown;
 }
 
@@ -54,6 +56,32 @@ export function setImageBytesLimit(maxBytes: number): string {
   saveConfig({ maxImageBytes: maxBytes });
   return `[pinest] images larger than ${(maxBytes / (1024 * 1024)).toFixed(1)} MiB `
     + "are scaled down before reaching the model";
+}
+
+/** An objective set with `/goal`, remembered across restarts. */
+export interface SessionGoal {
+  text: string;
+  /** When it was set, so a stale goal is visible as stale. */
+  setAt: number;
+}
+
+/** The objective being worked toward, or null when none is set. */
+export function currentGoal(): SessionGoal | null {
+  const goal = loadConfig().goal;
+  if (!goal || typeof goal.text !== "string" || goal.text.trim().length === 0) return null;
+  return { text: goal.text, setAt: typeof goal.setAt === "number" ? goal.setAt : 0 };
+}
+
+/** Set the objective; a single one at a time, newest wins. */
+export function setGoal(text: string): SessionGoal {
+  const goal: SessionGoal = { text: text.trim(), setAt: Date.now() };
+  saveConfig({ goal });
+  return goal;
+}
+
+/** Forget the objective. */
+export function clearGoal(): void {
+  saveConfig({ goal: undefined });
 }
 
 export function loadConfig(): Config {

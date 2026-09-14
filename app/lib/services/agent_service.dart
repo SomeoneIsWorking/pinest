@@ -979,6 +979,10 @@ class AgentService extends ChangeNotifier {
     }
   }
 
+  /// State the objective to work toward. pi runs its own `/goal` command, so
+  /// the terminal and the app share one wording and one behaviour.
+  void setGoal(String objective) => _send({'type': 'goal_set', 'text': objective});
+
   void cancel(Session s) => _send({'type': 'cancel', 'sessionId': s.id});
   void setModel(Session s, String provider, String modelId) => _send({
     'type': 'model_set',

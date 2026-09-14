@@ -20,6 +20,9 @@ class SlashCommandSpec {
 const List<SlashCommandSpec> slashCommandCatalog = [
   SlashCommandSpec('/compact', 'Replace the context with a summary'),
   SlashCommandSpec('/clear', 'Start a fresh session'),
+  // A pi command, not an app feature: pinest registers /goal and hands the
+  // objective to the agent, so the composer only has to offer it.
+  SlashCommandSpec('/goal <objective>', 'State the objective to work toward', takesArg: true),
   SlashCommandSpec('/model', 'Change the model'),
   SlashCommandSpec('/thinking', 'Change the thinking level'),
   SlashCommandSpec(
