@@ -649,6 +649,20 @@ class _EmptySessions extends StatelessWidget {
           const SizedBox(height: 16),
           Text(svc.anyMachineOnline ? 'No sessions yet' : 'Supervisor offline'),
           const SizedBox(height: 8),
+          if (!svc.anyMachineOnline)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 32),
+              child: Text(
+                // Say WHY. "Supervisor offline" alone cannot be told apart from
+                // a machine that is up but unreachable, and the difference is
+                // the whole diagnosis - so the last reported reason is shown,
+                // and its absence is stated rather than left blank.
+                svc.connectionReason,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.grey, fontSize: 12),
+              ),
+            ),
+          const SizedBox(height: 8),
           const Text(
             'Tap + to spawn a new agent session.',
             style: TextStyle(color: Colors.grey),
