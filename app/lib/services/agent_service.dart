@@ -14,6 +14,7 @@ import 'user_preferences.dart';
 import '../models/session.dart';
 import '../models/session_goal.dart';
 export '../models/session.dart' show PendingImage;
+import '../logic/endpoint_choice.dart';
 import '../models/chat_item.dart';
 import '../models/stream_segment.dart';
 import '../models/session_tree.dart';
@@ -98,6 +99,25 @@ List<Map<String, dynamic>> mergeHistoryPage({
 /// Discovery is data controlled outside the app process. Only a credential-
 /// free HTTPS URL without query or fragment data may receive a Firebase bearer
 /// token; the socket always uses WSS and never performs an HTTP downgrade.
+/// Accept the server-reported loopback endpoint, and nothing else.
+///
+/// The state frame is external data; a `localUrl` that pointed anywhere but the
+/// host's own loopback would aim the Firebase token at an arbitrary listener.
+/// So: ws only, a loopback host only, a numeric port only, and no query,
+/// fragment, or user info to smuggle anything past the authority.
+Uri? secureLoopbackUri(Object? rawUrl) {
+  if (rawUrl is! String || rawUrl.trim() != rawUrl) return null;
+  final uri = Uri.tryParse(rawUrl);
+  if (uri == null || uri.scheme.toLowerCase() != 'ws') return null;
+  if (uri.userInfo.isNotEmpty || uri.hasQuery || uri.hasFragment) return null;
+  final host = uri.host;
+  final loopback = host == '127.0.0.1' || host == 'localhost' || host == '::1' || host == '[::1]';
+  if (!loopback) return null;
+  final port = uri.port;
+  if (port <= 0 || port > 65535) return null;
+  return uri;
+}
+
 Uri? secureDiscoveryWebSocketUri(Object? rawUrl) {
   if (rawUrl is! String ||
       rawUrl.trim() != rawUrl ||
@@ -337,7 +357,12 @@ class AgentService extends ChangeNotifier {
             }
 
             _lastEndpoint = endpoint;
-            await _dial(endpoint);
+            final picked = pickEndpoint(
+              local: _localEndpoint,
+              remote: endpoint,
+              lastFailedLocal: _localFailed,
+            );
+            if (picked != null) await _dial(picked);
           },
           onError: (e) {
             _error = e.toString();
@@ -360,6 +385,9 @@ class AgentService extends ChangeNotifier {
       },
       onError: (e) {
         if (!identical(_ws, socket)) return;
+        // A loopback that refuses is a real answer about THIS generation: the
+        // browser is not on the host's machine, so stop preferring it.
+        if (identical(endpoint, _localEndpoint)) _localFailed = _localEndpoint;
         _error = e;
         _transitionToDisconnected(source: socket, reconnect: true);
       },
@@ -446,12 +474,14 @@ class AgentService extends ChangeNotifier {
     switch (msg['type']) {
       case 'authed':
         _connected = true;
+        _activeEndpoint = _ws?.endpoint;
         _reconnectDelay = 2; // backoff satisfied — reset
         _flushOutbox();
         break;
       case 'state':
         _httpKey = (msg['httpKey'] as String?) ?? _httpKey;
         _goal = SessionGoal.fromJson(msg['goal']);
+        _localEndpoint = secureLoopbackUri(msg['localUrl']);
         _online = msg['online'] ?? false;
         _hostname = msg['hostname'] ?? 'machine';
         _activeSessionId = msg['activeSessionId'] as String?;
@@ -807,15 +837,31 @@ class AgentService extends ChangeNotifier {
   /// screenshot and a send cannot queue behind either. The socket is left for
   /// what the server PUSHES.
   Uri? get httpBase {
-    final endpoint = _lastEndpoint;
+    final endpoint = _activeEndpoint ?? _lastEndpoint;
     if (endpoint == null) return null;
     return endpoint.replace(
-      scheme: endpoint.scheme == 'wss' ? 'https' : 'http',
+      scheme: endpoint.scheme == 'wss' || endpoint.scheme == 'ws' ? 'https' : 'http',
       path: '',
       query: '',
       fragment: '',
     );
   }
+
+  /// The endpoint the socket actually connected on. The discovery endpoint
+  /// stays available as the fallback, but HTTP must follow the origin the
+  /// socket really reached, or images and messages go to a different host than
+  /// the pushes came from.
+  Uri? _activeEndpoint;
+
+  /// The server's own loopback endpoint, from its state frames. Validated as
+  /// strictly loopback: this field arrives from outside the app process and
+  /// must never be able to aim the auth token at an arbitrary host.
+  Uri? _localEndpoint;
+
+  /// The loopback endpoint a dial already refused, within its server
+  /// generation: the browser is not on the host's machine, so stop preferring
+  /// it until the server reports a different port.
+  Uri? _localFailed;
 
   /// History images, fetched on demand over HTTP (never shipped with history).
   late final ImageStore images = ImageStore((imageId) {
