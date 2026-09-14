@@ -87,6 +87,28 @@ class AgentService extends ChangeNotifier {
   /// discovery listener, not the dial - has recorded whether it even ran.
   String _connectionNote = 'no connection attempt has reported a reason yet';
 
+  /// When the machine's own presence was last seen fresh, and whether it said
+  /// it was up. A machine that is publishing is NOT the same thing as a machine
+  /// that is down, and "Supervisor offline" cannot be told apart from "the
+  /// machine is fine, its published endpoint is not reachable yet" - measured:
+  /// the machine was online and publishing every 20s while the app showed
+  /// offline against a tunnel URL that had just been minted.
+  int _machineSeenAt = 0;
+  bool _machineSaidOnline = false;
+
+  /// Whether the machine itself is up, judged from its own published presence
+  /// rather than from whether this app could reach it.
+  ///
+  /// The window is generous on purpose: the machine republishes every ~20s, so
+  /// anything inside two minutes is a live machine rather than a stale record.
+  bool get machinePublishing =>
+      _machineSaidOnline &&
+      DateTime.now().millisecondsSinceEpoch - _machineSeenAt < 120000;
+
+  /// When the machine last reported in, or 0 when this app has never seen it.
+  /// Format it with `formatRelativeTime`, not a second formatter here.
+  int get machineSeenAt => _machineSeenAt;
+
   /// The endpoint of the attempt being reported, so the reason can name it.
   Uri? _dialTarget;
 
@@ -264,6 +286,12 @@ class AgentService extends ChangeNotifier {
       _transitionToDisconnected(forgetEndpoint: true);
       return;
     }
+    // Record the machine's own claim while it is fresh, before deciding
+    // anything about reaching it: this is what lets "offline" mean the machine,
+    // not merely this app's last dial.
+    _machineSeenAt = DateTime.now().millisecondsSinceEpoch;
+    _machineSaidOnline = data['online'] == true;
+
     // A published URL that is not a safe WSS endpoint is refused outright:
     // nothing may receive the Firebase token instead.
     if (data['url'] != null && endpoint == null) {
