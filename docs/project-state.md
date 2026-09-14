@@ -34,6 +34,8 @@ cited), `partial`, `blocked`, `missing`. One current focus at the bottom.
 | S17 | A compaction with nothing to compact is a no-op, and is not re-attempted | verified | S5, S10 | G4 |
 | S18 | Concurrent notices are stacked, deduplicated, and bounded | verified | S6 | G1 |
 | S19 | A session states it has no context budget, so agents do not invent one and stop | partial | S1, S5 | G1, G4 |
+| S20 | The objective belongs to the session it was set for, and shows only on that tab | verified | S1, S8 | G1, G2 |
+| S21 | Instructions the harness injects are never shown as the user's own words | verified | S6, S9 | G1 |
 Atomic work and findings live in `docs/issues/`.
 
 ### S8 — Remote session lifecycle
@@ -95,6 +97,23 @@ image cap uses. Verified: the statement, its idempotence, its registration on th
 a spawned session's real pi `emitBeforeAgentStart` result. Gap: this is prevention, not enforcement,
 and whether it actually stops the behaviour is unverified — its falsifier is an agent stopping for a
 budget after this ships.
+
+### S20 — The objective belongs to a session
+
+A goal is stored on the session's own row and published on its own snapshot; `goal_set`/`goal_clear`
+are session commands that REQUIRED a target, so an untargeted goal is refused rather than applied to
+the host. The banner renders only for the tab whose session owns the goal, and the directive reaches
+that session's agent. Gaps: a goal set in a terminal is only available in the host session (spawned
+sessions do not load the extension, so `/goal` does not exist there), and the same is true of the
+app's `/goal` — it is a client command, not a prompt.
+
+### S21 — Injected instructions are marked as injected
+
+The goal directive and messages between sessions travel as pi custom messages (`pinest-goal`,
+`pinest-message`) and are drawn as a labelled card: who injected it, aligned left, visually unlike
+the user's own bubble. Previously both were delivered as user messages, so the transcript showed
+the human saying things they had not said. Gap: other harness content (task notifications aside)
+still relies on system-role rendering rather than a named injector.
 
 ### S15 — Direct (no-tunnel) transport
 

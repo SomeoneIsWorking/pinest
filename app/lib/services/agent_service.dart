@@ -807,15 +807,19 @@ class AgentService extends ChangeNotifier {
     }
   }
 
-  /// The objective the agent is working toward, from the server's own state.
-  SessionGoal? get goal => _store.goal;
+  /// The objective the session works toward, from the server's own state. Each
+  /// session has its own: a goal belongs to the tab it was stated on.
+  SessionGoal? goalFor(String? sessionId) => _store.goalFor(sessionId);
 
-  /// State the objective to work toward. pi runs its own `/goal` command, so
-  /// the terminal and the app share one wording and one behaviour.
-  void setGoal(String objective) => _send({'type': 'goal_set', 'text': objective});
+  /// State the objective for one session. The server stores it on that session
+  /// and hands the directive to that session's agent — never to whichever
+  /// session happens to be the host.
+  void setGoal(String sessionId, String objective) =>
+      _send({'type': 'goal_set', 'sessionId': sessionId, 'text': objective});
 
-  /// Stop working toward the objective.
-  void clearGoal() => _send({'type': 'goal_clear'});
+  /// Stop working toward one session's objective. Other sessions keep theirs.
+  void clearGoal(String sessionId) =>
+      _send({'type': 'goal_clear', 'sessionId': sessionId});
 
   void cancel(Session s) => _send({'type': 'cancel', 'sessionId': s.id});
   void setModel(Session s, String provider, String modelId) => _send({

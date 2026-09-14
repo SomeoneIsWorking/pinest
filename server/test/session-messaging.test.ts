@@ -6,12 +6,17 @@
 import "../support/isolate-config.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { messageSession, resolveTarget, type MessagingDeps } from "../src/session-messaging.ts";
+import {
+  messageSession,
+  resolveTarget,
+  type InjectedMessage,
+  type MessagingDeps,
+} from "../src/session-messaging.ts";
 
 function deps(overrides: Partial<MessagingDeps> = {}): {
   deps: MessagingDeps;
-  delivered: Array<{ id: string; text: string; deliverAs: string }>;
-  hostDelivered: Array<{ text: string; deliverAs: string }>;
+  delivered: Array<{ id: string; message: InjectedMessage; deliverAs: string }>;
+  hostDelivered: Array<{ message: InjectedMessage; deliverAs: string }>;
 } {
   const sessions = new Map([
     ["host-id", { id: "host-id", name: "repo", running: true }],
@@ -19,16 +24,17 @@ function deps(overrides: Partial<MessagingDeps> = {}): {
     ["kenji2-id", { id: "kenji2-id", name: "Kenji-NX-Benchmark", running: true }],
     ["dead-id", { id: "dead-id", name: "old-work", running: false }],
   ]);
-  const delivered: Array<{ id: string; text: string; deliverAs: string }> = [];
-  const hostDelivered: Array<{ text: string; deliverAs: string }> = [];
+  const delivered: Array<{ id: string; message: InjectedMessage; deliverAs: string }> = [];
+  const hostDelivered: Array<{ message: InjectedMessage; deliverAs: string }> = [];
   const base: MessagingDeps = {
     hostSessionId: () => "host-id",
+    senderName: () => "repo",
     sessions: () => sessions,
-    deliverToSpawned: async (id, text, deliverAs) => {
-      delivered.push({ id, text, deliverAs });
+    deliverToSpawned: async (id, message, deliverAs) => {
+      delivered.push({ id, message, deliverAs });
     },
-    deliverToHost: (text, deliverAs) => {
-      hostDelivered.push({ text, deliverAs });
+    deliverToHost: (message, deliverAs) => {
+      hostDelivered.push({ message, deliverAs });
     },
     ...overrides,
   };
@@ -81,9 +87,22 @@ test("a message to another session goes through the spawned delivery path", asyn
   const { deps: d, delivered, hostDelivered } = deps();
   const result = await messageSession(d, "Kenji-NX", "context compacted, carry on", "steer");
   assert.equal(result.ok, true);
-  assert.deepEqual(delivered, [
-    { id: "kenji-id", text: "context compacted, carry on", deliverAs: "steer" },
-  ]);
+  // Injected, not typed: the receiving session's record says where it came from.
+  assert.deepEqual(delivered, [{
+    id: "kenji-id",
+    message: {
+      customType: "pinest-message",
+      text: "context compacted, carry on",
+      details: { from: "repo", fromId: "host-id" },
+    },
+    deliverAs: "steer",
+  }]);
+  assert.notEqual(delivered[0].message.customType, undefined);
+  assert.equal(
+    (delivered[0].message.details as { from: string }).from,
+    "repo",
+    "the receiver can tell a peer session from the human",
+  );
   assert.deepEqual(hostDelivered, []);
 });
 
@@ -91,11 +110,18 @@ test("a message to this session uses the host path, and an empty one is refused"
   const { deps: d, hostDelivered } = deps();
   const ok = await messageSession(d, "repo", "check the build", "followUp");
   assert.equal(ok.ok, true);
-  assert.deepEqual(hostDelivered, [{ text: "check the build", deliverAs: "followUp" }]);
+  assert.deepEqual(hostDelivered, [{
+    message: {
+      customType: "pinest-message",
+      text: "check the build",
+      details: { from: "repo", fromId: "host-id" },
+    },
+    deliverAs: "followUp",
+  }]);
 
   const empty = await messageSession(d, "repo", "   ");
   assert.equal(empty.ok, false);
-  assert.deepEqual(hostDelivered, [{ text: "check the build", deliverAs: "followUp" }]);
+  assert.equal(hostDelivered.length, 1, "an empty message delivers nothing");
 });
 
 test("a delivery failure surfaces as a refusal, not a lie about success", async () => {

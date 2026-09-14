@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'background_job.dart';
+import 'session_goal.dart';
 
 /// A live session, as seen in the ephemeral state doc.
 /// Not a stored record — just a snapshot of what's running right now.
@@ -101,6 +102,10 @@ class Session {
   /// Background jobs associated with this session.
   final List<BackgroundJob> jobs;
 
+  /// The objective THIS session works toward, if the user set one. Per session
+  /// on purpose: a goal belongs to the tab it was stated on, not to the machine.
+  final SessionGoal? goal;
+
   Session({
     required this.id,
     required this.name,
@@ -114,6 +119,7 @@ class Session {
     this.contextCompactAt,
     this.isCompacting = false,
     this.retry,
+    this.goal,
     this.status = 'idle',
     this.isInteractive = false,
     this.isHost = false,
@@ -179,6 +185,7 @@ class Session {
           ? const []
           : (map['pendingSteering'] as List?)?.cast<String>() ?? const [],
       pendingImagesByText: pendingImagesByText,
+      goal: SessionGoal.fromJson(map['goal']),
       jobs: registry
           ? const []
           : (map['jobs'] as List?)

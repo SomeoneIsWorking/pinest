@@ -18,8 +18,6 @@ export interface StatePublisherDeps {
   sessionsWithJobs: () => SessionSnapshot[];
   tunnelUrl: () => string | null;
   tunnelProvider: () => string | null;
-  /** The objective being worked toward, so the app can show it persistently. */
-  goal: () => { text: string; setAt: number } | null;
   /** The loopback endpoint for a browser on this machine. */
   localUrl: () => string | null;
   /** Cheap synchronous usage overlay, applied before each state message. */
@@ -91,7 +89,6 @@ export class StatePublisher {
       registry: mergeRegistryRows(this.deps.registryRows(), (id) => this.sessions.get(id)?.status),
       tunnelUrl: this.deps.tunnelUrl(),
       tunnelProvider: this.deps.tunnelProvider(),
-      goal: this.deps.goal(),
       localUrl: this.deps.localUrl(),
     });
   }
