@@ -147,6 +147,17 @@ is published and the channel carries the auth handshake, a command, and an
 inbound frame; a peer that never opens a channel fails as a timeout rather than
 hanging; a description that is not an offer is refused.
 
+The transport carries the protocol's own messages, whatever their size. A
+DataChannel message is bounded by the SCTP maximum a peer advertises and werift
+enforces it by throwing; the machine's first push after a direct channel opened
+was a 408 KB state frame, and that throw killed the agent process (measured
+live, twice). Payloads are now split into 16 KiB binary frames and reassembled at
+the other end, with the two runtimes pinning the same golden bytes
+(`server/src/p2p-framing.ts`, `app/lib/logic/direct_framing.dart`), and no send
+failure is allowed to escape. The transport also uses TWO channels, one per
+direction (`pinest-push`, `pinest-actions`), because an ordered DataChannel would
+otherwise let a 26-frame push sit in front of the user's next command.
+
 An answer identifies the exchange it belongs to instead of being ordered against
 it. The machine's offer timestamp is the only value both sides agree on; the
 app's write time is a different device's clock, and comparing the two refuses a

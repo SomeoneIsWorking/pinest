@@ -6,6 +6,7 @@ import 'dart:convert';
 import 'dart:js_interop';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pinest_app/logic/direct_framing.dart';
 import 'package:pinest_app/services/direct_channel_web.dart';
 import 'package:web/web.dart' as web;
 
@@ -18,9 +19,13 @@ import 'package:web/web.dart' as web;
 /// Both peers live in this one browser, so ICE completes over host candidates
 /// with no network involved; what is under test is the interop, not the tunnel
 /// punching (which the live probe covers).
-Future<(web.RTCPeerConnection, web.RTCDataChannel, String)> _offerPeer() async {
+Future<(web.RTCPeerConnection, web.RTCDataChannel, web.RTCDataChannel, String)>
+    _offerPeer() async {
   final pc = web.RTCPeerConnection();
-  final channel = pc.createDataChannel('pinest');
+  // Both directions, as the machine offers them: the app receives on the push
+  // channel and sends on the actions one.
+  final push = pc.createDataChannel(kPushChannelLabel);
+  final actions = pc.createDataChannel(kActionsChannelLabel);
   final offer = await pc.createOffer().toDart;
   await pc
       .setLocalDescription(
@@ -38,12 +43,25 @@ Future<(web.RTCPeerConnection, web.RTCDataChannel, String)> _offerPeer() async {
   if (pc.iceGatheringState != 'complete') {
     await gathered.future.timeout(const Duration(seconds: 10));
   }
-  return (pc, channel, pc.localDescription!.sdp);
+  return (pc, push, actions, pc.localDescription!.sdp);
+}
+
+/// The payload inside one received frame. Frames are binary, so anything else
+/// is a protocol error the test should see rather than paper over.
+Map<String, dynamic> payloadOf(JSAny? data) {
+  if (data == null || !data.isA<JSArrayBuffer>()) {
+    throw StateError('a frame arrived that is not binary');
+  }
+  final whole = FrameReader().accept((data as JSArrayBuffer).toDart.asUint8List());
+  if (whole == null) {
+    throw StateError('a partial frame arrived where a whole message was expected');
+  }
+  return jsonDecode(whole) as Map<String, dynamic>;
 }
 
 void main() {
   test('an offer is answered, published, and the channel carries frames', () async {
-    final (remote, remoteChannel, offerSdp) = await _offerPeer();
+    final (remote, remotePush, remoteActions, offerSdp) = await _offerPeer();
     String? published;
 
     final channel = await connectDataChannel(
@@ -88,11 +106,11 @@ void main() {
     // during connect, before a listener could be attached.
     final queue = <Map<String, dynamic>>[];
     final waiters = <Completer<Map<String, dynamic>>>[];
-    remoteChannel.addEventListener(
+    remoteActions.binaryType = 'arraybuffer';
+    remoteActions.addEventListener(
       'message',
       ((web.MessageEvent event) {
-        final frame =
-            jsonDecode((event.data! as JSString).toDart) as Map<String, dynamic>;
+        final frame = payloadOf(event.data);
         if (waiters.isNotEmpty) {
           waiters.removeAt(0).complete(frame);
         } else {
@@ -119,8 +137,16 @@ void main() {
     expect(frame['type'], 'command');
     expect((frame['cmd'] as Map)['type'], 'ping');
 
-    remoteChannel.send(jsonEncode({'type': 'notice', 'message': 'hello'}).toJS);
-    expect((await received.future.timeout(const Duration(seconds: 10)))['message'], 'hello');
+    // A push larger than SCTP will carry in one message: the machine sends
+    // these (a full state frame is ~400 KB), and the app must reassemble it.
+    final big = jsonEncode({'type': 'notice', 'message': 'hello', 'pad': 'z' * 70_000});
+    for (final frame in FrameWriter().frames(big)) {
+      remotePush.send(frame.toJS);
+    }
+    final pushFrame = await received.future.timeout(const Duration(seconds: 10));
+    expect(pushFrame['message'], 'hello');
+    expect((pushFrame['pad']! as String).length, 70_000,
+        reason: 'a 70 KB push arrives whole, across frames');
 
     channel.close();
     remote.close();
