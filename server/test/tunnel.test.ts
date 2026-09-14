@@ -7,7 +7,7 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import {
   PROVIDERS, PROVIDER_NAMES, DEFAULT_PROVIDER, cloudflaredArgs, cloudflaredInstallHint,
-  firstValidTunnelEndpoint, getProvider, ngrokArgs, readNgrokApiUrl,
+  firstValidTunnelEndpoint, getProvider, makeLineReader, ngrokArgs, readNgrokApiUrl,
   resolveRunnableSystemExecutable, resolveSystemExecutable, startTunnel,
   tailscaleInstallHint, validateTunnelEndpoint,
 } from "../src/tunnel.ts";
@@ -420,4 +420,24 @@ test("startTunnel: start() returning null url is treated as failure → fallback
   const b = mockProvider("b", { url: "https://b.example" });
   const r = await startTunnel({ port: 1, providers: [a, b] });
   assert.equal(r.provider, "b");
+});
+
+test("a tunnel URL split across chunks is still found", () => {
+  // The banner arrives in several writes; the URL line is the one that straddles
+  // a boundary. Splitting each chunk on its own newlines loses it.
+  const lines: string[] = [];
+  const feed = makeLineReader((line) => lines.push(line));
+  feed("2026-09-14T07:17:45Z INF Requesting new quick Tunnel on trycloudflare.com...\n2026-09-14T07:17:45Z INF +---");
+  feed("-------------------------------------------------------------+\n");
+  feed("2026-09-14T07:17:46Z INF |  https://plain-example-name.trycloudflare.com  |\n");
+  feed("2026-09-14T07:17:46Z INF +---------------------------------");
+  const found = lines.map((line) => firstValidTunnelEndpoint("cloudflared", line)).find(Boolean);
+  assert.equal(found, "https://plain-example-name.trycloudflare.com");
+});
+
+test("a chunk holding several whole lines yields each of them", () => {
+  const lines: string[] = [];
+  const feed = makeLineReader((line) => lines.push(line));
+  feed("one\ntwo\nthree\n");
+  assert.deepEqual(lines, ["one", "two", "three"]);
 });
