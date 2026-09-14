@@ -5,6 +5,7 @@
  * without the supervisor, the registry or a socket.
  */
 import type { ServerMessage, SessionRow, SessionSnapshot } from "./protocol.ts";
+import type { DirectTransportStatus } from "./direct-transport.ts";
 
 export interface StateSnapshot {
   hostname: string;
@@ -17,6 +18,9 @@ export interface StateSnapshot {
   /** The server's own loopback endpoint, for a browser on the same machine:
    * no tunnel, no DNS, no churn. The app prefers it when it is dialable. */
   localUrl: string | null;
+  /** The direct transport's own state, or null when peer-to-peer is off. A
+   * punch that fails silently is indistinguishable from one never attempted. */
+  p2p: DirectTransportStatus | null;
 }
 
 export function buildStateMessage(snapshot: StateSnapshot): ServerMessage {
@@ -34,6 +38,7 @@ export function buildStateMessage(snapshot: StateSnapshot): ServerMessage {
     tunnelUrl: snapshot.tunnelUrl,
     tunnelProvider: snapshot.tunnelProvider,
     localUrl: snapshot.localUrl,
+    p2p: snapshot.p2p,
   };
 }
 

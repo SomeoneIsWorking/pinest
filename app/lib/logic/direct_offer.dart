@@ -49,12 +49,14 @@ bool looksLikeSdp(Object? value) {
   if (answeredTs != null && ts <= answeredTs) {
     return null;
   }
-  // Deliberately NOT bounded by age. Liveness is the presence heartbeat the
-  // caller already requires: a document that is fresh belongs to a machine that
-  // is running, and its offer's peer stays alive until the machine reloads and
-  // republishes. Refusing an old offer would make a host that has been up for
-  // minutes unreachable directly, while answering a genuinely dead one costs a
-  // failed punch that falls back to the tunnel.
+  // Deliberately NOT bounded by age: the MACHINE owns whether an offer is still
+  // worth answering, and it withdraws and republishes a stale one on its own
+  // (`OFFER_LIFETIME_MS` in server/src/direct-transport.ts). So an old offer
+  // here means the machine is not refreshing - peer-to-peer is switched off
+  // there, or it is running a build from before it refreshed at all - and that
+  // is a different problem than an expired address. Answering it costs one
+  // punch that fails visibly and falls back to the tunnel; refusing it would
+  // make the app claim there was nothing to try.
   if (now - ts < -kOfferClockSkew.inMilliseconds) {
     return null;
   }

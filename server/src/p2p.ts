@@ -11,38 +11,44 @@
  * loopback server. Nothing here is authoritative about connectivity: ICE
  * completing is the evidence, and a failed punch is surfaced, not hidden.
  *
+ * ONE EXCHANGE, not one lifetime: a peer connection and its gathered
+ * candidates are only useful while the NAT mapping behind them is alive, and a
+ * carrier-grade mapping does not survive a quiet minute. The exchange is
+ * therefore disposable and owned by `direct-transport.ts`, which starts a fresh
+ * one whenever the current offer has gone stale. Reusing a single startup offer
+ * is how the direct path failed silently: the app answered a description whose
+ * public address had stopped accepting packets minutes earlier.
+ *
  * werift's API is deliberately non-standard in places; anything assumed here
  * is checked against node_modules/werift/lib/webrtc/src/*.d.ts, not guessed. */
 
 import { RTCDataChannel, RTCPeerConnection, RTCSessionDescription } from "werift";
 
-/** Who offers and answers are exchanged with. Firestore today; the interface is
- * what keeps the peer testable without the network. */
-export interface Signaling {
-  publishOffer(sdp: string): Promise<void>;
-  onAnswer(handler: (sdp: string) => void): void;
-}
-
-export interface P2PHostOptions {
-  signaling: Signaling;
-  /** Where bridged traffic goes: the loopback server that owns the protocol. */
-  port: number;
+export interface P2PExchangeOptions {
+  /** Publish this exchange's offer, with the timestamp that identifies it. */
+  publish: (sdp: string, ts: number) => Promise<void>;
   /** Stateless STUN servers for reflexive-address discovery only. */
   stunServers?: string[];
   /** Report an ignored or failed exchange step. Nothing here is fatal. */
   log?: (message: string) => void;
 }
 
-export interface P2PHost {
-  /** The host's offer with its own candidates already gathered. */
-  offerSdp: Promise<string>;
+export interface P2PExchange {
+  /** Gather this exchange's candidates and publish its offer. */
+  offer(ts: number): Promise<string>;
   acceptAnswer(sdp: string): Promise<void>;
-  /** The DataChannel once ICE and DTLS complete it. */
+  /** The DataChannel once ICE and DTLS complete it — for this exchange only. */
   channel: Promise<RTCDataChannel>;
   close(): void;
 }
 
-const DEFAULT_STUN = ["stun:stun.l.google.com:19302"];
+/** Several independent STUN views of the same socket: a carrier that filters
+ * one provider still yields a reflexive candidate from another, and each
+ * answer is a different NAT mapping the punch may succeed on. */
+export const DEFAULT_STUN = [
+  "stun:stun.l.google.com:19302",
+  "stun:stun.cloudflare.com:3478",
+];
 
 /** An answer that has not been applied by now never will be. */
 const ANSWER_APPLY_TIMEOUT_MS = 10_000;
@@ -59,7 +65,8 @@ function withTimeout<T>(work: Promise<T>, ms: number, what: string): Promise<T> 
   });
 }
 
-export function startP2PHost(options: P2PHostOptions): P2PHost {
+/** Start one exchange: a peer connection, an offer, and at most one answer. */
+export function startP2PExchange(options: P2PExchangeOptions): P2PExchange {
   const pc = new RTCPeerConnection({
     iceServers: (options.stunServers ?? DEFAULT_STUN).map((urls) => ({ urls })),
   });
@@ -82,18 +89,6 @@ export function startP2PHost(options: P2PHostOptions): P2PHost {
       if (state === "complete") resolve();
     });
   });
-
-  const offerSdp = (async () => {
-    const created = pc.createDataChannel("pinest");
-    resolveChannel(created);
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    await gatherComplete;
-    const local = pc.localDescription;
-    if (!local) throw new Error("no local description after gathering");
-    await options.signaling.publishOffer(local.sdp);
-    return local.sdp;
-  })();
 
   // One exchange, one answer. The app answers from state it does not persist
   // across a page reload, so the same offer being answered twice is normal
@@ -124,16 +119,21 @@ export function startP2PHost(options: P2PHostOptions): P2PHost {
       options.log?.(`could not apply answer (${pc.signalingState}): ${(error as Error).message}`);
     }
   };
-  // Answers arrive through signaling; acceptAnswer stays exposed for callers
-  // that deliver them directly.
-  options.signaling.onAnswer((sdp) => {
-    void acceptAnswer(sdp);
-  });
 
   return {
-    offerSdp,
     channel,
     acceptAnswer,
+    offer: async (ts: number) => {
+      const created = pc.createDataChannel("pinest");
+      resolveChannel(created);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await gatherComplete;
+      const local = pc.localDescription;
+      if (!local) throw new Error("no local description after gathering");
+      await options.publish(local.sdp, ts);
+      return local.sdp;
+    },
     close: () => {
       try {
         pc.close();

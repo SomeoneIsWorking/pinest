@@ -47,9 +47,12 @@ void main() {
   });
 
   test('an old offer is still answered; only a future one is refused', () {
-    // Presence freshness says the machine is running, and its peer lives until
-    // it reloads and republishes - so an offer that has been sitting in the
-    // document for an hour is still the right one to answer.
+    // The MACHINE decides whether an offer is still worth answering: it
+    // withdraws and republishes a stale one on its own, so an offer that has
+    // been sitting there for an hour means the machine is not refreshing -
+    // peer-to-peer switched off there, or a build from before it refreshed at
+    // all. Answering it costs one punch that fails visibly and falls back to
+    // the tunnel; refusing it would make the app pretend nothing was offered.
     expect(
       offerToAnswer(
         {'p2pOffer': _offer, 'p2pOfferTs': 1000},

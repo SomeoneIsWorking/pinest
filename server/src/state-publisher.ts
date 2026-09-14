@@ -5,7 +5,7 @@
  * Extracted from the extension entry point so orchestration there wires pieces
  * together instead of holding per-session bookkeeping itself.
  */
-import type { ServerMessage, SessionRow, SessionSnapshot } from "./protocol.ts";
+import type { DirectTransportWireStatus, ServerMessage, SessionRow, SessionSnapshot } from "./protocol.ts";
 import { buildStateMessage, mergeRegistryRows, snapshotsWithJobs } from "./state-message.ts";
 
 export interface StatePublisherDeps {
@@ -20,6 +20,8 @@ export interface StatePublisherDeps {
   tunnelProvider: () => string | null;
   /** The loopback endpoint for a browser on this machine. */
   localUrl: () => string | null;
+  /** The direct transport's state, or null when peer-to-peer is off. */
+  p2p: () => DirectTransportWireStatus | null;
   /** Cheap synchronous usage overlay, applied before each state message. */
   refreshUsage: () => void;
   send: (message: ServerMessage) => void;
@@ -90,6 +92,7 @@ export class StatePublisher {
       tunnelUrl: this.deps.tunnelUrl(),
       tunnelProvider: this.deps.tunnelProvider(),
       localUrl: this.deps.localUrl(),
+      p2p: this.deps.p2p(),
     });
   }
 

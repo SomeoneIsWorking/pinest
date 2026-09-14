@@ -14,6 +14,7 @@ import '../logic/command_id.dart';
 import 'server_http.dart';
 import 'session_store.dart';
 import 'user_preferences.dart';
+import '../models/direct_status.dart';
 import '../models/server_notice.dart';
 import '../models/session.dart';
 import '../models/session_goal.dart';
@@ -40,6 +41,7 @@ class AgentService extends ChangeNotifier {
   ControlChannel? _ws;
 
   String? _tunnelUrl;
+  DirectStatus? _directStatus;
   String? _tunnelProvider;
 
   bool get connected => _store.online;
@@ -48,6 +50,10 @@ class AgentService extends ChangeNotifier {
   String? get activeSessionId => _store.activeSessionId;
   String? get homePath => _store.homePath;
   String? get tunnelUrl => _tunnelUrl;
+
+  /// The MACHINE's direct-transport state, or null when it has not reported
+  /// one (an older host, or peer-to-peer switched off there).
+  DirectStatus? get hostDirectStatus => _directStatus;
   String? get tunnelProvider => _tunnelProvider;
   String? get uid => _auth?.user?.uid;
   String? _error;
@@ -449,6 +455,7 @@ class AgentService extends ChangeNotifier {
         _localEndpoint = secureLoopbackUri(msg['localUrl']);
         _tunnelUrl = msg['tunnelUrl'] as String?;
         _tunnelProvider = msg['tunnelProvider'] as String?;
+        _directStatus = DirectStatus.fromJson(msg['p2p']);
         _store.applyState(
           msg,
           outgoing: _outgoing,

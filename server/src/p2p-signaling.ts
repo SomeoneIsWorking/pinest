@@ -20,12 +20,14 @@ export interface P2PSignalingDeps {
   /** Read the current answer, or null when the app has not sent one. */
   readAnswer(): Promise<{ sdp: string; ts: number } | null>;
   pollMs?: number;
-  now?: () => number;
 }
 
 export interface P2PSignaling {
-  publishOffer(sdp: string): Promise<void>;
-  onAnswer(handler: (sdp: string) => void): void;
+  /** Publish one exchange's offer. `ts` identifies the exchange: it is the
+   * floor an answer must be newer than, and the host owns it because only the
+   * host knows when it replaced the previous exchange. */
+  publishOffer(sdp: string, ts: number): Promise<void>;
+  onAnswer(handler: (sdp: string, ts: number) => void): void;
   stop(): void;
 }
 
@@ -40,8 +42,7 @@ export function looksLikeSdp(value: unknown): value is string {
 }
 
 export function createP2PSignaling(deps: P2PSignalingDeps): P2PSignaling {
-  const now = deps.now ?? Date.now;
-  const handlers: ((sdp: string) => void)[] = [];
+  const handlers: ((sdp: string, ts: number) => void)[] = [];
   let offerTs = 0;
   let deliveredTs = 0;
   let timer: NodeJS.Timeout | undefined;
@@ -67,7 +68,7 @@ export function createP2PSignaling(deps: P2PSignalingDeps): P2PSignaling {
     // newest is applied: a stale answer would describe a peer that has moved on.
     if (answer.ts <= offerTs || answer.ts <= deliveredTs) return;
     deliveredTs = answer.ts;
-    for (const handler of handlers) handler(answer.sdp);
+    for (const handler of handlers) handler(answer.sdp, answer.ts);
   };
 
   const start = (): void => {
@@ -79,8 +80,10 @@ export function createP2PSignaling(deps: P2PSignalingDeps): P2PSignaling {
   };
 
   return {
-    publishOffer: async (sdp) => {
-      offerTs = now();
+    publishOffer: async (sdp, ts) => {
+      // A new exchange resets the answer floor: the app's next answer describes
+      // THIS offer, and must not be filtered out as belonging to the previous.
+      offerTs = ts;
       deliveredTs = 0;
       await deps.writeOffer(sdp, offerTs);
       start();

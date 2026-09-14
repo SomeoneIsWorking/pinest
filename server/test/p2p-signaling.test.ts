@@ -11,15 +11,12 @@ interface Harness {
   answer: { sdp: string; ts: number } | null;
   offers: { sdp: string; ts: number }[];
   signaling: ReturnType<typeof createP2PSignaling>;
-  now: () => number;
 }
 
 function harness(pollMs = 5): Harness {
-  let clock = 1_000;
   const state: Harness = {
     answer: null,
     offers: [],
-    now: () => clock,
     writeOffer: async (sdp, ts) => { state.offers.push({ sdp, ts }); },
     readAnswer: async () => state.answer,
     signaling: undefined as unknown as ReturnType<typeof createP2PSignaling>,
@@ -28,10 +25,13 @@ function harness(pollMs = 5): Harness {
     writeOffer: state.writeOffer,
     readAnswer: state.readAnswer,
     pollMs,
-    now: state.now,
   });
   return state;
 }
+
+/** The exchange's own timestamp: it identifies which offer an answer belongs
+ * to, so the host owns it rather than the transport. */
+const OFFER_TS = 1_000;
 
 const SDP = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n";
 
@@ -43,7 +43,7 @@ async function settle(times = 6): Promise<void> {
 
 test("an offer is published with its timestamp, and answers are ignored until then", async () => {
   const h = harness();
-  await h.signaling.publishOffer(SDP);
+  await h.signaling.publishOffer(SDP, OFFER_TS);
   assert.equal(h.offers.length, 1);
   assert.equal(h.offers[0]!.sdp, SDP);
   assert.equal(h.offers[0]!.ts, 1_000);
@@ -54,7 +54,7 @@ test("a newer answer is delivered exactly once", async () => {
   const h = harness();
   const delivered: string[] = [];
   h.signaling.onAnswer((sdp) => delivered.push(sdp));
-  await h.signaling.publishOffer(SDP);
+  await h.signaling.publishOffer(SDP, OFFER_TS);
 
   h.answer = { sdp: SDP, ts: 1_001 };   // newer than the offer
   await settle();
@@ -76,7 +76,7 @@ test("an answer older than the offer is refused: it belongs to a previous exchan
   const delivered: string[] = [];
   h.signaling.onAnswer((sdp) => delivered.push(sdp));
   h.answer = { sdp: SDP, ts: 900 };   // written before the offer
-  await h.signaling.publishOffer(SDP);
+  await h.signaling.publishOffer(SDP, OFFER_TS);
   await settle();
   assert.deepEqual(delivered, []);
 
@@ -91,7 +91,7 @@ test("something that is not an SDP never reaches the peer", async () => {
   const h = harness();
   const delivered: string[] = [];
   h.signaling.onAnswer((sdp) => delivered.push(sdp));
-  await h.signaling.publishOffer(SDP);
+  await h.signaling.publishOffer(SDP, OFFER_TS);
 
   h.answer = { sdp: "not an sdp at all", ts: 1_001 };
   await settle();
@@ -117,9 +117,8 @@ test("a failing read does not kill signaling, and stop() ends the polling", asyn
       throw new Error("network down");
     },
     pollMs: 5,
-    now: h.now,
   });
-  await h.signaling.publishOffer(SDP);
+  await h.signaling.publishOffer(SDP, OFFER_TS);
   await settle();
   assert.ok(reads > 1, "it kept polling after a failed read");
   h.signaling.stop();

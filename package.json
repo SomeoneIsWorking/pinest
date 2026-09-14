@@ -14,7 +14,8 @@
     "test": "npm run test:structure && npm run test:hazards && RC_FIREBASE_API_KEY=\"${RC_FIREBASE_API_KEY:-test-api-key}\" node --test \"server/test/*.test.ts\"",
     "test:structure": "python3 -m unittest discover -s tools -p \"test_*.py\" && python3 tools/check_structure.py",
     "typecheck": "tsc --noEmit -p server/tsconfig.json",
-    "test:hazards": "python3 ../shared/re-harness/tools/agent_hazards.py --root ."
+    "test:hazards": "python3 ../shared/re-harness/tools/agent_hazards.py --root .",
+    "verify:direct": "node server/scripts/verify-direct-transport.ts"
   },
   "dependencies": {
     "@silvia-odwyer/photon-node": "0.3.4",

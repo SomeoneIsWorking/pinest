@@ -31,3 +31,29 @@ Milestone 2 done: the browser answers the offer. app/lib/services/control_channe
 
 ### Note (2026-09-14)
 Milestone: the browser interop suite is now runnable through a named tool - python3 tools/verify_web_client.py discovers a Chromium (CHROME_EXECUTABLE, PATH, then browser-tooling caches), prints which one it used, runs test/direct_channel_web_test.dart in it, and refuses by name with the install command when none exists. Verified running: the tool found a Chromium in the browser-tooling cache, named it, and ran 3 passing tests. Remaining: a real device against the live host.
+
+### Note (2026-09-14)
+Root-caused why the punch could never succeed in real use, and fixed it at the owner. Measured
+against the live machine: an offer published 941 s earlier was answered by the app, whose answer
+attached to a carrier-grade NAT mapping that had expired within minutes; the same offer was also
+answered exactly once, because the machine generated one offer at startup and never another, and the
+app deliberately ignores an offer whose timestamp is not newer than the one it already answered — so
+a failed punch had no retry path at all. Three defects, one shape: nothing owned the lifetime of an
+exchange.
+
+Fixed: `server/src/direct-transport.ts` is now the policy owner (45 s offer lifetime, 5 s tick, a
+fresh offer replaces a stale one, a connected channel is never refreshed, an answered punch keeps its
+full lifetime, an answer older than the live offer is refused); `server/src/p2p.ts` owns exactly one
+exchange (`startP2PExchange`); the machine's status is pushed to the app, which surfaces it in
+Settings beside its own side of the connection. Failure was also silent from both ends: the app
+reported a direct failure only when it was offline, and the machine logged only under `RC_DEBUG=1`.
+
+Verified live against the running machine in both roles by the committed
+`server/scripts/verify-direct-transport.ts` (`npm run verify:direct`): reads the published offer,
+answers it through the deployed rules, opens the DataChannel, then authenticates and receives a real
+state frame over it. It prints the offer's age and states plainly that third-network traversal is
+unproven, rather than letting a local success stand in for it.
+
+Remaining (milestone 4): the punch-failure rate on a real peer pair from another network — the
+operator's own device. Falsifier unchanged: if ICE from this CGNAT to a phone's CGNAT fails without
+TURN more than rarely, a self-hosted TURN server becomes a named follow-up.

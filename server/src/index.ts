@@ -1,5 +1,5 @@
 import type { HttpHistoryRunner } from "./http-api.ts";
-import { offerDirectTransport } from "./direct-transport.ts";
+import { offerDirectTransport, type DirectTransport } from "./direct-transport.ts";
 import { createSessionLifecycle } from "./session-lifecycle.ts";
 import {
   checkPathCommand,
@@ -124,6 +124,11 @@ let _footer: FooterManager | null = null;
 let _isTornDown = false;
 let _bootstrapPromise: Promise<void> | null = null;
 let _bgManager: BackgroundProcessManager | null = null;
+/** The direct (no-tunnel) transport, once peer-to-peer is switched on. Its own
+ * state is published so "is anyone connecting directly" is answerable from
+ * outside: a punch that fails silently is indistinguishable from one that was
+ * never attempted. */
+let _directTransport: DirectTransport | null = null;
 
 // True between a run's first message_start and its agent_end. Used by the
 // submission queue to know a submission actually started a run.
@@ -162,6 +167,7 @@ const _publisher = new StatePublisher({
   tunnelUrl: () => _ws?.tunnelUrl ?? null,
   tunnelProvider: () => _ws?.tunnel?.provider ?? null,
   localUrl: () => (_ws ? `ws://127.0.0.1:${_ws.port}` : null),
+  p2p: () => _directTransport?.status() ?? null,
   refreshUsage: () => { _supervisor?.refreshUsage?.(false); },
   send: (msg) => broadcast(msg),
 });
@@ -582,22 +588,24 @@ async function startDirectTransport(): Promise<void> {
     return;
   }
   try {
-    await offerDirectTransport({
+    const signaling = createP2PSignaling({
+      writeOffer: async (sdp, ts) => {
+        if (!_fb || !_ownerUid) throw new Error("no owner record to publish an offer to");
+        await _fb.patchUserDoc(_ownerUid, { p2pOffer: sdp, p2pOfferTs: ts });
+      },
+      readAnswer: async () => {
+        if (!_fb || !_ownerUid) return null;
+        const doc = await _fb.readUserDoc(_ownerUid);
+        const sdp = doc?.p2pAnswer;
+        const ts = doc?.p2pAnswerTs;
+        if (typeof sdp !== "string" || typeof ts !== "number") return null;
+        return { sdp, ts };
+      },
+    });
+    _directTransport = await offerDirectTransport({
       port,
-      signaling: createP2PSignaling({
-        writeOffer: async (sdp, ts) => {
-          if (!_fb || !_ownerUid) throw new Error("no owner record to publish an offer to");
-          await _fb.patchUserDoc(_ownerUid, { p2pOffer: sdp, p2pOfferTs: ts });
-        },
-        readAnswer: async () => {
-          if (!_fb || !_ownerUid) return null;
-          const doc = await _fb.readUserDoc(_ownerUid);
-          const sdp = doc?.p2pAnswer;
-          const ts = doc?.p2pAnswerTs;
-          if (typeof sdp !== "string" || typeof ts !== "number") return null;
-          return { sdp, ts };
-        },
-      }),
+      publishOffer: (sdp, ts) => signaling.publishOffer(sdp, ts),
+      onAnswer: (handler) => signaling.onAnswer(handler),
       log: (message) => debug(`[remote-code] p2p: ${message}`),
     });
   } catch (error) {

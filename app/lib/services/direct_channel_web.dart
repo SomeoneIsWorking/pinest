@@ -17,7 +17,15 @@ import 'control_channel.dart';
 
 /// Stateless STUN servers, used only to learn this peer's reflexive address.
 /// No traffic through them carries application data.
-const List<String> kDirectIceServers = ['stun:stun.l.google.com:19302'];
+///
+/// Two independent views of the same socket on purpose: each answer is a
+/// different NAT mapping the punch can succeed on, and a network that filters
+/// one provider still yields a candidate from the other. The machine gathers
+/// from the same two (see `DEFAULT_STUN` in `server/src/p2p.ts`).
+const List<String> kDirectIceServers = [
+  'stun:stun.l.google.com:19302',
+  'stun:stun.cloudflare.com:3478',
+];
 
 /// Whether this platform can open a direct channel at all.
 bool get directTransportAvailable => true;
