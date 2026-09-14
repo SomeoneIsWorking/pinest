@@ -11,7 +11,31 @@ import test from "node:test";
 
 import { visibleWidth } from "@earendil-works/pi-tui";
 
-import { frame, terminalRows } from "../src/tui-frame.ts";
+import { dispatchInto, frame, terminalRows, FRAME_LEFT, FRAME_TOP } from "../src/tui-frame.ts";
+
+test("a pointer event is translated into the region a component was drawn in", () => {
+  // The host delivers coordinates for the whole overlay; a component inside the
+  // frame only understands its own. Getting this wrong by one row makes every
+  // hit land one row early, and the first row of a list unclickable.
+  const seen: any[] = [];
+  const target = {
+    handleMouse(event: any) {
+      seen.push(event);
+      return { handled: true };
+    },
+  };
+  const result = dispatchInto(
+    target,
+    { type: "click", button: "left", x: 30, y: 12, screenX: 30, screenY: 12, width: 100, height: 40, shift: false, alt: false, ctrl: false } as any,
+    { top: FRAME_TOP + 2, height: 18, width: 96 },
+  );
+  assert.equal(result?.handled, true);
+  assert.equal(seen[0].y, 12 - (FRAME_TOP + 2), "the region's rows start at its own zero");
+  assert.equal(seen[0].x, 30 - FRAME_LEFT, "the frame's left chrome is not the component's column zero");
+  assert.equal(seen[0].width, 96, "the component is told its own width");
+  assert.equal(seen[0].height, 18, "and its own height");
+  assert.equal(seen[0].type, "click", "the event itself is passed through untouched");
+});
 
 const plain = (_name: string, text: string): string => text;
 

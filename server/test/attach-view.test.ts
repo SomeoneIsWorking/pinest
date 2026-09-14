@@ -36,13 +36,41 @@ interface FakeOptions {
   /** Answers `submit`. `undefined` means "not delivered". */
   submitResult?: { delivered: boolean; queued: boolean } | undefined;
   rows?: number;
+  /** A fake session tree, so `/tree` has something real to pick from. */
+  tree?: unknown[] | null;
+  /** Pi's own command list, as the host would hand it over. */
+  commands?: Array<{ name: string; description?: string }> | undefined;
+  /** Levels the fake session offers for `/thinking`. */
+  thinkingLevels?: string[];
+  /**
+   * Fail the command the way the real dispatcher does: broadcast the error, then
+   * report success. This is the ordering that can silently erase the notice.
+   */
+  broadcastDuringCommand?: string;
+}
+
+/** A session-tree node as pi's own tree component reads it. */
+function treeNode(id: string, role: string, text: string, children: unknown[] = []): unknown {
+  return {
+    entry: {
+      type: "message",
+      id,
+      parentId: null,
+      timestamp: "2025-01-01T00:00:00.000Z",
+      message: { role, content: [{ type: "text", text }], stopReason: "stop" },
+    },
+    children,
+  };
 }
 
 function harness(options: FakeOptions = {}) {
   const listeners: ((event: any) => void)[] = [];
   const sent: string[] = [];
   const events: string[] = [];
+  const dispatched: Record<string, unknown>[] = [];
+  const noticeListeners: ((message: string) => void)[] = [];
   const seen: { messages: unknown[] } = { messages: options.messages ?? [] };
+  const setLevels: string[] = [];
 
   const session: any = {
     get messages() {
@@ -50,6 +78,9 @@ function harness(options: FakeOptions = {}) {
     },
     getToolDefinition: () => undefined,
     extensionRunner: { getMessageRenderer: () => undefined },
+    thinkingLevel: "medium",
+    // No `modelRuntime`: this fake session cannot change models, and `/model`
+    // must say so rather than open an empty picker.
     subscribe: (listener: (event: any) => void) => {
       listeners.push(listener);
       return () => {
@@ -57,15 +88,41 @@ function harness(options: FakeOptions = {}) {
         if (index >= 0) listeners.splice(index, 1);
       };
     },
+    sessionManager: {
+      getTree: () => options.tree ?? null,
+      getLeafId: () => "leaf-1",
+    },
+    getAvailableThinkingLevels: () => options.thinkingLevels ?? [],
+    setThinkingLevel: (level: string) => {
+      setLevels.push(level);
+    },
   };
 
   const options0: any = {
     entry: {
       session,
+      id: "sess-1",
       name: "pinest",
       cwd: "/srv/checkout/pinest",
       status: "idle",
       modelName: "gemini-3.8-flash",
+      thinkingLevel: () => "high",
+      goal: () => "ship the session TUI",
+      commands: () => options.commands ?? [],
+      runCommand: async (cmd: Record<string, unknown>) => {
+        dispatched.push(cmd);
+        if (options.broadcastDuringCommand) {
+          noticeListeners.forEach((listener) => listener(options.broadcastDuringCommand as string));
+        }
+        return { ok: true };
+      },
+      onNotice: (listener: (message: string) => void) => {
+        noticeListeners.push(listener);
+        return () => {
+          const index = noticeListeners.indexOf(listener);
+          if (index >= 0) noticeListeners.splice(index, 1);
+        };
+      },
       submit: (text: string) => {
         sent.push(text);
         return options.submitResult ?? { delivered: true, queued: false };
@@ -80,16 +137,34 @@ function harness(options: FakeOptions = {}) {
   };
   const view = createAttachView(options0 as any);
 
+  const type = (text: string): void => {
+    for (const ch of text) {
+      view.handleInput(ch);
+    }
+  };
+
   return {
     view,
     sent,
     events,
     seen,
     options: options0,
+    dispatched,
+    setLevels,
+    /** Deliver what the dispatcher broadcast about this session. */
+    broadcast: (message: string) => noticeListeners.forEach((listener) => listener(message)),
+    /** Let the awaited command path run to its end. */
+    settle: () => new Promise((resolve) => setImmediate(resolve)),
     emit: (event: any) => listeners.forEach((listener) => listener(event)),
     publishTo: (listener: (event: any) => void) => listeners.push(listener),
     listeners: () => listeners.length,
     lines: () => view.render(100).map(stripAnsi),
+    type,
+    /** Type a line and press enter, the way the keyboard does it. */
+    send: (text: string) => {
+      type(text);
+      view.handleInput("\r");
+    },
   };
 }
 
@@ -250,6 +325,33 @@ test("escape closes the whole overlay", () => {
   assert.deepEqual(h.events, ["detach"]);
 });
 
+test("a view opened mid-run keeps streaming, it does not freeze at open time",
+  () => {
+    // The measured bug: opening a session WHILE it was working showed the
+    // transcript as of that moment and never changed again. The view missed
+    // `message_start`, so there was no streaming component and every
+    // `message_update` was dropped on the floor.
+    const live = {
+      role: "assistant",
+      content: [{ type: "text", text: "part one" }],
+      stopReason: "pending",
+    };
+    const h = harness({ messages: [live] });
+    assert.match(h.lines().join("\n"), /part one/);
+
+    h.emit({
+      type: "message_update",
+      message: { ...live, content: [{ type: "text", text: "part one and part two" }] },
+    });
+    const after = h.lines().join("\n");
+    assert.match(after, /part one and part two/, "the streamed text must reach the pane");
+    assert.equal(
+      (after.match(/part one and part two/g) ?? []).length,
+      1,
+      "adopting the live message must not draw it twice",
+    );
+  });
+
 test("a live run updates the transcript in place", () => {
   const h = harness({ messages: [] });
   h.emit({ type: "message_start", message: { role: "user", content: [{ type: "text", text: "start here" }] } });
@@ -352,4 +454,139 @@ test("a message Pi cannot render is reported where it belongs, not thrown", () =
   assert.match(lines, /before/);
   assert.match(lines, /after/, "a broken entry must not hide the rest of the transcript");
   assert.match(lines, /could not be rendered/, "and the failure must be visible, by name");
+});
+
+/**
+ * A normalized mouse event, as the fullscreen TUI hands one to a focused
+ * overlay: coordinates local to the overlay, the overlay's own bounds.
+ */
+function mouse(over: Record<string, unknown> = {}): any {
+  return {
+    type: "wheel",
+    button: "none",
+    x: 20,
+    y: 10,
+    screenX: 20,
+    screenY: 10,
+    width: 100,
+    height: 40,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    wheelDelta: -3,
+    ...over,
+  };
+}
+
+test("the wheel scrolls the transcript, and up means toward the oldest", () => {
+  // The mapping is the whole risk: a terminal reports a scroll-up as a NEGATIVE
+  // delta, and ScrollView takes positive-down. Getting one sign wrong scrolls
+  // every session backwards, in both directions, silently.
+  const h = harness({ messages: longMessages() });
+  assert.match(h.lines().join("\n"), /question 11/, "a fresh view follows the end");
+  assert.doesNotMatch(h.lines().join("\n"), /question 0\b/);
+
+  const result = h.view.handleMouse?.(mouse({ wheelDelta: -1000 }));
+  assert.equal(result?.handled, true, "the wheel must be claimed, not left to the host");
+  const scrolled = h.lines().join("\n");
+  assert.match(scrolled, /question 0\b/, "scrolling up reaches the first exchange");
+  assert.doesNotMatch(scrolled, /question 11/, "and the newest is off screen");
+
+  h.view.handleMouse?.(mouse({ wheelDelta: 1000 }));
+  assert.match(h.lines().join("\n"), /question 11/, "scrolling down returns to the newest");
+  assert.deepEqual(h.sent, [], "scrolling never sends anything");
+});
+
+test("a click on the transcript does not speak for the session", () => {
+  const h = harness({ messages: longMessages() });
+  assert.equal(h.view.handleMouse?.(mouse({ type: "click", button: "left", y: 6 })), undefined);
+  assert.deepEqual(h.sent, [], "a pointer press is not a prompt");
+});
+
+test("/tree opens Pi's rewind picker and never sends the word", () => {
+  const h = harness({
+    messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    tree: [treeNode("t1", "user", "first question", [treeNode("t2", "assistant", "first answer")])],
+  });
+  h.send("/tree");
+  const lines = h.lines().join("\n");
+  assert.deepEqual(h.sent, [], "a slash command must not reach the model as text");
+  assert.match(lines, /rewind or branch/, "the picker says what it is for");
+  assert.match(lines, /first question/, "and it shows the messages to rewind to");
+
+  h.view.handleInput("\r");
+  assert.equal(h.dispatched[0]?.type, "session_tree_navigate");
+  assert.equal(typeof h.dispatched[0]?.entryId, "string", "a navigation names its target");
+});
+
+test("a command the view cannot service is refused by name, not silence", () => {
+  // No modelRuntime on the fake session: `/model` must SAY it cannot, because a
+  // picker that opens empty looks like the session has no models at all.
+  const h = harness();
+  h.send("/model");
+  assert.match(h.lines().join("\n"), /cannot change models/);
+  assert.deepEqual(h.sent, []);
+});
+
+test("/thinking offers the session's levels and setting one dispatches thinking_set", () => {
+  const h = harness({ thinkingLevels: ["off", "low", "medium", "high"] });
+  h.send("/thinking");
+  const lines = h.lines().join("\n");
+  assert.match(lines, /pick a thinking level/);
+  assert.match(lines, /high/, "the offered levels are Pi's own list for this model");
+  h.view.handleInput("\r");
+  assert.equal(h.dispatched[0]?.type, "thinking_set");
+  assert.ok(h.dispatched[0]?.level, "the chosen level is named");
+});
+
+test("a session with no thinking levels says so instead of opening an empty picker", () => {
+  const h = harness({ thinkingLevels: [] });
+  h.send("/thinking");
+  assert.match(h.lines().join("\n"), /no thinking levels/);
+});
+
+test("/help lists this view's commands and Pi's own", () => {
+  const h = harness({
+    commands: [{ name: "skills", description: "list available skills" }],
+  });
+  h.send("/help");
+  const lines = h.lines().join("\n");
+  assert.match(lines, /\/tree/, "the commands this view owns");
+  assert.match(lines, /\/compact/);
+  assert.match(lines, /skills/, "and the ones Pi offers, which this view only forwards");
+  h.view.handleInput(" ");
+  assert.match(h.lines().join("\n"), /question|no messages|┌─/, "any key leaves help");
+});
+
+test("an unknown slash command goes to the session as text, which is what Pi does", () => {
+  const h = harness();
+  h.send("/frobnicate the widget");
+  assert.deepEqual(h.sent, ["/frobnicate the widget"]);
+});
+
+test("a failure the dispatcher broadcasts is shown in the pane", () => {
+  const h = harness();
+  h.broadcast("compact failed: nothing to compact");
+  assert.match(h.lines().join("\n"), /compact failed: nothing to compact/);
+});
+
+test("a command that reports failure over the bus is not told it reported nothing", async () => {
+  // The measured ordering bug: `handleSessionCommand` catches a thrown command,
+  // BROADCASTS the error (which reaches the pane synchronously), and still
+  // returns true. A success path that cleared the notice would erase the only
+  // message saying what went wrong, and the user would watch /compact do nothing.
+  const h = harness({ broadcastDuringCommand: "session_compact failed: nothing to compact" });
+  h.send("/compact");
+  await h.settle();
+  assert.equal(h.dispatched[0]?.type, "session_compact");
+  assert.match(
+    h.lines().join("\n"),
+    /nothing to compact/,
+    "the broadcast failure must survive the successful return",
+  );
+});
+
+test("the header names the thinking level, because it is set from the other end", () => {
+  const h = harness();
+  assert.match(h.lines()[0]!, /thinking:high/);
 });

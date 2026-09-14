@@ -43,28 +43,58 @@ Atomic work and findings live in `docs/issues/`.
 
 The host terminal has its own two views, on Pi's own components rather than hand-drawn text: a
 session list built on `SelectList` (sized to the terminal with its own scroll indicator,
-type-to-filter over name/id/directory/model/status, Enter to open, Ctrl-D to kill after one
-confirmation), and an overlay that renders another session's transcript with Pi's own message components
-inside a windowed `ScrollView` (PgUp/PgDn/Home/End/Ctrl-U/Ctrl-D, a scrollbar, and the newest output
-following the end), prompts it through Pi's own `CustomEditor`, and returns to the list on the left
-arrow. Sending goes through the ONE owner of a user message (`session-submit.ts`), so the TUI, the
-host session and the app cannot disagree about what "sent" means; a send that cannot be delivered is
-shown rather than swallowed.
+type-to-filter over name/id/directory/model/thinking/status, Enter or a click to open, Ctrl-D to
+kill after one confirmation, Ctrl-N to create), and an overlay that renders another session's
+transcript with Pi's own message components inside a windowed `ScrollView` (PgUp/PgDn/Home/End/Ctrl-U/Ctrl-D, a scrollbar, and the newest output following the end), prompts it through Pi's own
+`CustomEditor`, and returns to the list on the left arrow. Sending goes through the ONE owner of a
+user message (`session-submit.ts`), so the TUI, the host session and the app cannot disagree about
+what "sent" means; a send that cannot be delivered is shown rather than swallowed.
 
-Both views are one bordered panel the size of the terminal (`server/src/tui-frame.ts` owns the
-geometry: every line exactly the terminal's width, wide characters counted as the cells they occupy,
-colours as none), because an overlay is sized from the lines a component returns.
+**It behaves like Pi's own TUI about commands.** Pi's own command list feeds the prompt's
+autocomplete (`CombinedAutocompleteProvider`), the commands that act on the session being viewed open
+Pi's own components — `/tree` the rewind-and-branch picker, `/model` and `/thinking` the two
+selectors — and each one goes through the same dispatcher the app drives
+(`supervisor.handleSessionCommand`), so the terminal and the app cannot drift into two session
+semantics. Enter steers (`deliverAs: "steer"`), which is what Enter does in Pi. A command nothing can
+service is handed to the session as text, exactly as Pi hands a prompt template or a skill to the
+session; a slash command is never sent as text, and a command the session cannot do is refused by
+name instead of opening an empty picker. `/compact <focus>` now reaches Pi's
+`compact(customInstructions)` through the shared dispatcher rather than being dropped.
 
-Evidence: 19 rendered-line tests for the attach view (including a transcript taller than the overlay
-keeping the prompt on screen and in the newest position, scrolling, back-on-left-arrow, and the
-disposed-view contract), 19 for the list, 7 for the frame's geometry, and 3 end-to-end flow tests
-(list → open a chosen session → prompt it → left arrow back → close). Four mechanisms were each
-verified to FAIL when broken: dropping the chosen session's id, rendering the transcript unwindowed,
-re-inserting a menu before the open, and returning only the content's own height.
+**A view opened mid-run keeps streaming.** It used to freeze at open time: entering the overlay while
+the session was answering missed that answer's `message_start`, so every later `message_update` had no
+streaming component to arrive into and was dropped. The transcript now adopts a live trailing assistant
+message when it rebuilds, and begins streaming on an update it never started.
 
-Gap: only the operator can see the real terminal, so this is confirmed by rendered lines and not yet
-by a person using it in a live TUI; a real terminal is also where the wheel, the key delivery, and
-a genuinely narrow window would be qualified.
+**Mouse, in fullscreen TUI mode only.** The wheel scrolls the transcript and moves the list's cursor;
+a click opens the row under it, and lands the cursor in the prompt. `server/src/tui-frame.ts` owns the
+single coordinate translation (`dispatchInto`), because the frame's border row and the filter row sit
+above what the pointer reports. Inside a selector the event goes to Pi's own `Container`, so the wheel
+moves a selection in `/model` and `/thinking` and does nothing in `/tree` — which is what Pi's own tree
+list does. Pi's regular mode never captures the mouse (the terminal owns its scrollback), so the wheel
+is live only under `tuiMode: fullscreen`; the default on this machine is regular.
+
+**A new session is asked where to run**: this directory, any directory another session already uses, or
+a typed path. One validator (`sessionDirOrNotify`, shared with `/pinest-spawn`) resolves `~` and
+relative paths and refuses a non-directory by name. Both views name the thinking level (list row and
+attach header), read from the live agent session so a freshly spawned one shows Pi's default rather
+than nothing, through the same `reportThinkingLevel` rule the app's value uses.
+
+Evidence: 30 rendered-line tests for the attach view (a transcript taller than the overlay keeping the
+prompt on screen and newest-first, keyboard and wheel scrolling, `/tree` and `/thinking` built from
+Pi's real selector components and dispatching `session_tree_navigate` / `thinking_set`, a refused
+`/model`, a broadcast failure shown in the pane, the mid-run staleness case), 26 for the list (wheel,
+click with the border offset and with the filter-row offset, the host row refusing, kill still asking,
+thinking filterable, Ctrl-N deferring the directory), 8 for the frame geometry including the pointer
+translation, and 3 end-to-end flow tests. Measured on pi 0.85.1: `npm test` 550 tests / 546 pass /
+0 fail / 4 skipped, `npm run typecheck` clean, `drills/reload-midrun.mjs` PASS (the in-flight run kept
+streaming across the handoff and the adopted session still took input).
+
+Gap: only the operator can see the real terminal, so this is confirmed by rendered lines and not yet by
+a person using it in a live TUI — which is also the only place the wheel can be qualified, since it
+needs fullscreen mode. A dependency drift was measured and fixed on the way: `package-lock.json` had
+pi-tui at 0.84.4 while the host ran 0.85.1, and 0.84.4 has no mouse API at all; the lock now tracks
+the floating `"*"` range at 0.85.1.
 
 ### S8 — Remote session lifecycle
 
@@ -776,11 +806,12 @@ Evidence: Node suite (`npm test`) passes with 296 tests and 0 failures; `npm run
 
 ## Current focus
 
-S15/G7 is the current focus: the direct transport works, is refresh-aware, and is
-verifiable against the running machine from the command line, and what remains is
-traversal from a network other than this machine's — the operator's own device
-reaching the live host over the direct channel with no tunnel in the data path
-(#46). S19 stays open behind it: sessions must not stop for a context budget that
-does not exist (the statements, both wire paths, and the tests are in; what is
-missing is observation that it changes behaviour).
-`p2p` is off by default in a fresh install.
+S22 is the current focus: the host terminal's own session views now behave like
+Pi's about commands and input — Pi's command list in the prompt, `/tree` and the
+two live selectors through Pi's own components, mouse in fullscreen TUI mode, a
+new session asked where to run, and a view opened mid-run that keeps streaming.
+What remains there is a human's eyes on a real terminal (I-061), since only the
+operator can see it and the wheel needs fullscreen mode. Two older workstreams
+stay open behind it, unowned by this focus: direct-channel traversal from another
+network (goal G7), and observing that the context-budget fix actually changes
+behaviour.

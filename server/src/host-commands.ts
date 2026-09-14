@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, statSync } from "node:fs";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { loadConfig, saveConfig } from "./config.ts";
 import { PROVIDERS } from "./tunnel.ts";
@@ -13,6 +12,7 @@ import { clearSessionGoal, describeGoal, goalAppMessage, setSessionGoal } from "
 import type { GoalSink, SessionGoal } from "./session-goal.ts";
 import { Type } from "typebox";
 import { registerSessionMessaging } from "./session-messaging.ts";
+import { reportThinkingLevel } from "./thinking.ts";
 import debug from "./log.ts";
 
 export interface HostCommandDeps {
@@ -20,6 +20,11 @@ export interface HostCommandDeps {
   sessions: Map<string, any>;
   supervisor: any;
   ws: any;
+  /** Pi's own slash-command list, for the session view's autocomplete and `/help`. */
+  commands?: () => Array<{ name: string; description?: string; argumentHint?: string }>;
+  /** Observe the server message bus locally, so a command that fails by
+   * broadcast is visible in the terminal and not only in the app. */
+  onBroadcast?: (listener: (msg: any) => void) => () => void;
   /** The objective the HOST session works toward (its own, not the machine's). */
   goal: () => SessionGoal | null;
   /** Where the host session's objective is stored and published. */
@@ -36,6 +41,66 @@ export interface HostCommandDeps {
   bootstrap: () => Promise<void>;
 }
 
+/**
+ * The thinking level a session reports, in the form the app shows it.
+ *
+ * The live agent session is authoritative (a session created five seconds ago
+ * has a level even though its snapshot only gains one when it changes), and the
+ * published snapshot covers the host, which has no LiveSession of its own. The
+ * model matters because "off" means "the provider's default" on omit-capable
+ * models, so `reportThinkingLevel` stays the one display rule.
+ */
+function thinkingOf(liveSession: any, snap: any): string | undefined {
+  if (liveSession) {
+    return reportThinkingLevel((liveSession as any).model, (liveSession as any).thinkingLevel);
+  }
+  return snap?.thinkingLevel;
+}
+
+/**
+ * Resolve and validate a directory a session should run in.
+ *
+ * One owner for every path a user supplies when creating a session: the typed
+ * argument to `/pinest-spawn` and the sessions list's picker. A directory that
+ * does not exist is refused here, by name, rather than failing deeper in spawn.
+ */
+function sessionDirOrNotify(ctx: any, raw: string): string | null {
+  const cwd = resolvePathInput(raw);
+  if (!statSyncSafe(cwd)) {
+    ctx?.ui?.notify?.(`[pinest] not a directory: ${cwd}`, "error");
+    return null;
+  }
+  return cwd;
+}
+
+/**
+ * Ask where a new session should run: the directory this terminal is in, a
+ * directory another session already uses, or one typed in.
+ *
+ * Returns null when the user backs out, which is not an error.
+ */
+async function pickSessionDir(ctx: any, knownCwds: string[]): Promise<string | null> {
+  const here = String(ctx?.cwd ?? process.cwd());
+  const OTHER = "another directory…";
+  const select = typeof ctx?.ui?.select === "function";
+  if (!select && typeof ctx?.ui?.input !== "function") return null;
+
+  if (select) {
+    const dirs = [here, ...[...new Set(knownCwds)].filter((dir) => dir && dir !== here)];
+    const labels = dirs.map((dir) => (dir === here ? `${dir}  (current directory)` : dir));
+    labels.push(OTHER);
+    const choice = await ctx.ui.select("New session in which directory?", labels);
+    if (choice === undefined) return null;
+    const index = labels.indexOf(choice);
+    const chosen = index >= 0 && index < dirs.length ? dirs[index] : undefined;
+    if (chosen) return sessionDirOrNotify(ctx, chosen);
+  }
+
+  const typed = await ctx.ui.input("New session directory", here);
+  if (typed === undefined) return null;
+  return sessionDirOrNotify(ctx, typed.trim().length > 0 ? typed : here);
+}
+
 export async function showAttachOverlay(
   ctx: any,
   entry: any,
@@ -43,24 +108,54 @@ export async function showAttachOverlay(
   onBack?: () => void,
 ): Promise<{ back: boolean }> {
   if (!ctx?.ui?.custom) return { back: false };
-  const d = deps();
   let back = false;
-  const live = d.supervisor?.sessions.get(entry.id) ?? entry;
+  // Resolved per call, not captured at open: a reload can hand us a different
+  // supervisor and a replaced AgentSession while this overlay stays up.
+  const liveOf = (): any => deps().supervisor?.sessions.get(entry.id);
+  const snapOf = (): any => deps().sessions.get(entry.id);
+  const sessionOf = (): any => liveOf()?.session ?? entry.session;
+  const live = liveOf() ?? entry;
   await ctx.ui.custom(
     (tui: any, theme: any, keybindings: any, done: () => void) =>
       createAttachView({
         entry: {
-          session: live.session ?? entry.session,
+          id: entry.id,
+          session: sessionOf(),
+          resolveSession: sessionOf,
           name: entry.name ?? "session",
           cwd: entry.cwd ?? process.cwd(),
           status: live.status ?? entry.status ?? "idle",
           model: live.model ?? entry.model,
           modelName: live.modelName ?? entry.modelName,
+          thinkingLevel: () => thinkingOf(liveOf(), snapOf()) ?? null,
+          goal: () => snapOf()?.goal?.text ?? null,
           // The ONE way a user message reaches a session, shared with the app.
+          // "steer" is what Enter does in pi's own TUI: interrupt the current
+          // step rather than wait for the whole turn to end.
           submit: (text: string) => {
-            const result = d.supervisor?.submitUserMessage(entry.id, text, undefined, "followUp");
+            const result = deps().supervisor?.submitUserMessage(entry.id, text, undefined, "steer");
             return result ?? { delivered: false, queued: false };
           },
+          // The ONE dispatcher, the one the app's socket uses. It reports a
+          // failed command by broadcasting an `error` frame (which onNotice
+          // surfaces below) and reserves `false` for a session that is gone.
+          runCommand: async (cmd: Record<string, unknown>) => {
+            const supervisor = deps().supervisor;
+            if (!supervisor) {
+              return { ok: false, error: "the session supervisor is not running" };
+            }
+            const accepted = await supervisor.handleSessionCommand({ ...cmd, sessionId: entry.id });
+            return accepted
+              ? { ok: true }
+              : { ok: false, error: "this session is no longer running" };
+          },
+          commands: () => deps().commands?.() ?? [],
+          onNotice: (listener: (message: string) => void) =>
+            deps().onBroadcast?.((msg: any) => {
+              if ((msg?.type === "error" || msg?.type === "notice") && msg?.sessionId === entry.id) {
+                listener(String(msg.message ?? ""));
+              }
+            }) ?? (() => undefined),
         },
         theme,
         tui,
@@ -102,6 +197,8 @@ export async function showSessionsFlow(
         isHost: true,
         model: hostSnap?.model,
         modelName: hostSnap?.modelName,
+        thinking: thinkingOf(undefined, hostSnap),
+        pending: hostSnap?.pendingMessages?.length,
       },
       ...liveSessions.map(([id, s]: [string, any]) => ({
         id,
@@ -111,10 +208,15 @@ export async function showSessionsFlow(
         isHost: false,
         model: s.model,
         modelName: s.modelName,
+        thinking: thinkingOf(s.session, sessions.get(id)),
+        pending: sessions.get(id)?.pendingMessages?.length ?? s.pending?.length,
       })),
     ];
 
-    let nextStep: { action: "attach"; entry: any } | null = null;
+    // A holder object rather than a bare `let`: the step is written from inside
+    // the overlay's callbacks, and a variable initialized to `null` narrows back
+    // to `null` at the read site however many closures ran in between.
+    const flow: { step?: { action: "attach"; entry: any } | { action: "new" } } = {};
     let loopBack = false;
 
     await ctx.ui.custom(
@@ -135,7 +237,7 @@ export async function showSessionsFlow(
               // Carry the id: everything the attach view does to this session
               // (its transcript and the one way to send it a message) is keyed
               // by it, and the LiveSession itself does not hold its own key.
-              nextStep = { action: "attach", entry: { id: item.id, ...entry } };
+              flow.step = { action: "attach", entry: { id: item.id, ...entry } };
               loopBack = true;
             }
             done();
@@ -146,19 +248,14 @@ export async function showSessionsFlow(
               broadcastState();
             }
           },
-          onNew: async () => {
+          onNew: () => {
+            // Only records the intent: the directory question is pi's own
+            // picker, and a modal nested inside this overlay would have to take
+            // over the list's keyboard and mouse ownership to ask it. So the
+            // overlay closes and the loop asks.
             if (supervisor) {
-              try {
-                const newId = await supervisor.spawn({ cwd: process.cwd() });
-                broadcastState();
-                const newEntry = supervisor.sessions.get(newId);
-                if (newEntry) {
-                  nextStep = { action: "attach", entry: { id: newId, ...newEntry } };
-                  loopBack = true;
-                }
-              } catch (e) {
-                say(ctx, `[pinest] failed to spawn session: ${(e as Error)?.message || e}`);
-              }
+              flow.step = { action: "new" };
+              loopBack = true;
             }
             done();
           },
@@ -172,13 +269,30 @@ export async function showSessionsFlow(
       },
     );
 
-    if (nextStep && (nextStep as any).action === "attach") {
+    if (flow.step?.action === "attach") {
       // Left arrow inside an open session returns HERE, to the list it came
       // from; only Esc closes the whole flow.
-      const { back } = await showAttachOverlay(ctx, (nextStep as any).entry, deps);
+      const { back } = await showAttachOverlay(ctx, flow.step.entry, deps);
       // Returning to the list is the arrow; closing the overlay entirely (Esc)
       // must end the flow rather than re-open the list behind the user's back.
       loopBack = back;
+    } else if (flow.step?.action === "new") {
+      const cwd = await pickSessionDir(ctx, summaries.map((s) => s.cwd));
+      // Backing out of the directory question returns to the list; it is not
+      // an error and spawns nothing.
+      if (cwd) {
+        try {
+          const newId = await supervisor.spawn({ cwd });
+          broadcastState();
+          const newEntry = supervisor.sessions.get(newId);
+          if (newEntry) {
+            const { back } = await showAttachOverlay(ctx, { id: newId, ...newEntry }, deps);
+            loopBack = back;
+          }
+        } catch (e) {
+          say(ctx, `[pinest] failed to spawn session: ${(e as Error)?.message || e}`);
+        }
+      }
     }
 
     if (!loopBack) {
@@ -420,11 +534,8 @@ export function registerHostCommands(pi: ExtensionAPI, deps: () => HostCommandDe
           }
         }
 
-        const cwd = resolvePathInput(dir);
-        if (!existsSync(cwd) || !statSyncSafe(cwd)) {
-          ctx?.ui?.notify?.(`[pinest] not a directory: ${cwd}`, "error");
-          return;
-        }
+        const cwd = sessionDirOrNotify(ctx, dir);
+        if (cwd === null) return;
         const model = modelParts.join(" ") || DEFAULT_MODEL;
 
         const id = randomUUID();

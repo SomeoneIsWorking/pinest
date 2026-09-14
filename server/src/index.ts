@@ -302,9 +302,36 @@ function renderFooter(): void {
 }
 
 // ── Broadcasting ────────────────────────────────────────────────────────────
+/**
+ * Local observers of the same message bus the sockets receive.
+ *
+ * `handleSessionCommand` reports a failed command BY BROADCAST (it catches and
+ * publishes `error`) rather than by returning a status, so a host-side view of
+ * a session would otherwise watch a command fail in silence. Observing is not
+ * intercepting: the socket push still happens, so a second device stays in sync
+ * and there is one implementation of every notice.
+ */
+const _broadcastObservers = new Set<(msg: ServerMessage) => void>();
+
+function observeBroadcast(listener: (msg: ServerMessage) => void): () => void {
+  _broadcastObservers.add(listener);
+  return () => {
+    _broadcastObservers.delete(listener);
+  };
+}
+
 function broadcast(msg: ServerMessage): void {
   observeHistoryReply(msg);
   _ws?.broadcast(msg);
+  for (const observer of _broadcastObservers) {
+    try {
+      observer(msg);
+    } catch (e) {
+      // A broken viewer must not stop delivery to the sockets, which are the
+      // product's remote-control path. Named here so the fault is diagnosable.
+      debug("[remote-code] broadcast observer failed:", (e as Error).message);
+    }
+  }
 }
 
 /** A history request answered over HTTP waits for the frame the socket path
@@ -1102,6 +1129,10 @@ const remoteCode = (pi: ExtensionAPI): void => {
     sessions: _publisher.asMap(),
     supervisor: _supervisor,
     ws: _ws,
+    // Pi's own command list: the session views show and complete the same
+    // commands the terminal you are typing in offers.
+    commands: () => pi.getCommands(),
+    onBroadcast: (listener: (msg: any) => void) => observeBroadcast(listener as (msg: ServerMessage) => void),
     goal: () => normalizeGoal(_registry?.get(_sessionId)?.goal),
     goalSink: hostGoalSink,
     say,

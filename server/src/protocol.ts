@@ -251,7 +251,7 @@ export type ClientCommand =
   | { type: "cancel"; sessionId?: string }
   | { type: "model_set"; sessionId?: string; provider: string; modelId: string }
   | { type: "thinking_set"; sessionId?: string; level: string }
-  | { type: "session_compact"; sessionId?: string }
+  | { type: "session_compact"; sessionId?: string; customInstructions?: string }
   | { type: "session_new"; sessionId?: string }
   | { type: "session_spawn"; sessionId?: string; cwd?: string; name?: string; model?: string }
   | { type: "session_despawn"; sessionId: string }
