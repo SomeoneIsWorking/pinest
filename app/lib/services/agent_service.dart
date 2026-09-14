@@ -10,6 +10,7 @@ import 'direct_channel.dart';
 import 'direct_link.dart';
 import 'control_channel.dart';
 import '../logic/direct_offer.dart';
+import '../logic/command_id.dart';
 import 'server_http.dart';
 import 'session_store.dart';
 import 'user_preferences.dart';
@@ -523,9 +524,15 @@ class AgentService extends ChangeNotifier {
         _error = msg['message'] as String?;
         if (_error != null && _error!.isNotEmpty) {
           final sid = msg['sessionId'] as String?;
-          if (sid != null) {
-            _outgoing.markFailed(sid, _error!);
-            unawaited(_outgoing.persist());
+          // Only a refusal that NAMES a send makes that send undelivered. An
+          // error about the session (a compaction failure, a tool failure) says
+          // nothing about the user's message, and "not delivered" for it was a
+          // lie the user had to reason about.
+          final refusedCmdId = msg['cmdId'] as String?;
+          if (refusedCmdId != null && refusedCmdId.isNotEmpty) {
+            if (_outgoing.failByCmdId(refusedCmdId, _error!)) {
+              unawaited(_outgoing.persist());
+            }
           }
           final sessionName = sid != null
               ? _store.sessions.where((s) => s.id == sid).firstOrNull?.name
@@ -549,13 +556,32 @@ class AgentService extends ChangeNotifier {
         break;
       case 'notice':
         final text = msg['message'] as String? ?? '';
-        if (text.isNotEmpty) _notices.add(ServerNotice(text));
+        if (text.isNotEmpty) {
+          final sid = msg['sessionId'] as String?;
+          final isTaskNotice = msg['kind'] == 'background-task';
+          if (isTaskNotice && sid != null) {
+            _taskNotified.add(sid);
+          }
+          _notices.add(
+            ServerNotice(
+              text,
+              sessionId: sid,
+              kind: isTaskNotice ? NoticeKind.backgroundTask : NoticeKind.plain,
+            ),
+          );
+        }
         break;
     }
     notifyListeners();
   }
 
   void _notifySessionFinished(Session session) {
+    // A turn a background-task notice started has ALREADY been announced by that
+    // notice — telling the user the session "finished work" as well is the same
+    // completion reported twice.
+    if (_taskNotified.remove(session.id)) {
+      return;
+    }
     if (_preferences?.notifyOnFinish ?? true) {
       final name = session.name.isNotEmpty ? session.name : 'Agent';
       _notices.add(ServerNotice('$name finished work', sessionId: session.id));
@@ -566,6 +592,13 @@ class AgentService extends ChangeNotifier {
       );
     }
   }
+
+  /// Sessions whose current turn was started by a background-task notice.
+  ///
+  /// Set when that notice arrives, consumed when the turn it started ends, and
+  /// dropped when the user sends something of their own — from then on the turn
+  /// is theirs and its completion IS worth announcing.
+  final Set<String> _taskNotified = <String>{};
 
   /// user_message commands submitted while the socket is down. They are the
   /// user's words — dropping them silently is what made steers "get lost".
@@ -674,19 +707,15 @@ class AgentService extends ChangeNotifier {
   /// Why the last direct attempt failed, if it did.
   String? get directFailure => _direct.failure;
 
-  /// Mark the tracked send that matches this command as refused, with its reason.
+  /// Mark the tracked send this refusal names as refused, with its reason.
+  ///
+  /// Attribution is by the command's own id, never by its text: the same words
+  /// may legitimately be sent twice, and a text match marks the wrong one.
   void _failSend(Map<String, dynamic> cmd, String reason) {
-    final sessionId = cmd['sessionId'] as String?;
-    if (sessionId == null) {
-      return;
-    }
-    for (final message in _outgoing.forSession(sessionId)) {
-      if (message.command['text'] == cmd['text']) {
-        message.failure = reason;
-        unawaited(_outgoing.persist());
-        notifyListeners();
-        return;
-      }
+    final cmdId = cmd['id'] as String? ?? '';
+    if (_outgoing.failByCmdId(cmdId, reason)) {
+      unawaited(_outgoing.persist());
+      notifyListeners();
     }
   }
 
@@ -734,6 +763,10 @@ class AgentService extends ChangeNotifier {
     final cmd = <String, dynamic>{
       'type': 'user_message',
       'sessionId': s.id,
+      // The command's identity, so a refusal can name THIS send. Without it the
+      // only thing a refusal could name was the session, and every pending
+      // message in it was marked refused by any error that session produced.
+      'id': nextCommandId(),
       'text': text,
       if (images.isNotEmpty)
         'images': [
@@ -743,6 +776,7 @@ class AgentService extends ChangeNotifier {
       'deliverAs': steer ? 'steer' : 'followUp',
     };
     _outgoing.track(s.id, cmd, text: text, imageCount: images.length);
+    _taskNotified.remove(s.id);
     unawaited(_outgoing.persist());
     notifyListeners();
     _send(cmd);

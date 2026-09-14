@@ -140,10 +140,26 @@ export interface BackgroundJobSummary {
 export type ServerMessage =
   | { type: "authed" }
   | { type: "pong" }
-  | { type: "error"; message: string; sessionId?: string }
+  | {
+      type: "error";
+      message: string;
+      sessionId?: string;
+      /** The command this error REFUSED, when it refused one. A session-level
+       * error carries no cmdId, so a client cannot mistake it for a refusal of
+       * the message the user just sent. */
+      cmdId?: string;
+    }
   /** Something the user asked for HAPPENED (compact/clear). Silence is what
    * made these look like no-ops; the client shows this as a snackbar. */
-  | { type: "notice"; sessionId?: string; message: string }
+  | {
+      type: "notice";
+      sessionId?: string;
+      message: string;
+      /** What it is about, when the client's notification policy depends on it:
+       * a background-task completion is announced by this notice, so the turn it
+       * starts must not ALSO be announced as the session finishing work. */
+      kind?: "background-task";
+    }
   | { type: "state"; online: boolean; hostname: string; homePath?: string; activeSessionId?: string | null; sessions: SessionSnapshot[]; registry: SessionRow[]; tunnelUrl?: string | null; tunnelProvider?: string | null; httpKey?: string; goal?: { text: string; setAt: number } | null; localUrl?: string | null }
   | { type: "session_list"; sessions: SessionRow[] }
   | { type: "session_deleted"; sessionId: string; deleted: boolean }

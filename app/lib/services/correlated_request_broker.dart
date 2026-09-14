@@ -1,12 +1,13 @@
 import 'dart:async';
 
+import '../logic/command_id.dart';
+
 /// Owns command-id request/reply correlation for the WebSocket protocol.
 ///
 /// Each request carries its own response decoder and fallback, so callers get
 /// a typed future while wire replies can all enter through [complete].
 class CorrelatedRequestBroker {
   final Map<String, _PendingRequest> _pending = {};
-  int _nextId = 0;
 
   int get pendingCount => _pending.length;
 
@@ -16,9 +17,7 @@ class CorrelatedRequestBroker {
     required T fallback,
     required Duration timeout,
   }) async {
-    final id =
-        '${DateTime.now().microsecondsSinceEpoch}-${_nextId.toRadixString(36)}';
-    _nextId++;
+    final id = nextCommandId();
     final pending = _TypedPendingRequest<T>(decode, fallback);
     _pending[id] = pending;
     try {

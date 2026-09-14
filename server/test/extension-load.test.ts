@@ -12,6 +12,7 @@ import { pathToFileURL } from "node:url";
 import { existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { makeTempDir, removeTempDir } from "../support/tmp.ts";
+import { CONTEXT_BUDGET_STATEMENT } from "../src/context-budget.ts";
 
 // Resolve the module the same way pi does (.pi.extensions → ./src/index.ts).
 const EXT_ENTRY = resolve(dirname(new URL(import.meta.url).pathname), "..", "src", "index.ts");
@@ -117,6 +118,19 @@ test("factory wires the Pi event bridge", async () => {
 });
 
 // ── Reload safety ──────────────────────────────────────────────────────────
+test("factory states that there is no context budget on every turn", async () => {
+  const mod = await freshModule();
+  const pi = stubPi();
+  mod.default(pi);
+  const handler = pi._handlers["before_agent_start"];
+  assert.equal(typeof handler, "function", "the host session registers it");
+  const result = handler({ systemPrompt: "base prompt" });
+  assert.ok(
+    String(result?.systemPrompt ?? "").includes(CONTEXT_BUDGET_STATEMENT),
+    "the host turn's system prompt says a budget does not exist",
+  );
+});
+
 test("reload-safety: calling the factory twice on the SAME pi is a no-op (dedup)", async () => {
   const mod = await freshModule();
   const pi = stubPi();
