@@ -235,22 +235,28 @@ class AgentService extends ChangeNotifier {
             }
             if (endpoint != null) _lastEndpoint = endpoint;
 
-            // A direct connection needs no third party in the data path, so it
-            // is tried first when the machine offers one. A failure is not
-            // silent: it is recorded and the tunnel endpoint is used, and a
-            // machine with no tunnel at all is still reachable this way.
-            if (await _direct.tryConnect(data)) return;
-            if (endpoint == null) {
+            // The tunnel is dialled FIRST and the direct attempt runs beside
+            // it: a punch takes as long as ICE takes, and making the only
+            // working path wait for it left the app disconnected for the
+            // duration - the machine looked offline while an exchange that may
+            // never land was in flight. A direct channel replaces the tunnel
+            // once it is actually open, so nothing is lost by trying it second.
+            if (endpoint != null) {
+              final picked = pickEndpoint(
+                local: _localEndpoint,
+                remote: endpoint,
+                lastFailedLocal: _localFailed,
+              );
+              if (picked != null) await _dial(picked);
+            }
+            // A direct connection needs no third party in the data path. A
+            // failure is not silent: the link records why, and a machine with
+            // no tunnel at all is still reachable this way.
+            _direct.tryConnectInBackground(data);
+            if (endpoint == null && !_direct.active) {
               _transitionToDisconnected(forgetEndpoint: true, notify: false);
               notifyListeners();
-              return;
             }
-            final picked = pickEndpoint(
-              local: _localEndpoint,
-              remote: endpoint,
-              lastFailedLocal: _localFailed,
-            );
-            if (picked != null) await _dial(picked);
           },
           onError: (e) {
             _error = e.toString();

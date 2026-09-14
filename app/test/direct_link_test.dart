@@ -163,6 +163,35 @@ void main() {
     expect(link.active, isTrue);
   });
 
+  test('an attempt in the background never holds up the caller', () async {
+    // The caller's other path is the tunnel, and it must be usable while ICE is
+    // still working: awaiting the punch first is what left the app with no
+    // connection at all.
+    final gate = Completer<void>();
+    var opened = 0;
+    final link = DirectLink(
+      available: () => true,
+      now: () => 1000,
+      iceServers: const ['stun:example'],
+      connect: ({required offerSdp, required publishAnswer, required iceServers}) async {
+        await gate.future;
+        return _FakeChannel(offerSdp);
+      },
+      publishAnswer: (sdp, writtenAt) async {},
+      open: (channel) async => opened += 1,
+      onChanged: () {},
+    );
+
+    link.tryConnectInBackground({'p2pOffer': _offer, 'p2pOfferTs': 900});
+    expect(link.active, isFalse, reason: 'the caller is not waiting for the punch');
+    expect(opened, 0);
+
+    gate.complete();
+    await Future<void>.delayed(Duration.zero);
+    expect(link.active, isTrue, reason: 'the background attempt still upgrades the connection');
+    expect(opened, 1);
+  });
+
   test('reset makes the machine republish answerable again', () async {
     final h = build();
     final doc = {'p2pOffer': _offer, 'p2pOfferTs': 900};
