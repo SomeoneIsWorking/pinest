@@ -27,7 +27,6 @@ class _FakeAgentService extends ChangeNotifier implements AgentService {
   }
 
   @override
-  @override
   SessionGoal? get goal => null;
 
   @override
@@ -36,6 +35,7 @@ class _FakeAgentService extends ChangeNotifier implements AgentService {
   @override
   void setGoal(String objective) {}
 
+  @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
