@@ -862,6 +862,24 @@ export function createDefaultBackgroundManager(
         }
       }
 
+      // Announce the completion to the app FIRST.
+      //
+      // Delivering to the agent can take a whole turn (the follow-up triggers
+      // one), so announcing afterwards made the app hear about the task only
+      // after the agent had already reacted to it. The kind also tells the client
+      // that this completion has been announced, so the turn it starts is not
+      // announced a second time as the session "finishing work". An unroutable
+      // orphan says WHY it has no transcript instead of implying it landed in
+      // the host's.
+      deps.broadcast({
+        type: "notice",
+        sessionId: targetSessionId,
+        kind: "background-task",
+        message: orphanUnroutable
+          ? `Background command "${task.command.slice(0, 60)}" ${task.status} — no session owns its directory`
+          : `Background command "${task.command.slice(0, 60)}" ${task.status} (exit ${task.exitCode ?? 0})`,
+      });
+
       if (supSession?.session?.sendCustomMessage) {
         try {
           await supSession.session.sendCustomMessage(
@@ -895,17 +913,6 @@ export function createDefaultBackgroundManager(
           );
         }
       }
-
-      // One notice per completion. An unroutable orphan says WHY it has no
-      // transcript instead of implying it landed in the host's.
-      deps.broadcast({
-        type: "notice",
-        sessionId: targetSessionId,
-        message: orphanUnroutable
-          ? `Background command "${task.command.slice(0, 60)}" ${task.status} — no session owns its directory`
-          : `Background command "${task.command.slice(0, 60)}" ${task.status} (exit ${task.exitCode ?? 0})`,
-        ...(orphanUnroutable && task.status === "failed" ? { isError: true } : {}),
-      });
     };
     mgr.onTaskUpdate = (task) => {
       const targetSessionId = task.sessionId || deps.getSessionId();

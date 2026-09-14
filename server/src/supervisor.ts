@@ -9,6 +9,7 @@
 import debug from "./log.ts";
 import { imageBytesLimit } from "./config.ts";
 import { imageBudgetExtension } from "./image-budget.ts";
+import { contextBudgetExtension } from "./context-budget.ts";
 import {
   createAgentSession,
   SessionManager,
@@ -26,6 +27,7 @@ import { createAutoBackgroundBashTool, type BackgroundProcessManager } from "./b
 import { createBackgroundTools } from "./background-tools.ts";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { StreamSegmenter, type StreamSegmenterState } from "./stream.ts";
+import { classifyCompactFailure } from "./compaction-outcome.ts";
 import { createMessageSubmitter, type MessageSubmitter } from "./submit.ts";
 import { resolveThinkingLevel } from "./thinking.ts";
 import { dispatchSessionCommand } from "./session-command-handler.ts";
@@ -106,7 +108,9 @@ export interface LiveSession {
    * run. */
   segmenter: StreamSegmenter;
   _compacting: boolean;
-  _lastFailedCompactTokens?: number;
+  /** The context size at which an attempt left the transcript unchanged; see
+   * `HostContextController.uncompactedAtTokens` for why it exists. */
+  _uncompactedAtTokens?: number;
   /** MIRROR of the agent's own queue, kept in lockstep by `queue_update`
    * events (AgentSession emits the FULL steering + followUp queues whenever
    * they change — including when pi dequeues at message_start). This is NOT
@@ -192,7 +196,9 @@ export class Supervisor {
       // Spawned sessions deliberately exclude pinest itself, so the image cap
       // travels as its own inline extension or these sessions would be the ones
       // a too-large screenshot could still poison (413 on every later request).
-      extensionFactories: [imageBudgetExtension(imageBytesLimit)],
+      // The context-budget statement rides along for the same reason: spawned
+      // sessions are where agents invented a budget and stopped.
+      extensionFactories: [imageBudgetExtension(imageBytesLimit), contextBudgetExtension()],
       extensionsOverride: (base) => ({
         ...base,
         extensions: base.extensions.filter((ext) => !isPinestExtension(ext.path, ext.resolvedPath)),
@@ -722,7 +728,7 @@ export class Supervisor {
    * transcript, and SAY it happened. Without this the app kept rendering the
    * pre-compaction thread and the command looked like a no-op. */
   private afterContextRewrite(id: string, s: LiveSession, notice: string): void {
-    s._lastFailedCompactTokens = undefined;
+    s._uncompactedAtTokens = undefined;
     const u = this.usageWithCompactAt(s);
     this.callbacks.upsertSession(id, { ...(u ? { contextUsage: u } : {}) });
     void this.getHistory(s).then((h) =>
@@ -739,23 +745,32 @@ export class Supervisor {
     const usage = this.contextUsage(s) as any;
     if (!usage?.tokens || usage.tokens < at) return;
     if (usage.contextWindow && usage.contextWindow <= at) return;
-    if (s._lastFailedCompactTokens && usage.tokens <= s._lastFailedCompactTokens) return;
+    if (s._uncompactedAtTokens !== undefined && usage.tokens <= s._uncompactedAtTokens) return;
 
     s._compacting = true;
     this.callbacks.upsertSession(id, { isCompacting: true });
     debug(`[remote-code] auto-compacting session ${id} (${usage.tokens} >= ${at} tokens)`);
+    const attemptedAt = usage.tokens as number;
     Promise.resolve((s.session as any).compact())
       .then(() => {
-        s._lastFailedCompactTokens = undefined;
+        s._uncompactedAtTokens = undefined;
         this.afterContextRewrite(id, s, "Context auto-compacted");
       })
       .catch((e: unknown) => {
-        s._lastFailedCompactTokens = usage.tokens;
-        debug("[remote-code] auto-compact failed:", (e as Error).message);
-        this.callbacks.broadcast({
-          type: "error", sessionId: id, message: `Auto-compaction failed: ${(e as Error).message}`,
-        });
-        this.callbacks.notifyHost?.(`PiNest [${s.name || id}]: auto-compaction failed`, "warning");
+        // An attempt against an already-compacted transcript changes nothing and
+        // is not a failure. The watermark still records the size, because
+        // re-attempting it on every settle only aborts the next turn.
+        const failure = classifyCompactFailure({ errorMessage: (e as Error).message });
+        s._uncompactedAtTokens = attemptedAt;
+        if (failure.kind === "error") {
+          debug("[remote-code] auto-compact failed:", failure.detail);
+          this.callbacks.broadcast({
+            type: "error", sessionId: id, message: `Auto-compaction failed: ${failure.detail}`,
+          });
+          this.callbacks.notifyHost?.(`PiNest [${s.name || id}]: auto-compaction failed`, "warning");
+        } else {
+          debug(`[remote-code] auto-compaction was a no-op for ${id}: ${failure.detail}`);
+        }
       })
       .finally(() => { s._compacting = false; this.callbacks.upsertSession(id, { isCompacting: false }); });
   }

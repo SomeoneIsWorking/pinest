@@ -4,11 +4,12 @@ import 'package:pinest_app/screens/message_bubbles.dart';
 import 'package:pinest_app/services/outgoing_queue.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-Map<String, dynamic> cmd(String sessionId, String text) => {
+Map<String, dynamic> cmd(String sessionId, String text, {String? id}) => {
       'type': 'user_message',
       'sessionId': sessionId,
       'text': text,
       'deliverAs': 'steer',
+      'id': ?id,
     };
 
 void main() {
@@ -66,16 +67,20 @@ void main() {
     expect(restored.forSession('s2'), isEmpty);
   });
 
-  test('restore keeps the original session and strips stale ids', () async {
+  test('restore keeps the original session AND the send id', () async {
     final q = OutgoingQueue();
-    final raw = cmd('s1', 'replay me')..['id'] = 'stale-request-id';
+    final raw = cmd('s1', 'replay me', id: 'send-1');
     q.track('s1', raw, text: 'replay me', imageCount: 0);
     await q.persist();
 
     final restored = OutgoingQueue();
     final commands = await restored.restore();
     expect(commands.single['sessionId'], 's1');
-    expect(commands.single.containsKey('id'), isFalse);
+    // The id is the send's identity, so a refusal after a reload still names the
+    // message it refused. Dropping it made a replayed send unattributable.
+    expect(commands.single['id'], 'send-1');
+    expect(restored.failByCmdId('send-1', 'no longer running'), isTrue);
+    expect(restored.forSession('s1').single.failure, 'no longer running');
   });
 
   test('being queued is sticky — the bubble never falls back to "sending"', () {
@@ -123,8 +128,8 @@ void main() {
 
   test('a refused send says so instead of claiming it is on its way', () {
     final q = OutgoingQueue();
-    q.track('s1', cmd('s1', 'never lands'), text: 'never lands', imageCount: 0);
-    q.markFailed('s1', 'session s1 is no longer running');
+    q.track('s1', cmd('s1', 'never lands', id: 'c1'), text: 'never lands', imageCount: 0);
+    expect(q.failByCmdId('c1', 'session s1 is no longer running'), isTrue);
 
     final message = q.forSession('s1').single;
     final status = sendStatusFor(
@@ -139,6 +144,24 @@ void main() {
     expect(q.forSession('s1').length, 1);
     q.reconcile('s1', historyTexts: ['never lands']);
     expect(q.forSession('s1'), isEmpty);
+  });
+
+  test('a refusal marks only the send it names, not every pending one', () {
+    final q = OutgoingQueue();
+    q.track('s1', cmd('s1', 'first', id: 'c1'), text: 'first', imageCount: 0);
+    q.track('s1', cmd('s1', 'second', id: 'c2'), text: 'second', imageCount: 0);
+    q.track('s2', cmd('s2', 'other session', id: 'c3'), text: 'other session', imageCount: 0);
+
+    // A session-level error names no command; it must not mark anything.
+    expect(q.failByCmdId('', 'Compaction failed: Already compacted'), isFalse);
+    expect(q.forSession('s1').every((m) => m.failure == null), isTrue);
+    expect(q.forSession('s2').single.failure, isNull);
+
+    // A refusal that names the second send marks exactly that one.
+    expect(q.failByCmdId('c2', 'session s1 is no longer running'), isTrue);
+    expect(q.forSession('s1').first.failure, isNull);
+    expect(q.forSession('s1').last.failure, 'session s1 is no longer running');
+    expect(q.forSession('s2').single.failure, isNull);
   });
 
   test('confirming clears the persisted entry too', () async {

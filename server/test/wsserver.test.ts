@@ -264,11 +264,14 @@ test("a command reaches the sink validated, and one that cannot is refused by na
   clients.push(refused);
   await authenticate(refused);
   const answer = nextMessage(refused);
-  refused.send(JSON.stringify({ type: "command", cmd: { type: "user_message", sessionId: "s1", text: 5 } }));
+  refused.send(JSON.stringify({ type: "command", cmd: { type: "user_message", sessionId: "s1", text: 5, id: "send-7" } }));
   const refusal = await answer;
   assert.equal(refusal.type, "error");
   assert.match(String(refusal.message), /text must be a string/, "the refusal names what was wrong");
   assert.equal(refusal.sessionId, "s1", "it is attributed to the session that sent it");
+  // And to the SEND: without this the client could only mark every message that
+  // session had pending as refused.
+  assert.equal(refusal.cmdId, "send-7", "it names the command it refused");
   assert.equal(received.length, 1, "nothing invalid reached the sink");
   assert.equal(refused.readyState, WebSocket.OPEN, "the socket survived its own bad command");
 
@@ -276,6 +279,17 @@ test("a command reaches the sink validated, and one that cannot is refused by na
   const pong = nextMessage(refused);
   refused.send(JSON.stringify({ type: "command", cmd: { type: "ping" } }));
   assert.deepEqual(await pong, { type: "pong" }, "a framed ping is answered like a bare one");
+
+  // A command with no id cannot name one: the refusal must then carry no cmdId
+  // rather than inventing a match.
+  const unnamed = await openClient(server);
+  clients.push(unnamed);
+  await authenticate(unnamed);
+  const unnamedAnswer = nextMessage(unnamed);
+  unnamed.send(JSON.stringify({ type: "command", cmd: { type: "user_message", sessionId: "s1", text: 5 } }));
+  const unnamedRefusal = await unnamedAnswer;
+  assert.equal(unnamedRefusal.type, "error");
+  assert.equal(unnamedRefusal.cmdId, undefined, "no id, no attribution");
 });
 
 test("the same frame produces the same command on the socket and over HTTP", async (t) => {

@@ -30,6 +30,10 @@ cited), `partial`, `blocked`, `missing`. One current focus at the bottom.
 | S13 | The mobile client is distributed through Google Play | missing | S6, S7 | G1 |
 | S14 | History transport is bounded and images load on demand | verified | S6, S9 | G1, G6 |
 | S15 | Remote access works with no third party in the data path (direct WebRTC transport) | partial | S5b, S7, S11 | G7 |
+| S16 | A send is reported undelivered only when the refusal names THAT send | verified | S6, S9 | G1, G6 |
+| S17 | A compaction with nothing to compact is a no-op, and is not re-attempted | verified | S5, S10 | G4 |
+| S18 | Concurrent notices are stacked, deduplicated, and bounded | verified | S6 | G1 |
+| S19 | A session states it has no context budget, so agents do not invent one and stop | partial | S1, S5 | G1, G4 |
 Atomic work and findings live in `docs/issues/`.
 
 ### S8 — Remote session lifecycle
@@ -58,6 +62,39 @@ page was 7.02 MB (19.36 MB of the full transcript was eight 4K screenshots) and 
 no base64 in the payload. Hiding the last page behind the 16 MiB outbound allowance is no longer
 possible: an oversized payload is dropped and counted rather than misread as a slow client, because
 closing the socket made the app reconnect-loop and never receive the transcript.
+
+### S16 — Undelivered means the refusal named that send
+
+A refusal travels with the command id it refused, and the client marks exactly that send; the
+session-level error that used to mark every pending message in a session ("not delivered —
+Compaction failed: Already compacted", under a message that was fine) no longer touches the
+outbox. A send's id survives a page reload, so a replayed send stays attributable. Gap: the same
+rule is not yet exercised end to end against a real machine refusal on a shipping client.
+
+### S17 — Compaction with nothing to compact
+
+pi rejects a compaction attempt against an already-compacted transcript, and that rejection used
+to be announced as a failure and re-attempted on every settle — each attempt aborting the running
+turn first. It is now classified as a no-op (one shared classifier), the in-flight flag is released
+by the terminal events rather than by a microtask, and the unchanged size is recorded so it is not
+retried. A user-typed `/compact` still gets an answer; an automatic no-op says nothing.
+
+### S18 — Notices
+
+Notices stack below each other in one bounded column (three visible, oldest makes room), an
+identical notice restarts the existing pill's clock instead of adding a copy, and the overlay entry
+is removed once nothing is left. Previously each notice was its own overlay entry at the same
+position, so two at once were laid on top of each other and neither could be read.
+
+### S19 — No context budget
+
+Every turn's system prompt carries one short statement that compaction is automatic and that no
+component reports a remaining-token figure, so a figure the model produces is invented. It reaches
+spawned sessions too, which do not load pinest itself, through the same inline-extension path the
+image cap uses. Verified: the statement, its idempotence, its registration on the host factory, and
+a spawned session's real pi `emitBeforeAgentStart` result. Gap: this is prevention, not enforcement,
+and whether it actually stops the behaviour is unverified — its falsifier is an agent stopping for a
+budget after this ships.
 
 ### S15 — Direct (no-tunnel) transport
 
@@ -611,10 +648,13 @@ Evidence: Node suite (`npm test`) passes with 296 tests and 0 failures; `npm run
 
 ## Current focus
 
-S15/G7 is the current focus. Both halves of the direct transport exist and are
-verified separately - the host's offer is published through the real discovery
-document and a peer completes the exchange; the browser's answer path runs in
-real Chromium - and the tunnel path is verified live end to end. What remains is
-the one thing that needs the operator's device: a real phone/browser reaching
-the live host over the direct channel with no tunnel in the data path (#46).
+S19 is the current focus: sessions must not stop for a context budget that does
+not exist (the statements, both wire paths, and the tests are in; what is missing
+is observation that it changes behaviour). S15/G7 stays open and is the previous
+focus: both halves of the direct transport exist and are verified separately —
+the host's offer is published through the real discovery document and a peer
+completes the exchange, the browser's answer path runs in real Chromium, and the
+tunnel path is verified live end to end — and the one thing that needs the
+operator's device is a real phone/browser reaching the live host over the direct
+channel with no tunnel in the data path (#46).
 `p2p` is off by default in a fresh install.
