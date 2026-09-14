@@ -348,6 +348,9 @@ async function main(): Promise<void> {
   const writer = new FrameWriter();
   let largest = 0;
   let framesIn = 0;
+  /** Every frame type that arrived, so a timeout can say what DID come back
+   * instead of only what did not. */
+  const frameTypes: string[] = [];
   const stateFrame = new Promise<any>((resolve, reject) => {
     push.onMessage.subscribe((data: unknown) => {
       let payload: string | null;
@@ -366,8 +369,10 @@ async function main(): Promise<void> {
       try {
         parsed = JSON.parse(payload);
       } catch {
+        frameTypes.push("(unparseable)");
         return;
       }
+      if (frameTypes.length < 12) frameTypes.push(String(parsed.type));
       if (parsed.type === "state") resolve(parsed);
       if (parsed.type === "error") reject(new VerificationError(`the machine refused: ${parsed.message}`));
     });
@@ -384,7 +389,15 @@ async function main(): Promise<void> {
   const state = await Promise.race([
     stateFrame,
     timeout(timeoutMs, "a state frame over the direct channel"),
-  ]);
+  ]).catch((error: Error) => {
+    // The negative must be printable: an empty channel and a channel that
+    // answered with something else are different failures.
+    throw new VerificationError(
+      `${error.message}; the peer sent nothing back (${
+        frameTypes.length === 0 ? "no frames at all" : `saw ${frameTypes.join(", ")}`
+      })`,
+    );
+  });
   const sessions = Array.isArray(state.sessions) ? state.sessions.length : 0;
   console.log(
     `protocol: authenticated over the direct channel and received state with ${sessions} session(s) `
