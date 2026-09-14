@@ -14,10 +14,15 @@
  * from Pi's own `rawKeyHint`.
  */
 import { Key, SelectList, matchesKey } from "@earendil-works/pi-tui";
-import type { SelectItem, SelectListTheme } from "@earendil-works/pi-tui";
+import type {
+  SelectItem,
+  SelectListTheme,
+  TuiMouseEvent,
+  TuiMouseEventResult,
+} from "@earendil-works/pi-tui";
 import { rawKeyHint } from "@earendil-works/pi-coding-agent";
 
-import { frame, terminalRows } from "./tui-frame.ts";
+import { frame, terminalRows, dispatchInto, FRAME_TOP } from "./tui-frame.ts";
 
 export interface SessionSummary {
   id: string;
@@ -27,7 +32,10 @@ export interface SessionSummary {
   isHost: boolean;
   model?: string;
   modelName?: string;
-  messageCount?: number;
+  /** The level this session reports, in display form. Shown because the level
+   * changes what a session costs and how it answers, and it is set from either
+   * end, so the terminal must be able to see it too. */
+  thinking?: string;
   /** Queued messages waiting for this session, if any. */
   pending?: number;
 }
@@ -50,6 +58,7 @@ export interface SessionsViewOptions {
 export interface SessionsViewComponent {
   render(width: number): string[];
   handleInput(data: string): void;
+  handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined;
   invalidate?(): void;
   dispose?(): void;
 }
@@ -93,6 +102,10 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
 
   const rows = (): number => opts.rows ?? terminalRows(opts.tui);
 
+  /** The frame's top border, plus the filter row when one is showing. Everything
+   * below this is the list, which is what a pointer lands on. */
+  const listTop = (): number => FRAME_TOP + (filter.length > 0 ? 1 : 0);
+
   const list = (): SelectList => {
     const items: SelectItem[] = shown.map(toItem);
     return new SelectList(items, visibleRows(rows(), items.length), selectTheme(theme));
@@ -105,7 +118,14 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
    * nothing at all. Matching anywhere in the name, id, directory, model or
    * status is what someone typing a name expects. */
   const matches = (s: SessionSummary, needle: string): boolean => {
-    const haystack = [s.name, s.id, s.cwd, s.modelName ?? s.model ?? "", s.status]
+    const haystack = [
+      s.name,
+      s.id,
+      s.cwd,
+      s.modelName ?? s.model ?? "",
+      s.thinking ?? "",
+      s.status,
+    ]
       .join(" ")
       .toLowerCase();
     return haystack.includes(needle.toLowerCase());
@@ -125,6 +145,27 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
   };
 
   const color = (name: string, text: string): string => fg(name, text);
+
+  /**
+   * Open the session under the cursor.
+   *
+   * Enter and a pointer click run through here, because the two must never
+   * disagree about what choosing a row means - including the host row, which is
+   * the terminal you are already typing in and so cannot be "opened".
+   */
+  const openSelected = (): void => {
+    const item = view.getSelectedItem();
+    const target = sessions.find((s) => s.id === item?.value);
+    if (!target) {
+      return;
+    }
+    if (target.isHost) {
+      feedback = "That is this terminal. Choose an agent session to open it.";
+      refresh();
+      return;
+    }
+    onSelect(target);
+  };
 
   return {
     render(width: number): string[] {
@@ -157,7 +198,7 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
 
       if (sessions.length === 0) {
         body.push("");
-        body.push(`  ${fg("muted", "No sessions yet. Press ctrl-n to start one in this directory.")}`);
+        body.push(`  ${fg("muted", "No sessions yet. Press ctrl-n to start one.")}`);
       } else {
         body.push(...view.render(width - 4));
       }
@@ -249,17 +290,7 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
       }
 
       if (matchesKey(data, Key.enter) || matchesKey(data, Key.return)) {
-        const item = view.getSelectedItem();
-        const target = sessions.find((s) => s.id === item?.value);
-        if (!target) {
-          return;
-        }
-        if (target.isHost) {
-          feedback = "That is this terminal. Choose an agent session to open it.";
-          refresh();
-          return;
-        }
-        onSelect(target);
+        openSelected();
         return;
       }
 
@@ -281,6 +312,52 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
     invalidate(): void {
       view.invalidate();
     },
+
+    /** The wheel moves the selection; a press moves it under the pointer and a
+     * click opens the session under it.
+     *
+     * Pi's own `SelectList` owns all of that (it is the component Pi's pickers
+     * use), so this only translates coordinates: the frame's border and the
+     * filter row sit above the list, and the list hit-tests from its own first
+     * rendered row. Anything below the list is outside its visible range, which
+     * is the list's own check, so a click on the notice row does nothing.
+     *
+     * Fullscreen TUI mode only: regular mode never captures mouse input. */
+    handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+      if (mode === "confirm" || sessions.length === 0 || shown.length === 0) {
+        return undefined;
+      }
+      if (event.type === "wheel") {
+        const result = view.handleMouse(event);
+        if (result) {
+          refresh();
+        }
+        return result;
+      }
+      if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) {
+        return undefined;
+      }
+      const top = listTop();
+      if (event.y < top) {
+        return undefined;
+      }
+      const result = dispatchInto(view, event, {
+        top,
+        height: visibleRows(rows(), shown.length),
+        width: Math.max(10, event.width - 4),
+      });
+      if (!result) {
+        return undefined;
+      }
+      // The list moved the cursor itself; opening is this view's action, shared
+      // with Enter so a click cannot bypass the host-row guard.
+      if (event.type === "click") {
+        openSelected();
+      } else {
+        refresh();
+      }
+      return result;
+    },
   };
 
   function refresh(): void {
@@ -293,13 +370,16 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
 export function toItem(s: SessionSummary): SelectItem {
   const glyph = s.status === "working" ? "⚡" : "○";
   const host = s.isHost ? " (this terminal)" : "";
-  const queued = s.pending && s.pending > 0 ? `  +${s.pending} queued` : "";
+  const queued = s.pending && s.pending > 0 ? `+${s.pending} queued` : "";
   const model = s.modelName ?? s.model ?? "";
+  const thinking = s.thinking ? `thinking:${s.thinking}` : "";
   const where = shortenPath(s.cwd);
   return {
     value: s.id,
     label: `${glyph} ${s.name}${host}`,
-    description: [where, model, s.status, `${queued}`.trim()].filter((part) => part.length > 0).join("  ·  "),
+    description: [where, model, thinking, s.status, queued]
+      .filter((part) => part.length > 0)
+      .join("  ·  "),
   };
 }
 

@@ -89,28 +89,34 @@ export class SessionTranscript {
   /** A message has started. */
   onMessageStart(message: any): void {
     if (message?.role === "assistant") {
-      // A fresh component per assistant message, exactly as Pi's own view does:
-      // reusing one would mix the previous message's tool calls into this one.
-      this.streaming = new AssistantMessageComponent(
-        message,
-        false,
-        this.markdownTheme,
-        undefined,
-        this.sources.outputPad,
-      );
-      this.root.addChild(this.streaming);
-      this.streaming.updateContent(message, true);
+      this.beginStreaming(message);
       return;
     }
     this.append(message, { spacer: true });
   }
 
-  /** Streaming content or tool arguments changed. */
+  /** Streaming content or tool arguments changed.
+   *
+   * A view can be opened in the MIDDLE of a run, and it then never saw the
+   * `message_start` that creates the streaming component. Dropping every later
+   * update on that account is what looked like "the attached session is not
+   * updating": the pane froze at whatever the transcript held when it opened.
+   * The event carries the WHOLE message, so there is nothing to reconstruct -
+   * adopt it and display what is already live. */
   onMessageUpdate(message: any): void {
-    if (!this.streaming || message?.role !== "assistant") {
+    if (message?.role !== "assistant") {
       return;
     }
-    this.streaming.updateContent(message, true);
+    let streaming = this.streaming;
+    if (!streaming) {
+      this.beginStreaming(message);
+      streaming = this.streaming;
+      if (!streaming) {
+        return;
+      }
+    } else {
+      streaming.updateContent(message, true);
+    }
     for (const content of message.content ?? []) {
       if (content?.type !== "toolCall") {
         continue;
@@ -146,8 +152,7 @@ export class SessionTranscript {
         component.updateResult({ content: [{ type: "text", text: reason }], isError: true });
       }
     }
-    this.pendingTools.clear();
-    this.streaming = null;
+    this.closeStreaming();
   }
 
   /** A tool began, is streaming, or finished.
@@ -201,11 +206,32 @@ export class SessionTranscript {
 
   /** Anything still waiting for a result when the run ends. */
   finish(): void {
-    this.pendingTools.clear();
-    this.streaming = null;
+    this.closeStreaming();
   }
 
   // ── Internals ────────────────────────────────────────────────────────────
+
+  /** Own the message currently streaming: a fresh component per assistant
+   * message, exactly as Pi's own view does, because reusing one would mix the
+   * previous message's tool calls into this one. */
+  private beginStreaming(message: any): void {
+    this.closeStreaming();
+    this.streaming = new AssistantMessageComponent(
+      message,
+      false,
+      this.markdownTheme,
+      undefined,
+      this.sources.outputPad,
+    );
+    this.root.addChild(this.streaming);
+    this.streaming.updateContent(message, true);
+  }
+
+  /** Release the streaming component and the calls still waiting on it. */
+  private closeStreaming(): void {
+    this.pendingTools.clear();
+    this.streaming = null;
+  }
 
   /** A message Pi's own component cannot render must not take the transcript
    * with it: the failure is shown where that message belongs, by name. */
@@ -260,14 +286,21 @@ export class SessionTranscript {
       }
       case "assistant": {
         spaced();
-        const component = new AssistantMessageComponent(
-          message,
-          false,
-          this.markdownTheme,
-          undefined,
-          this.sources.outputPad,
-        );
-        this.root.addChild(component);
+        if (isLive(message)) {
+          // Rebuilt in the middle of a run: this message IS the one streaming,
+          // so it has to be the component later updates land on. A settled copy
+          // here is the freeze the user reported.
+          this.beginStreaming(message);
+        } else {
+          const component = new AssistantMessageComponent(
+            message,
+            false,
+            this.markdownTheme,
+            undefined,
+            this.sources.outputPad,
+          );
+          this.root.addChild(component);
+        }
         for (const content of message.content ?? []) {
           if (content?.type !== "toolCall") {
             continue;
@@ -358,6 +391,15 @@ export function extractText(content: unknown): string {
     .map((part: any) => (part?.type === "text" ? String(part.text ?? "") : ""))
     .filter((text: string) => text.length > 0)
     .join("\n");
+}
+
+/** The stop reasons Pi's own view treats as a finished assistant message. An
+ * in-flight one is "pending" (or unset until the provider reports it). */
+const SETTLED_STOP_REASONS = new Set(["stop", "toolUse", "tool_use", "aborted", "error", "length"]);
+
+/** True while an assistant message is still being written. */
+export function isLive(message: any): boolean {
+  return message?.role === "assistant" && !SETTLED_STOP_REASONS.has(String(message?.stopReason));
 }
 
 /** Build the transcript sources for a live session, using the session's own

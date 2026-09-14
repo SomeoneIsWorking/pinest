@@ -110,7 +110,10 @@ export async function dispatchSessionCommand(
       }
       ctx.callbacks.upsertSession(cmd.sessionId as string, { isCompacting: true });
       try {
-        await compact.call(s.session);
+        // Pi's `compact(customInstructions?)` takes the focus text a user typed
+        // after `/compact`. Dropping it here would mean the TUI's argument
+        // silently changed nothing about the summary it produced.
+        await compact.call(s.session, cmd.customInstructions as string | undefined);
       } finally {
         ctx.callbacks.upsertSession(cmd.sessionId as string, { isCompacting: false });
       }
