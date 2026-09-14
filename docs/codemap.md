@@ -17,20 +17,20 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Private atomic hosted refresh-credential storage | `server` | `server/src/auth-cache.ts` |
 | Nonce-bound canonical-loopback browser pairing | `server` | `server/src/browser-login.ts`, `server/src/login.html` |
 | Same-owner credential rotation and verified-token mapping | `server` | `server/src/owner-runtime.ts` |
-| Streaming-text state (segments promoted at tool pauses, each stamped with the tool index it preceded; shared by supervisor + host) | `server` | `server/src/stream.ts` (`StreamSegmenter`); `app/lib/models/stream_segment.dart`, interleave in `chat_screen.dart` |
+| Streaming-text state (segments promoted at tool pauses, each stamped with the tool index it preceded; shared by supervisor + host) | `server` | `server/src/stream.ts` (`StreamSegmenter`); `app/lib/models/stream_segment.dart`, interleave in `app/lib/screens/chat_items_builder.dart` |
 | History paging (last-50-first, cursor scroll-back) | `server` | `server/src/logic.ts` (`pageHistory`) |
 | History image references + on-demand fetch (LRU store; base64 never travels with history) | `server`, `app` | `registerImage`/`lookupImage` in `server/src/logic.ts`; `get_image` in `server/src/index.ts` + `server/src/supervisor.ts`; `app/lib/services/image_store.dart`, `app/lib/widgets/lazy_image_tile.dart` |
 | Outbound payload guard (oversized single message dropped + counted, never misread as a slow client) | `server` | `server/src/wsserver.ts` (`sendSerialized`) |
 | Session-history extraction incl. pre-compaction messages and compaction bubbles | `server` | `server/src/logic.ts` (`extractSessionMessages`, `entriesToSessionMessages`) |
-| Headless session spawn/resume/kill/route/stream (SDK sessions in-process) | `server` | `server/src/supervisor.ts` |
+| Headless session spawn/resume/kill/route/stream (SDK sessions in-process) | `server` | `server/src/supervisor.ts`, `server/src/session-command-handler.ts` |
 | Model lookup/switch + available-model listing (per-session runtime preferred, registry fallback) | `server` | `server/src/session-models.ts` (`SessionModelService`) |
-| Background-task ownership identity (resolved from the LIVE tool context; a task cannot be started without an owner) | `server` | `ownerFromContext` + `SessionTasks` in `server/src/bash-tool.ts`; `scopeFor` in `server/src/background-tools.ts` |
+| Background-task ownership identity and process management | `server` | `ownerFromContext` + `SessionTasks` in `server/src/bash-tool.ts`; `server/src/process-util.ts`; `scopeFor` in `server/src/background-tools.ts` |
 | Orphan background-task routing (no owner id → most specific cwd, then host, else a visible notice) | `server` | `server/src/bg-routing.ts` (`routeOrphanTask`), wired as `BackgroundProcessManager.resolveOrphan` |
 | Owner-bound session registry persistence (private sessions.json, atomic writes/history deletion, corrupt/symlink refusal) | `server` | `server/src/registry.ts` |
 | Harness source-change watcher (debounced file watch → pending-change notice; never reloads) | `server` | `server/src/watch.ts` |
 | Repeatable evidence drills (explicit-reload contract, mid-run handoff, steer delivery timing, compact/clear observability) | `drills` | `drills/` (`*.mjs`) |
 | Reload safety gate (syntax-check watched sources; broken edits don't tear down the host) | `server` | `firstSyntaxError` in `server/src/index.ts` |
-| Host-session compact/clear/auto-compact policy and client-visible rewrite aftermath | `server` | `server/src/host-context.ts` (`HostContextController`) |
+| Host-interactive session commands and filesystem inspection | `server` | `server/src/host-interactive-commands.ts` |
 | Auto-background bash tool execution (>30s) and background process management | `server` | `server/src/bash-tool.ts` (`BackgroundProcessManager`, `createAutoBackgroundBashTool`) |
 | Pure helpers (history shaping, model mapping, path completion) | `server` | `server/src/logic.ts` |
 | Thinking-level resolution ("Default" = omit reasoning override, opencode semantics) | `server` | `server/src/thinking.ts` |
@@ -51,7 +51,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Collapsible sequential tool call grouping | `app` | `app/lib/screens/tool_call_group.dart` (`ToolCallGroup`) |
 | Collapsible thinking/reasoning display | `app` | `app/lib/screens/thinking_card.dart` (`ThinkingCard`) |
 | Background task completion notification card | `app` | `app/lib/screens/task_notification_card.dart` (`TaskNotificationCard`) |
-| Durable-session UI + reconnect | `app` | `app/lib/screens/main_shell.dart` (`SessionHistorySheet`), `app/lib/services/agent_service.dart` |
+| Durable-session UI + reconnect | `app` | `app/lib/screens/main_shell.dart` (`SessionHistorySheet`), `app/lib/services/agent_service.dart`, `app/lib/services/session_store.dart` |
 | Message options bottom sheet (queued edit/delete + history rewind/copy) | `app` | `app/lib/screens/message_options_sheet.dart` |
 | Relative and exact timestamp formatting for chat messages | `app` | `app/lib/logic/time_format.dart` (`formatRelativeTime`, `formatExactTime`) |
 | Markdown rendering with tappable http(s) links (chat, streaming, release notes) | `app` | `app/lib/widgets/markdown_view.dart` (`MarkdownText` via `openExternalUrl`) |

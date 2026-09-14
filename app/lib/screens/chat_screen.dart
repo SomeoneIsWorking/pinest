@@ -9,25 +9,17 @@ import '../services/attachment_selection.dart';
 import '../services/paste_bridge.dart';
 import '../services/user_preferences.dart';
 import '../models/session.dart';
-import '../logic/transcript_order.dart';
 import './goal_banner.dart';
 import '../models/chat_item.dart';
-import '../models/tool_call_view.dart';
 import 'app_toast.dart';
 import 'session_actions.dart';
-import 'tool_call_card.dart';
-import 'tool_call_group.dart';
-import 'thinking_card.dart';
-import 'task_notification_card.dart';
-import 'message_options_sheet.dart';
+import 'chat_items_builder.dart';
 import 'background_jobs_sheet.dart';
 import '../logic/slash_commands.dart';
 import 'composer_bar.dart';
 
 export 'session_actions.dart';
 import 'tree_dialog.dart';
-import '../models/stream_segment.dart';
-import 'message_bubbles.dart';
 
 class ChatScreen extends StatefulWidget {
   final String sessionId;
@@ -604,350 +596,47 @@ class _ChatScreenState extends State<ChatScreen> {
     Session? s,
     UserPreferences prefs,
   ) {
-    // Server-authoritative queue — the client is a terminal, not the keeper.
-    final queued = s?.pendingMessages ?? const <String>[];
-    final showThinking = prefs.showThinking;
-    final collapseToolCalls = prefs.collapseToolCalls;
-    final items = <Widget>[];
-
-    final currentToolBatch = <ToolCallView>[];
-    void flushTools() {
-      if (currentToolBatch.isEmpty) return;
-      if (currentToolBatch.length == 1 || !collapseToolCalls) {
-        for (final t in currentToolBatch) {
-          items.add(_toolCallCard(t));
-        }
-      } else {
-        items.add(ToolCallGroup(
-          key: ValueKey('tools-${currentToolBatch.first.entryId ?? ''}'
-              '-${currentToolBatch.first.name}-${currentToolBatch.length}'),
-          tools: List.of(currentToolBatch),
-        ));
-      }
-      currentToolBatch.clear();
-    }
-
-    final hasMore = svc.historyHasMore(widget.sessionId);
-    if (_loadingOlder) {
-      items.add(
-        Padding(
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          child: Center(
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  'Loading older messages…',
-                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
-    } else if (hasMore) {
-      items.add(
-        Padding(
-          padding: const EdgeInsets.symmetric(vertical: 8),
-          child: Center(
-            child: TextButton.icon(
-              onPressed: _loadingOlder ? null : _loadOlderHistory,
-              icon: const Icon(Icons.arrow_upward, size: 14),
-              label: const Text('Load older messages'),
-              style: TextButton.styleFrom(
-                visualDensity: VisualDensity.compact,
-                textStyle: const TextStyle(fontSize: 12),
-              ),
-            ),
-          ),
-        ),
-      );
-    }
-
-    for (final msg in history) {
-      final role = msg['role'] as String? ?? '';
-      final text = msg['text'] as String? ?? '';
-      final tools = msg['tools'] as List?;
-      final timestamp = (msg['timestamp'] as num?)?.toInt() ?? (msg['ts'] as num?)?.toInt();
-      final isTaskNotification = (msg['customType'] == 'background-task-notification') ||
-          text.trim().startsWith('<background-task-notification>');
-      if (isTaskNotification) {
-        flushTools();
-        items.add(TaskNotificationCard(text: text, timestamp: timestamp));
-      } else if (msg['customType'] == 'compaction') {
-        flushTools();
-        items.add(SystemBubble(text: 'Conversation compacted', timestamp: timestamp));
-      } else if (role == 'system') {
-        flushTools();
-        items.add(SystemBubble(text: text, timestamp: timestamp));
-      } else if (role == 'user') {
-        flushTools();
-        final historyImgs = [
-          for (final img in (msg['images'] as List? ?? const []))
-            Map<String, dynamic>.from(img as Map),
-        ];
-        final entryId = msg['id'] as String?;
-        void openOptions() {
-          if (s == null) return;
-          showHistoryMessageOptions(
-            context: context,
-            svc: svc,
-            session: s,
-            text: text,
-            entryId: entryId,
-            historyImages: historyImgs,
-            onRewindRestore: (rewoundText, restoredImgs) {
-              if (mounted) {
-                setState(() {
-                  _input.text = rewoundText;
-                  if (restoredImgs.isNotEmpty) {
-                    _attachedImages.addAll(restoredImgs);
-                  }
-                });
-              }
-            },
-          );
-        }
-
-        items.add(
-          MessageBubble(
-            text: text,
-            align: Alignment.centerRight,
-            background: Colors.blueGrey.withAlpha(40),
-            historyImages: historyImgs,
-            timestamp: timestamp,
-            onTap: (s == null) ? null : openOptions,
-            onSecondaryTap: (s == null) ? null : openOptions,
-            onLongPress: (s == null) ? null : openOptions,
-          ),
-        );
-      } else {
-        final thinking = msg['thinking'] as String?;
-        if (showThinking && thinking != null && thinking.trim().isNotEmpty) {
-          flushTools();
-          items.add(ThinkingCard(thinking: thinking));
-        }
-        if (tools != null) {
-          for (final t in tools) {
-            currentToolBatch.add(
-              ToolCallView.fromPayload(
-                Map<String, dynamic>.from(t as Map),
-                source: ToolCallSource.history,
-              ).atEntry(msg['id'] as String?),
-            );
-          }
-        }
-        if (text.isNotEmpty) {
-          flushTools();
-          final assistantEntry = msg['id'] as String?;
-          items.add(MessageBubble(
-            text: text,
-            align: Alignment.centerLeft,
-            markdown: true,
-            timestamp: timestamp,
-            onLongPress: (s == null || assistantEntry == null || assistantEntry.isEmpty)
-                ? null
-                : () => _confirmRewind(s, assistantEntry),
-          ));
-        }
-      }
-    }
-    // Live tool calls (not yet in history), interleaved with the speech
-    // segments the assistant finished before each tool call — the streamed
-    // text stays visible while tools run instead of vanishing.
-    final historyToolIds = <String>{};
-    for (final msg in history) {
-      final tools = msg['tools'] as List?;
-      if (tools != null) {
-        for (final t in tools) {
-          if (t is Map) {
-            final id = t['id'] as String? ?? t['callId'] as String?;
-            if (id != null && id.isNotEmpty) historyToolIds.add(id);
-          }
-        }
-      }
-    }
-    final liveTools = toolCalls.where((t) {
-      final id = t['callId'] as String? ?? t['id'] as String?;
-      return id == null || id.isEmpty || !historyToolIds.contains(id);
-    }).toList();
-
-    final isWorking = svc.statusFor(widget.sessionId) == 'working';
-    final segments = isWorking
-        ? svc.streamingSegmentsFor(widget.sessionId)
-        : const <StreamSegment>[];
-    // Speech goes where it happened, decided by the segment's own anchor rather
-    // than by a position in a list that shrinks as the turn is recorded. See
-    // orderStreamAndTools: misplacing this was why cards and paragraphs traded
-    // places while a session streamed.
-    for (final step in orderStreamAndTools(
-      segments: segments,
-      liveTools: liveTools,
-      historyToolIds: historyToolIds,
-    )) {
-      if (step.isSpeech) {
-        flushTools();
-        items.add(MessageBubble(
-          text: step.speech!,
-          align: Alignment.centerLeft,
-          markdown: true,
-        ));
-      } else {
-        currentToolBatch.add(
-          ToolCallView.fromPayload(step.tool!, source: ToolCallSource.live),
-        );
-      }
-    }
-    flushTools();
-
-    if (showThinking &&
-        streamingThinking != null &&
-        streamingThinking.trim().isNotEmpty &&
-        isWorking) {
-      items.add(ThinkingCard(thinking: streamingThinking, isStreaming: true));
-    }
-    if (streaming != null && isWorking) {
-      items.add(StreamingBubble(text: streaming));
-    }
-    // Queued messages at the very end — reported by the server, not tracked
-    // locally. Image-only messages arrive as the server's '[image]' text.
-    // LONG-PRESS clears the queue: pi dequeues by text-match at message_start,
-    // so a message can get genuinely stuck in its steering/followUp queues;
-    // the server-side queue_clear drains pi's own queue (the honest fix).
-    // If a message has already begun processing and landed as the latest
-    // user entry in history, skip showing it as a queued duplicate.
-    final latestHistoryUser = history.lastWhere(
-      (m) => m['role'] == 'user',
-      orElse: () => const {},
-    );
-    final latestHistoryUserText =
-        (latestHistoryUser['text'] as String? ?? '').trim();
-    var skippedLatestUser = false;
-
-    // Texts this client sent and is still showing as outgoing bubbles — their
-    // bubble carries the queue state, so they are not drawn twice.
-    final outgoingTexts = {
-      for (final out in svc.outgoingFor(widget.sessionId)) out.text.trim(),
-    };
-    for (var queuedIndex = 0; queuedIndex < queued.length; queuedIndex++) {
-      final text = queued[queuedIndex];
-      final trimmedText = text.trim();
-      if (!skippedLatestUser &&
-          latestHistoryUserText.isNotEmpty &&
-          (trimmedText == latestHistoryUserText ||
-              (latestHistoryUserText == '[image]' &&
-                  (text.isEmpty || text == '[image]')))) {
-        skippedLatestUser = true;
-        continue;
-      }
-      // A queued message this client sent is rendered as ITS outgoing bubble
-      // (with the queue state), so it is not drawn twice.
-      if (outgoingTexts.contains(trimmedText) ||
-          (trimmedText == '[image]' && outgoingTexts.contains(''))) {
-        continue;
-      }
-      final localImgs = _pendingImagesByText[text] ?? const <PendingImage>[];
-      final serverImgs =
-          s?.pendingImagesByText[text] ?? const <PendingImage>[];
-      final pendingImgs = localImgs.isNotEmpty ? localImgs : serverImgs;
-      final isSteering = (s?.isWorking == true) && (s?.pendingSteering.any((st) => st.trim() == trimmedText) ?? false);
-      void openQueuedOptions() {
-        if (s == null) return;
-        showQueuedMessageOptions(
-          context: context,
-          svc: svc,
-          session: s,
-          text: text,
-          index: queuedIndex,
-          pendingImgs: pendingImgs,
-          onEdit: (editedText, restoredImgs) {
-            _pendingImagesByText.remove(text);
-            if (mounted) {
-              setState(() {
-                _input.text = editedText;
-                if (restoredImgs.isNotEmpty) {
-                  _attachedImages.addAll(restoredImgs);
-                }
-              });
+    return buildChatItems(
+      context: context,
+      sessionId: widget.sessionId,
+      session: s,
+      svc: svc,
+      prefs: prefs,
+      history: history,
+      streaming: streaming,
+      streamingThinking: streamingThinking,
+      toolCalls: toolCalls,
+      loadingOlder: _loadingOlder,
+      onLoadOlder: _loadOlderHistory,
+      pendingImagesByText: _pendingImagesByText,
+      onRewindRestore: (rewoundText, restoredImgs) {
+        if (mounted) {
+          setState(() {
+            _input.text = rewoundText;
+            if (restoredImgs.isNotEmpty) {
+              _attachedImages.addAll(restoredImgs);
             }
-          },
-          onDelete: () {
-            _pendingImagesByText.remove(text);
-          },
-        );
-      }
-
-      items.add(
-        MessageBubble(
-          text: text,
-          align: Alignment.centerRight,
-          background: Colors.orange.withAlpha(40),
-          queued: true,
-          steering: isSteering,
-          images: pendingImgs,
-          onTap: (s == null) ? null : openQueuedOptions,
-          onSecondaryTap: (s == null) ? null : openQueuedOptions,
-          onLongPress: (s == null) ? null : openQueuedOptions,
-        ),
-      );
-    }
-    // Locally-sent messages with no confirmed landing yet. They are shown with a
-    // sending/delivered state so a send can never silently vanish — including in
-    // the window where pi has dequeued the message but history has not arrived.
-    // A message the server already reports as queued keeps ONE bubble (the
-    // outgoing one, labelled), never two.
-    final queuedTexts = {
-      for (final text in queued) text.trim(),
-    };
-    final sendingNow = svc.wsConnected;
-    for (final out in svc.outgoingFor(widget.sessionId)) {
-      final delivered = queuedTexts.contains(out.text.trim()) ||
-          (out.text.trim().isEmpty && queuedTexts.contains('[image]'));
-      // Keep the steer/follow-up distinction the sender chose: it says WHEN pi
-      // delivers it (end of step vs end of turn), which "queued" does not.
-      final steering = s?.pendingSteering.any((st) => st.trim() == out.text.trim()) ?? out.steer;
-      final status = sendStatusFor(
-        connected: sendingNow,
-        queuedSeen: delivered || out.queuedSeen,
-        steer: steering,
-        failure: out.failure,
-      );
-      // An unconfirmed send can be discarded or retried: waiting is not the
-      // only answer to "sending…", and a message stuck in a dead socket must be
-      // something the user can end.
-      void openSendOptions() {
-        if (s == null) return;
-        showOutgoingSendOptions(
-          context: context,
-          svc: svc,
-          session: s,
-          message: out,
-        );
-      }
-
-      items.add(
-        MessageBubble(
-          text: out.text.isEmpty ? '[image]' : out.text,
-          align: Alignment.centerRight,
-          background: Colors.blueGrey.withAlpha(30),
-          images: _pendingImagesByText[out.text] ?? const <PendingImage>[],
-          statusIcon: status.icon,
-          statusLabel: status.label,
-          onTap: (s == null) ? null : openSendOptions,
-          onLongPress: (s == null) ? null : openSendOptions,
-        ),
-      );
-    }
-    // Nested scrollables (expanded tool-output blocks) absorb the drag until
-    // they hit their edge; from there the leftover overscroll transfers to the
-    // chat list so the finger never gets stuck at the block's boundary.
-    return items;
+          });
+        }
+      },
+      onConfirmRewind: (entryId) {
+        if (s != null) _confirmRewind(s, entryId);
+      },
+      onEditQueued: (text, editedText, restoredImgs) {
+        _pendingImagesByText.remove(text);
+        if (mounted) {
+          setState(() {
+            _input.text = editedText;
+            if (restoredImgs.isNotEmpty) {
+              _attachedImages.addAll(restoredImgs);
+            }
+          });
+        }
+      },
+      onDeleteQueued: (text) {
+        _pendingImagesByText.remove(text);
+      },
+    );
   }
 
   /// Moves the chat list by an inner scrollable's leftover overscroll.
@@ -963,24 +652,6 @@ class _ChatScreenState extends State<ChatScreen> {
     if (target == position.pixels) return false;
     _scroll.jumpTo(target);
     return true;
-  }
-
-  Widget _toolCallCard(ToolCallView tool) {
-    final s = _session(context.read<AgentService>());
-    final entry = tool.entryId;
-    return ToolCallCard(
-      key: ValueKey('tool-${entry ?? tool.name}-${tool.timestamp ?? 0}'),
-      name: tool.name,
-      args: tool.args,
-      result: tool.result,
-      images: tool.images,
-      isError: tool.isError,
-      running: tool.running,
-      timestamp: tool.timestamp,
-      onLongPress: (s == null || entry == null || entry.isEmpty)
-          ? null
-          : () => _confirmRewind(s, entry),
-    );
   }
 
   /// Rewind the branch to [entryId] after saying what that costs.

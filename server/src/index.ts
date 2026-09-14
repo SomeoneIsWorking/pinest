@@ -1,7 +1,13 @@
 import type { HttpHistoryRunner } from "./http-api.ts";
 import { offerDirectTransport } from "./direct-transport.ts";
 import { createSessionLifecycle } from "./session-lifecycle.ts";
-import { listModels as queryModels, sessionHistory as querySessionHistory } from "./pi-context-queries.ts";
+import {
+  checkPathCommand,
+  createFolderCommand,
+  createHostInteractiveCommandHandler,
+  currentHostThinkingLevel,
+} from "./host-interactive-commands.ts";
+import { sessionHistory as querySessionHistory, listModels as queryModels } from "./pi-context-queries.ts";
 import { createP2PSignaling } from "./p2p-signaling.ts";
 import debug from "./log.ts";
 /**
@@ -208,11 +214,6 @@ function captureUi(ctx: unknown): void {
 /** Best-effort TUI notice from anywhere in the module (no ctx needed). */
 function uiNotify(message: string, level: "info" | "warning" | "error" = "info"): void {
   try { _ui?.notify?.(message, level); } catch { /* the footer is best-effort */ }
-}
-
-/** True if `p` exists and is a directory (stat-safe). */
-function statSyncSafe(p: string): boolean {
-  try { return statSync(p).isDirectory(); } catch { return false; }
 }
 
 let _tunnelStarting = false;
@@ -484,7 +485,7 @@ async function bootstrap(): Promise<void> {
   // here flips the app's display ("default" → "off") on every hot reload.
   // NOTE: ExtensionContext has no getThinkingLevel(); the level lives on
   // _ctx.thinkingLevel (currentHostThinkingLevel).
-  const initThinking = reportThinkingLevel(initModel, currentHostThinkingLevel());
+  const initThinking = reportThinkingLevel(initModel, currentHostThinkingLevel(_ctx, _pi));
   const initCtx = hostContext.contextUsage();
   const hostPiSessionPath: string | null = (_ctx?.sessionManager as any)?.getSessionFile?.()
     ?? (_ctx?.sessionManager as any)?.sessionFile ?? null;
@@ -648,7 +649,8 @@ async function dispatchCommand(command: ClientCommand): Promise<void> {
       sessionList: () => broadcast({ type: "session_list", sessions: mergedRegistryRows() }),
       resume: (cmd) => sessions.resume(cmd), rename: (cmd) => sessions.rename(cmd),
       select: (cmd) => sessions.select(cmd), delete: (cmd) => sessions.remove(cmd),
-      pathCheck: checkPath, folderCreate: createFolder,
+      pathCheck: (cmd) => checkPathCommand(cmd, broadcast),
+      folderCreate: (cmd) => createFolderCommand(cmd, broadcast),
       compactThreshold: (cmd) => sessions.setCompactThreshold(cmd),
       imageBudget: (cmd) => uiNotify(setImageBytesLimit(cmd.maxBytes)),
       jobsList: (cmd) => handleJobCommand(cmd, _supervisor?.bgManager ?? _bgManager, broadcast),
@@ -681,171 +683,6 @@ async function dispatchCommand(command: ClientCommand): Promise<void> {
     });
 }
 
-async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {
-  switch (cmd.type) {
-    case "user_message": {
-      const trimmed = cmd.text.trim();
-      if (trimmed === "/reload" || trimmed === "/pinest-reload") {
-        const r = queueReload(_pi, _ctx);
-        if (!r.ok) broadcast({ type: "error", message: `[remote-code] ${r.message}` });
-        else broadcast({ type: "notice", sessionId: _sessionId, message: "[pinest] reloading runtime…" });
-        break;
-      }
-      _currentTurnId = cmd.id || randomUUID();
-      const wasWorking = _status === "working";
-      if (!wasWorking) {
-        segmenter.reset();
-        broadcast({ type: "stream", sessionId: _sessionId, text: "", segments: [], status: "working" });
-      }
-      _status = "working";
-      _publisher.upsert(_sessionId, { status: "working", streamingText: "" });
-      // deliverAs: "steer" queues behind the current assistant segment's tool
-      // calls and is delivered before the next LLM call; "followUp" waits for
-      // the whole agent turn to finish. When idle both behave identically.
-      const deliverAs = cmd.deliverAs === "followUp" ? "followUp" : "steer";
-      const images = cmd.images ?? [];
-      // Image-only messages need a text part that also appears in session
-      // history (the client clears its "queued" badge by matching text).
-      const text = cmd.text.trim().length === 0 ? "[image]" : cmd.text;
-      _pending.track(text, images, wasWorking && deliverAs === "steer");
-      _publisher.upsert(_sessionId, _pending.snapshot());
-      _submitter?.submit(text, images, deliverAs);
-      break;
-    }
-    case "cancel": {
-      // Park queued prompts instead of destroying them: stopping the run
-      // must drain the agent's queue, but the user's text comes back to
-      // the composer via queue_parked rather than vanishing.
-      const parked = _pending.park();
-      _publisher.upsert(_sessionId, HostPendingQueue.emptySnapshot());
-      // NOTE: ExtensionAPI has no abort(); it lives on ExtensionContext.
-      // (pinest used _pi?.abort?.() — a silent no-op on the host.)
-      (_ctx as any)?.abort?.();
-      if (parked.length > 0) {
-        broadcast({ type: "queue_parked", sessionId: _sessionId, messages: parked });
-      }
-      break;
-    }
-    case "model_set":
-      await setModel(cmd);
-      break;
-    case "thinking_set": {
-      const r = resolveThinkingLevel((_ctx as any)?.model, cmd.level);
-      _pi?.setThinkingLevel?.(r.set as any);
-      _publisher.upsert(_sessionId, { thinkingLevel: r.report });
-      break;
-    }
-    case "session_compact": {
-      hostContext.compact();
-      break;
-    }
-    case "session_new": {
-      await hostContext.clear();
-      break;
-    }
-    case "list_models":
-      void queryModels(_ctx).then((models) => broadcast({ type: "models", sessionId: _sessionId, models }));
-      break;
-    case "get_history": {
-      const paged = pageHistory(await querySessionHistory(_ctx), { limit: cmd.limit, cursor: cmd.cursor });
-      broadcast({ type: "history", sessionId: _sessionId, ...paged });
-      break;
-    }
-    case "get_image": {
-      // Images are fetched on demand, never shipped in history.
-      const found = lookupImage(cmd.imageId);
-      broadcast(
-        found
-          ? { type: "image", imageId: cmd.imageId, mimeType: found.mimeType, data: found.data }
-          : { type: "image_missing", imageId: cmd.imageId, reason: "the server no longer holds this image" },
-      );
-      break;
-    }
-    case "queue_clear":
-      clearSessionQueue(piQueueSession(_ctx, _pi));
-      _pending.clear();
-      _publisher.upsert(_sessionId, HostPendingQueue.emptySnapshot());
-      break;
-    case "queue_delete": {
-      // Delete ONE entry by its position in our own ordered queue, then make pi
-      // hold exactly that queue. The drained texts are not the source of truth
-      // for what remains: rebuilding from them lost queue order and the steering
-      // flags, and matching by text removed every duplicate of the message.
-      if (!_pending.deleteAt(cmd.index)) {
-        broadcast({
-          type: "error",
-          sessionId: _sessionId,
-          message: "no queued message at that position",
-        });
-        break;
-      }
-      syncSessionQueue(piQueueSession(_ctx, _pi), _pending.entries());
-      _publisher.upsert(_sessionId, _pending.snapshot());
-      break;
-    }
-    case "session_tree_get": {
-      try {
-        const sm = (_ctx as any)?.sessionManager ?? (_pi as any)?.sessionManager;
-        const tree = sm?.getTree?.() ?? [];
-        const leafId = sm?.getLeafId?.() ?? null;
-        broadcast({
-          type: "session_tree",
-          cmdId: cmd.id,
-          sessionId: _sessionId,
-          tree,
-          leafId,
-        });
-      } catch (e) {
-        broadcast({
-          type: "error",
-          sessionId: _sessionId,
-          message: `Failed to get session tree: ${(e as Error).message || e}`,
-        });
-      }
-      break;
-    }
-    case "session_tree_navigate":
-    case "session_rewind": {
-      try {
-        await hostContext.navigateTree(cmd.entryId, {
-          summarize: cmd.type === "session_tree_navigate" ? cmd.summarize : false,
-          isRewind: cmd.type === "session_rewind",
-          cmdId: cmd.id,
-        });
-      } catch (e) {
-        broadcast({
-          type: "error",
-          sessionId: _sessionId,
-          message: `Failed to ${cmd.type === "session_rewind" ? "rewind" : "navigate tree"}: ${(e as Error).message || e}`,
-        });
-      }
-      break;
-    }
-    case "list_paths": {
-      // Resolve ~ and relative prefixes against the spawn dialog's starting dir.
-      const paths = listPaths(cmd.prefix || "");
-      broadcast({ type: "paths", cmdId: cmd.id, paths });
-      break;
-    }
-  }
-}
-
-function checkPath(cmd: Extract<ClientCommand, { type: "path_check" }>): void {
-  const path = resolvePathInput(cmd.path);
-  const isDirectory = statSyncSafe(path);
-  broadcast({ type: "path_check", cmdId: cmd.id, exists: existsSync(path), isDirectory });
-}
-
-function createFolder(cmd: Extract<ClientCommand, { type: "folder_create" }>): void {
-  const path = resolvePathInput(cmd.path);
-  try {
-    mkdirSync(path, { recursive: true });
-    broadcast({ type: "folder_created", cmdId: cmd.id, path });
-  } catch (e) {
-    broadcast({ type: "folder_created", cmdId: cmd.id, error: (e as Error).message });
-  }
-}
-
 const hostContext = new HostContextController({
   getContext: () => _ctx as any,
   setContext: (ctx) => { _ctx = ctx as unknown as ExtensionContext; },
@@ -862,36 +699,24 @@ const hostContext = new HostContextController({
   broadcast,
 });
 
-async function setModel(cmd: Extract<ClientCommand, { type: "model_set" }>): Promise<void> {
-  const reg = (_ctx as any)?.modelRegistry;
-  await (reg?.runtime?.getAvailable?.() ?? reg?.refresh?.())?.catch?.(() => undefined);
-  const m = reg?.find?.(cmd.provider, cmd.modelId);
-  if (!m) throw new Error(`model ${cmd.provider}/${cmd.modelId} not found`);
-  // ExtensionAPI.setModel resolves boolean — false means the host did NOT
-  // switch. Trusting the request instead of the result once shipped a badge
-  // that named GLM while the session stayed on kimi (262k window). Verify.
-  const ok = await _pi?.setModel?.(m);
-  if (ok === false) throw new Error(`host refused switch to ${cmd.provider}/${cmd.modelId}`);
-  try {
-    (_ctx as any)?.settingsManager?.setDefaultModelAndProvider?.(cmd.provider, cmd.modelId);
-  } catch {
-    // best-effort persistence
-  }
-  _publisher.upsert(_sessionId, {
-    model: `${cmd.provider}/${cmd.modelId}`,
-    modelName: m.name,
-    contextUsage: hostContext.contextUsage(),
-    thinkingLevel: reportThinkingLevel(m, currentHostThinkingLevel()),
-  });
-}
-
-function currentHostThinkingLevel(): string | undefined {
-  try {
-    return ((_ctx as any)?.thinkingLevel ?? (_pi as any)?.thinkingLevel) || undefined;
-  } catch {
-    return undefined;
-  }
-}
+const handleInteractiveCommand = createHostInteractiveCommandHandler({
+  pi: () => _pi,
+  context: () => _ctx,
+  sessionId: () => _sessionId,
+  status: () => _status,
+  setStatus: (s) => { _status = s; },
+  setCurrentTurnId: (id) => { _currentTurnId = id; },
+  segmenter,
+  pending: _pending,
+  submitter: () => _submitter,
+  publisher: _publisher,
+  broadcast,
+  hostContext,
+  listPaths,
+  queueReload,
+  queryModels,
+  querySessionHistory,
+});
 
 // ── Bridge Pi events → WebSocket ────────────────────────────────────────────
 function bridge(pi: ExtensionAPI): void {

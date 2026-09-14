@@ -11,13 +11,14 @@ import 'direct_link.dart';
 import 'control_channel.dart';
 import '../logic/direct_offer.dart';
 import 'server_http.dart';
-import 'session_cache.dart';
+import 'session_store.dart';
 import 'user_preferences.dart';
+import '../models/server_notice.dart';
 import '../models/session.dart';
 import '../models/session_goal.dart';
+export '../models/server_notice.dart';
 export '../models/session.dart' show PendingImage;
 import '../logic/endpoint_choice.dart';
-import '../logic/history_merge.dart';
 import '../models/chat_item.dart';
 import '../models/stream_segment.dart';
 import '../models/session_tree.dart';
@@ -31,28 +32,20 @@ import '../models/background_job.dart';
 class AgentService extends ChangeNotifier {
   final _db = FirebaseFirestore.instance;
   final _requests = CorrelatedRequestBroker();
-  final _cache = SessionCache();
+  final _store = SessionStore();
   AuthService? _auth;
   String? _boundUid;
   StreamSubscription? _urlSub;
   ControlChannel? _ws;
 
-  bool _online = false;
-  String _hostname = '';
-  String? _activeSessionId;
   String? _tunnelUrl;
   String? _tunnelProvider;
-  final List<Session> _sessions = [];
 
-  /// Durable registry rows (sessions that exist on disk, running or not).
-  final List<Session> _registry = [];
-
-  bool get connected => _online;
-  bool get anyMachineOnline => _online;
-  String get hostname => _hostname;
-  String? get activeSessionId => _activeSessionId;
-  String? _homePath;
-  String? get homePath => _homePath;
+  bool get connected => _store.online;
+  bool get anyMachineOnline => _store.online;
+  String get hostname => _store.hostname;
+  String? get activeSessionId => _store.activeSessionId;
+  String? get homePath => _store.homePath;
   String? get tunnelUrl => _tunnelUrl;
   String? get tunnelProvider => _tunnelProvider;
   String? get uid => _auth?.user?.uid;
@@ -106,52 +99,31 @@ class AgentService extends ChangeNotifier {
       StreamController<ServerNotice>.broadcast();
   Stream<ServerNotice> get notices => _notices.stream;
 
-  /// Tracks previous session status to detect working -> idle completions.
-  final Map<String, String> _sessionStatusHistory = {};
   UserPreferences? _preferences;
 
   void setPreferences(UserPreferences prefs) {
     _preferences = prefs;
   }
 
-  List<Session> get sessions => List.unmodifiable(_sessions);
-  List<Session> get registrySessions => List.unmodifiable(_registry);
-
-  /// Registry rows that are NOT currently loaded in the host process.
-  List<Session> get resumableSessions => List.unmodifiable(
-    _registry.where((r) => !_sessions.any((s) => s.id == r.id)),
-  );
-  String statusFor(String id) =>
-      _sessions.where((x) => x.id == id).firstOrNull?.status ?? 'idle';
-  String? streamingFor(String id) {
-    if (statusFor(id) != 'working') return null;
-    final text = _cache.streamingText[id];
-    return (text != null && text.isNotEmpty) ? text : null;
-  }
-
-  String? streamingThinkingFor(String id) {
-    if (statusFor(id) != 'working') return null;
-    final thinking = _cache.streamingThinking[id];
-    return (thinking != null && thinking.isNotEmpty) ? thinking : null;
-  }
-
+  List<Session> get sessions => List.unmodifiable(_store.sessions);
+  List<Session> get registrySessions => List.unmodifiable(_store.registry);
+  List<Session> get resumableSessions => _store.resumableSessions;
+  String statusFor(String id) => _store.statusFor(id);
+  String? streamingFor(String id) => _store.streamingFor(id);
+  String? streamingThinkingFor(String id) => _store.streamingThinkingFor(id);
   List<StreamSegment> streamingSegmentsFor(String id) =>
-      _cache.streamingSegments[id] ?? const [];
+      _store.streamingSegmentsFor(id);
 
-  List<PinestModel> modelsFor(String id) => _cache.models[id] ?? [];
-  List<Map<String, dynamic>> historyFor(String id) => _cache.history[id] ?? [];
-  bool historyHasMore(String id) => _cache.historyHasMore[id] ?? false;
-  int historyCursor(String id) => _cache.historyCursor[id] ?? 0;
+  List<PinestModel> modelsFor(String id) => _store.modelsFor(id);
+  List<Map<String, dynamic>> historyFor(String id) => _store.historyFor(id);
+  bool historyHasMore(String id) => _store.historyHasMore(id);
+  int historyCursor(String id) => _store.historyCursor(id);
   List<Map<String, dynamic>> toolCallsFor(String id) =>
-      _cache.toolCalls[id] ?? [];
+      _store.toolCallsFor(id);
 
-  /// Messages the server parked when a run was stopped (undelivered steers
-  /// and follow-ups), keyed by session. The chat screen restores them into
-  /// the composer and then calls [clearParked].
-  final Map<String, List<Map<String, dynamic>>> _parked = {};
-  List<Map<String, dynamic>> parkedFor(String id) => _parked[id] ?? const [];
+  List<Map<String, dynamic>> parkedFor(String id) => _store.parkedFor(id);
   void clearParked(String id) {
-    if (_parked.remove(id) != null) notifyListeners();
+    if (_store.clearParked(id)) notifyListeners();
   }
 
   void updateAuth(AuthService auth) {
@@ -203,7 +175,6 @@ class AgentService extends ChangeNotifier {
     _ws = null;
     socket?.close();
     _connected = false;
-    _online = false;
     _requests.disconnect();
 
     if (forgetEndpoint) _lastEndpoint = null;
@@ -211,15 +182,10 @@ class AgentService extends ChangeNotifier {
       // A different account (or a fresh start) must not inherit an offer it
       // already answered, nor the claim that the previous machine is direct.
       _direct.reset();
-      _hostname = '';
-      _activeSessionId = null;
-      _homePath = null;
       _tunnelUrl = null;
       _tunnelProvider = null;
       _error = null;
-      _sessions.clear();
-      _registry.clear();
-      _cache.clear();
+      _store.clear();
       _outbox.clear();
       _reconnectDelay = 2;
     }
@@ -442,7 +408,7 @@ class AgentService extends ChangeNotifier {
   void _reflushUnconfirmed() {
     if (_outbox.isNotEmpty) return;      // a replay is already waiting to go out
     var restored = 0;
-    for (final session in _sessions) {
+    for (final session in _store.sessions) {
       for (final msg in _outgoing.forSession(session.id)) {
         if (msg.queuedSeen || msg.failure != null) continue;
         _outbox.add(msg.command);
@@ -479,212 +445,45 @@ class AgentService extends ChangeNotifier {
         break;
       case 'state':
         _httpKey = (msg['httpKey'] as String?) ?? _httpKey;
-        _goal = SessionGoal.fromJson(msg['goal']);
         _localEndpoint = secureLoopbackUri(msg['localUrl']);
-        _online = msg['online'] ?? false;
-        _hostname = msg['hostname'] ?? 'machine';
-        _activeSessionId = msg['activeSessionId'] as String?;
-        _homePath = msg['homePath'] as String?;
         _tunnelUrl = msg['tunnelUrl'] as String?;
         _tunnelProvider = msg['tunnelProvider'] as String?;
-        _sessions.clear();
-        for (final raw in (msg['sessions'] as List? ?? [])) {
-          final m = Map<String, dynamic>.from(raw as Map);
-          final session = Session.fromLiveMap(m);
-          if (session.id.isEmpty) continue;
-          _sessions.add(session);
-          final id = session.id;
-
-          // Sticky: the queue drains at message_start, history arrives at
-          // message_end, and the gap must not read as "not sent yet".
-          _outgoing.markQueued(id, session.pendingMessages);
-
-          final prevStatus = _sessionStatusHistory[id];
-          if (prevStatus == 'working' && session.status == 'idle') {
-            _notifySessionFinished(session);
-          }
-          _sessionStatusHistory[id] = session.status;
-
-          final st = m['streamingText'] as String?;
-          if (st != null && st.isNotEmpty) {
-            _cache.streamingText[id] = st;
-          } else {
-            _cache.streamingText.remove(id);
-          }
-          final sth = m['streamingThinking'] as String?;
-          if (sth != null && sth.isNotEmpty) {
-            _cache.streamingThinking[id] = sth;
-          } else {
-            _cache.streamingThinking.remove(id);
-          }
-        }
-        // Durable registry rows (may include sessions not running now)
-        _registry.clear();
-        for (final raw in (msg['registry'] as List? ?? [])) {
-          final m = Map<String, dynamic>.from(raw as Map);
-          final session = Session.fromRegistryMap(m);
-          if (session.id.isEmpty) continue;
-          _registry.add(session);
-        }
-        // Now that the server has said what it holds, a send stranded by a lost
-        // socket can be honestly re-offered (or shown as not delivered).
+        _store.applyState(
+          msg,
+          outgoing: _outgoing,
+          onSessionFinished: _notifySessionFinished,
+        );
         if (_resyncNeeded) {
           _resyncNeeded = false;
           _reflushUnconfirmed();
         }
         break;
       case 'image':
-        // The bytes for one history image reference.
         images.received(
           msg['imageId'] as String? ?? '',
           msg['data'] as String? ?? '',
         );
-        notifyListeners();
         break;
       case 'image_missing':
         images.missing(
           msg['imageId'] as String? ?? '',
           msg['reason'] as String? ?? 'unavailable',
         );
-        notifyListeners();
         break;
       case 'session_deleted':
-        final sid = msg['sessionId'] as String? ?? '';
-        _sessions.removeWhere((s) => s.id == sid);
-        _registry.removeWhere((s) => s.id == sid);
-        _cache.evict(sid);
+        _store.applySessionDeleted(msg['sessionId'] as String? ?? '');
         break;
       case 'history':
-        final sid = msg['sessionId'] as String? ?? '';
-        final page = msg['history'] as List? ?? [];
-        final mode = msg['mode'] as String? ?? 'replace';
-        final cursor = (msg['cursor'] as num?)?.toInt() ?? 0;
-        final reset = msg['reset'] == true;
-        _cache.historyHasMore[sid] = msg['hasMore'] as bool? ?? false;
-        _cache.historyCursor[sid] = cursor;
-        _cache.history[sid] = mergeHistoryPage(
-          existing: _cache.history[sid] ?? const [],
-          page: page,
-          mode: mode,
-          cursor: cursor,
-          reset: reset,
-        );
-        // Anything the server now reports in history is confirmed.
-        final confirmedHistory =
-            _cache.history[sid] ?? const <Map<String, dynamic>>[];
-        _outgoing.reconcile(
-          sid,
-          historyTexts: [
-            for (final item in confirmedHistory)
-              if (item['role'] == 'user') (item['text'] as String?) ?? '',
-          ],
-          parkedTexts: [
-            for (final m in _parked[sid] ?? const <Map<String, dynamic>>[])
-              (m['text'] as String?) ?? '',
-          ],
-        );
-        unawaited(_outgoing.persist());
-        // History carries the tool calls inline — only clear live tool calls
-        // when the session is idle and we received a replacement page. Loading
-        // older history or receiving updates during a live run must never wipe
-        // live tool calls.
-        if (mode != 'older') {
-          if (statusFor(sid) != 'working') {
-            _cache.toolCalls.remove(sid);
-            _cache.streamingSegments.remove(sid);
-            _cache.streamingText.remove(sid);
-            _cache.streamingThinking.remove(sid);
-          } else {
-            // Prune tool calls that have already landed in history.
-            final historyCallIds = <String>{};
-            for (final item in _cache.history[sid] ?? const <Map<String, dynamic>>[]) {
-              final tools = item['tools'] as List?;
-              if (tools != null) {
-                for (final t in tools) {
-                  if (t is Map) {
-                    final id = t['id'] as String? ?? t['callId'] as String?;
-                    if (id != null && id.isNotEmpty) historyCallIds.add(id);
-                  }
-                }
-              }
-            }
-            if (historyCallIds.isNotEmpty && _cache.toolCalls.containsKey(sid)) {
-              _cache.toolCalls[sid]!.removeWhere((t) {
-                final id = t['callId'] as String? ?? t['id'] as String?;
-                return id != null && historyCallIds.contains(id);
-              });
-            }
-          }
-        }
-        // A cleared session (empty replace page at cursor 0) has no thread at
-        // all: a leftover streaming bubble would be the only thing on screen.
-        if (mode != 'older' && page.isEmpty && cursor == 0) {
-          _cache.streamingText.remove(sid);
-          _cache.streamingSegments.remove(sid);
-          _cache.streamingThinking.remove(sid);
-        }
-        notifyListeners();
+        _store.applyHistory(msg, outgoing: _outgoing);
         break;
       case 'stream':
-        final sid = msg['sessionId'] as String? ?? '';
-        final text = msg['text'] as String? ?? '';
-        if (text.isNotEmpty) {
-          _cache.streamingText[sid] = text;
-        } else {
-          _cache.streamingText.remove(sid);
-        }
-        final thinking = msg['thinking'] as String? ?? '';
-        if (thinking.isNotEmpty) {
-          _cache.streamingThinking[sid] = thinking;
-        } else {
-          _cache.streamingThinking.remove(sid);
-        }
-        final segments = <StreamSegment>[];
-        for (final raw in (msg['segments'] as List? ?? const [])) {
-          if (raw is String) {
-            // A bare string carries no anchor; it renders after the batch
-            // rather than between two cards it cannot name.
-            segments.add(StreamSegment(text: raw, afterToolId: ''));
-          } else if (raw is Map) {
-            segments.add(StreamSegment.fromJson(Map<String, dynamic>.from(raw)));
-          }
-        }
-        if (segments.isNotEmpty) {
-          _cache.streamingSegments[sid] = segments;
-        } else {
-          _cache.streamingSegments.remove(sid);
-        }
+        _store.applyStream(msg);
         break;
       case 'tool':
-        final sid = msg['sessionId'] as String? ?? '';
-        final tool = Map<String, dynamic>.from(msg['tool'] as Map);
-        final callId = tool['callId'] as String? ?? '';
-        _cache.toolCalls.putIfAbsent(sid, () => []);
-        final existingIdx = _cache.toolCalls[sid]!.indexWhere(
-          (t) => t['callId'] == callId,
-        );
-        if (existingIdx >= 0) {
-          // MERGE, never replace. A tool call arrives as several messages:
-          // start carries `args`, end carries `result`/`isError` and NO args
-          // (pi's ToolExecutionEndEvent has no args field). Replacing wiped
-          // the command off every finished card — that is why completed bash
-          // cards read as a bare "bash".
-          _cache.toolCalls[sid]![existingIdx] = {
-            ..._cache.toolCalls[sid]![existingIdx],
-            ...tool,
-          };
-        } else {
-          _cache.toolCalls[sid]!.add(tool);
-        }
+        _store.applyTool(msg);
         break;
       case 'models':
-        final sid = msg['sessionId'] as String? ?? '';
-        final models = msg['models'] as List? ?? [];
-        _cache.models[sid] = models
-            .map(
-              (x) => PinestModel.fromMap(Map<String, dynamic>.from(x as Map)),
-            )
-            .toList();
+        _store.applyModels(msg);
         break;
       case 'paths':
       case 'path_check':
@@ -692,94 +491,44 @@ class AgentService extends ChangeNotifier {
         final cmdId = msg['cmdId'] as String? ?? '';
         _requests.complete(cmdId, msg);
         break;
-      case 'session_tree': {
-        final sid = msg['sessionId'] as String? ?? '';
-        final rawTree = msg['tree'] as List? ?? const [];
-        final tree = rawTree
-            .whereType<Map<String, dynamic>>()
-            .map(SessionTreeNode.fromJson)
-            .toList();
-        _trees[sid] = tree;
-        _leafIds[sid] = msg['leafId'] as String?;
+      case 'session_tree':
+        _store.applySessionTree(msg);
         final cmdId = msg['cmdId'] as String? ?? '';
         if (cmdId.isNotEmpty) {
           _requests.complete(cmdId, msg);
         }
         break;
-      }
-      case 'session_rewound': {
+      case 'session_rewound':
         final cmdId = msg['cmdId'] as String? ?? '';
         if (cmdId.isNotEmpty) {
           _requests.complete(cmdId, msg);
         }
         break;
-      }
-      case 'queue_parked': {
-        final sid = msg['sessionId'] as String? ?? '';
-        final raw = msg['messages'] as List? ?? const [];
-        _parked[sid] = [
-          for (final m in raw)
-            {
-              'text': ((m as Map)['text'] as String?) ?? '',
-              'images': [
-                for (final img in (m['images'] as List? ?? const []))
-                  Map<String, dynamic>.from(img as Map),
-              ],
-            },
-        ];
-        // Parked messages returned to the composer — they are no longer sends.
-        _outgoing.reconcile(
-          sid,
-          parkedTexts: [for (final m in _parked[sid]!) m['text'] as String],
-        );
-        unawaited(_outgoing.persist());
-        notifyListeners();
+      case 'queue_parked':
+        _store.applyQueueParked(msg, outgoing: _outgoing);
         break;
-      }
-      case 'jobs_list': {
-        final sid = msg['sessionId'] as String? ?? '';
-        final rawJobs = (msg['jobs'] as List? ?? const []);
-        _jobs[sid] = rawJobs
-            .whereType<Map>()
-            .map((j) => BackgroundJob.fromJson(Map<String, dynamic>.from(j)))
-            .toList();
-        notifyListeners();
+      case 'jobs_list':
+        _store.applyJobsList(msg);
         break;
-      }
-      case 'job_update': {
-        final sid = msg['sessionId'] as String? ?? '';
-        final rawJob = msg['job'] as Map?;
-        if (rawJob != null) {
-          final job = BackgroundJob.fromJson(Map<String, dynamic>.from(rawJob));
-          final list = _jobs.putIfAbsent(sid, () => []);
-          final idx = list.indexWhere((j) => j.id == job.id);
-          if (idx >= 0) {
-            list[idx] = job;
-          } else {
-            list.insert(0, job);
-          }
-          notifyListeners();
-        }
+      case 'job_update':
+        _store.applyJobUpdate(msg);
         break;
-      }
-      case 'job_logs': {
+      case 'job_logs':
         final cmdId = msg['cmdId'] as String? ?? '';
         if (cmdId.isNotEmpty) {
           _requests.complete(cmdId, msg);
         }
         break;
-      }
       case 'error':
         _error = msg['message'] as String?;
         if (_error != null && _error!.isNotEmpty) {
           final sid = msg['sessionId'] as String?;
           if (sid != null) {
-            // A refused command means the send it belongs to did not happen.
             _outgoing.markFailed(sid, _error!);
             unawaited(_outgoing.persist());
           }
           final sessionName = sid != null
-              ? _sessions.where((s) => s.id == sid).firstOrNull?.name
+              ? _store.sessions.where((s) => s.id == sid).firstOrNull?.name
               : null;
           final prefix = sessionName != null && sessionName.isNotEmpty
               ? '$sessionName: '
@@ -974,10 +723,10 @@ class AgentService extends ChangeNotifier {
     bool steer = true,
   }) {
     if (statusFor(s.id) != 'working') {
-      _cache.toolCalls.remove(s.id);
-      _cache.streamingSegments.remove(s.id);
-      _cache.streamingText.remove(s.id);
-      _cache.streamingThinking.remove(s.id);
+      _store.cache.toolCalls.remove(s.id);
+      _store.cache.streamingSegments.remove(s.id);
+      _store.cache.streamingText.remove(s.id);
+      _store.cache.streamingThinking.remove(s.id);
     }
     // The server tracks the queue, but the words are the user's: track them
     // locally too, so a send is VISIBLE while unconfirmed and survives a
@@ -1025,8 +774,7 @@ class AgentService extends ChangeNotifier {
   }
 
   /// The objective the agent is working toward, from the server's own state.
-  SessionGoal? get goal => _goal;
-  SessionGoal? _goal;
+  SessionGoal? get goal => _store.goal;
 
   /// State the objective to work toward. pi runs its own `/goal` command, so
   /// the terminal and the app share one wording and one behaviour.
@@ -1086,21 +834,12 @@ class AgentService extends ChangeNotifier {
   void deleteQueuedMessage(Session s, int index) =>
       _send({'type': 'queue_delete', 'sessionId': s.id, 'index': index});
 
-  final Map<String, List<SessionTreeNode>> _trees = {};
-  final Map<String, String?> _leafIds = {};
-
   List<SessionTreeNode> treeFor(String sessionId) =>
-      _trees[sessionId] ?? const [];
-  String? leafIdFor(String sessionId) => _leafIds[sessionId];
+      _store.treeFor(sessionId);
+  String? leafIdFor(String sessionId) => _store.leafIdFor(sessionId);
 
-  bool isMessageQueued(String sessionId, String text) {
-    final s = _sessions.cast<Session?>().firstWhere(
-      (it) => it?.id == sessionId,
-      orElse: () => null,
-    );
-    if (s == null) return false;
-    return s.pendingMessages.contains(text) || s.pendingSteering.contains(text);
-  }
+  bool isMessageQueued(String sessionId, String text) =>
+      _store.isMessageQueued(sessionId, text);
 
   Future<List<SessionTreeNode>> fetchSessionTree(Session s) =>
       _requests.request<List<SessionTreeNode>>(
@@ -1116,7 +855,7 @@ class AgentService extends ChangeNotifier {
               .map(SessionTreeNode.fromJson)
               .toList();
         },
-        fallback: _trees[s.id] ?? const [],
+        fallback: _store.treeFor(s.id),
         timeout: const Duration(seconds: 5),
       );
 
@@ -1167,16 +906,8 @@ class AgentService extends ChangeNotifier {
     'deleteHistory': deleteHistory,
   });
   void requestSessionList() => _send({'type': 'session_list'});
-  final Map<String, List<BackgroundJob>> _jobs = {};
 
-  List<BackgroundJob> jobsFor(String? sessionId) {
-    if (sessionId != null) {
-      final sessionJobs = _sessions.where((s) => s.id == sessionId).firstOrNull?.jobs;
-      if (sessionJobs != null && sessionJobs.isNotEmpty) return sessionJobs;
-      return _jobs[sessionId] ?? const [];
-    }
-    return _jobs.values.expand((x) => x).toList();
-  }
+  List<BackgroundJob> jobsFor(String? sessionId) => _store.jobsFor(sessionId);
 
   void requestJobs({String? sessionId}) => _send({
     'type': 'jobs_list',
@@ -1240,7 +971,7 @@ class AgentService extends ChangeNotifier {
   );
 
   String displayPath(String path) {
-    final home = _homePath;
+    final home = homePath;
     if (home == null) return path;
     if (path == home) return '~';
     if (path.startsWith('$home/')) return '~${path.substring(home.length)}';
@@ -1260,13 +991,4 @@ class AgentService extends ChangeNotifier {
     _notices.close();
     super.dispose();
   }
-}
-
-/// Manages a single WebSocket connection to the PiNest server.
-/// A one-shot, user-facing message from the server (see `AgentService.notices`).
-class ServerNotice {
-  final String message;
-  final bool isError;
-  final String? sessionId;
-  const ServerNotice(this.message, {this.isError = false, this.sessionId});
 }

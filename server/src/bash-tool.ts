@@ -1,7 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join, isAbsolute } from "node:path";
-import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { Type } from "typebox";
 import {
@@ -16,6 +15,25 @@ import {
 import type { BackgroundJobSummary } from "./protocol.ts";
 import { routeOrphanTask, type OrphanRoute } from "./bg-routing.ts";
 import debug from "./log.ts";
+import {
+  escapeXml,
+  stripAnsi,
+  killProcessTree,
+  ensureLogFile,
+  resolveLogDirectory,
+  formatTaskNotificationXml,
+  toJobSummary,
+} from "./process-util.ts";
+
+export {
+  escapeXml,
+  stripAnsi,
+  killProcessTree,
+  ensureLogFile,
+  resolveLogDirectory,
+  formatTaskNotificationXml,
+  toJobSummary,
+};
 
 export const DEFAULT_AUTO_BG_TIMEOUT_MS = 30_000;
 
@@ -57,129 +75,6 @@ export interface BackgroundTask {
    * mid-flight, and spent a turn on each re-establishing what was true now. */
   settledBy?: "exit" | "cancel";
   triggerOnCompletion?: boolean;
-}
-
-export function toJobSummary(task: BackgroundTask): BackgroundJobSummary {
-  return {
-    id: task.id,
-    name: task.name,
-    command: task.command,
-    cwd: task.cwd,
-    sessionId: task.sessionId,
-    pid: task.pid,
-    startedAt: task.startedAt,
-    finishedAt: task.finishedAt,
-    status: task.status,
-    exitCode: task.exitCode,
-    error: task.error,
-    logPath: task.logPath,
-    totalBytes: task.totalBytes,
-  };
-}
-
-export function escapeXml(str: string): string {
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
-}
-
-export function stripAnsi(str: string): string {
-  return str.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
-}
-
-export function killProcessTree(pid: number | undefined): void {
-  if (!pid) return;
-  try {
-    if (process.platform !== "win32") {
-      process.kill(-pid, "SIGTERM");
-      setTimeout(() => {
-        try {
-          process.kill(-pid, "SIGKILL");
-        } catch {
-          // Ignore if process already exited.
-        }
-      }, 2000).unref();
-    } else {
-      spawn("taskkill", ["/pid", String(pid), "/t", "/f"]).on("error", () => {});
-    }
-  } catch {
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch {
-      // Ignore.
-    }
-  }
-}
-
-/**
- * Create the task's log file up front.
- *
- * It was created lazily on the first output chunk, so a SILENT task (every
- * command redirected to /dev/null, or a run whose only artifact was a
- * redirected file) produced a receipt and a completion notification naming a
- * log path that did not exist — and an agent that trusted it wasted a turn on
- * "No such file or directory". A path we advertise must exist.
- */
-export function ensureLogFile(logPath: string): void {
-  try {
-    if (!existsSync(logPath)) writeFileSync(logPath, "");
-  } catch {
-    // An unwritable project directory must not stop the task; reads fall back
-    // to the in-memory chunks, and the path is reported as-is.
-  }
-}
-
-export function resolveLogDirectory(cwd: string): string {
-  // Prefer project-local scratch/tasks or .pi/tasks when possible.
-  const scratchDir = join(cwd, "scratch", "tasks");
-  if (existsSync(join(cwd, "scratch"))) {
-    try {
-      mkdirSync(scratchDir, { recursive: true });
-      return scratchDir;
-    } catch { /* fall through */ }
-  }
-  const piDir = join(cwd, ".pi", "tasks");
-  try {
-    mkdirSync(piDir, { recursive: true });
-    return piDir;
-  } catch {
-    const fallback = join(tmpdir(), "pinest-tasks");
-    mkdirSync(fallback, { recursive: true });
-    return fallback;
-  }
-}
-
-export function formatTaskNotificationXml(task: BackgroundTask): string {
-  const fullOutput = task.outputChunks.join("");
-  const truncation = truncateTail(fullOutput, {
-    maxBytes: DEFAULT_MAX_BYTES,
-    maxLines: DEFAULT_MAX_LINES,
-  });
-  let outputText = truncation.content || "(no output)";
-  if (truncation.truncated) {
-    const startLine = truncation.totalLines - truncation.outputLines + 1;
-    outputText += `\n\n[Showing lines ${startLine}-${truncation.totalLines} of ${truncation.totalLines}. Full output: ${task.logPath}]`;
-  }
-  const durationSec = Math.round(((task.finishedAt ?? Date.now()) - task.startedAt) / 1000);
-
-  return [
-    "<background-task-notification>",
-    `  <task-id>${task.id}</task-id>`,
-    `  <command>${escapeXml(task.command)}</command>`,
-    `  <status>${task.status}</status>`,
-    `  <exit-code>${task.exitCode ?? 0}</exit-code>`,
-    `  <duration>${durationSec}s</duration>`,
-    task.error ? `  <error>${escapeXml(task.error)}</error>` : "",
-    `  <output-file>${escapeXml(task.logPath)}</output-file>`,
-    `  <summary>Background command "${escapeXml(task.command)}" ${task.status} (exit code ${task.exitCode ?? 0})</summary>`,
-    `  <output>`,
-    escapeXml(outputText),
-    `  </output>`,
-    "</background-task-notification>",
-  ].filter(Boolean).join("\n");
 }
 
 export interface BackgroundProcessManagerOptions {

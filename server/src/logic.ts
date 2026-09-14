@@ -509,3 +509,12 @@ export function listPaths(prefix: string | undefined, deps: ListPathsDeps = {}):
   }
   return out;
 }
+
+export function statSyncSafe(p: string): boolean {
+  try {
+    return statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
