@@ -209,4 +209,5 @@ export type ClientCommand =
   | { type: "job_kill"; jobId: string; sessionId?: string }
   | { type: "job_logs"; jobId: string; maxBytes?: number; tail?: boolean; id?: string; sessionId?: string }
   | { type: "get_image"; imageId: string; id?: string }
-  | { type: "reload" };
+  | { type: "reload" }
+  | { type: "goal_set"; text: string };
