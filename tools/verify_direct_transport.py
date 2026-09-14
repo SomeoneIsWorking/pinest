@@ -17,6 +17,17 @@ Usage:
   python3 tools/verify_direct_transport.py                 # wait for a new load
   python3 tools/verify_direct_transport.py --now           # verify what is live
   python3 tools/verify_direct_transport.py --deadline 1800 --timeout-ms 20000
+
+Run the waiting form DETACHED, not as a task owned by the agent's own runtime:
+
+  setsid nohup python3 tools/verify_direct_transport.py --deadline 1800 \
+    > scratch/tasks/direct-after-reload.log 2>&1 &
+
+Measured: a reload reaps the background tasks the agent runtime is holding, so a
+waiter started as one is killed by the very event it is waiting for — it died
+mid-wait and reported nothing, which is the silent-instrument failure this whole
+area keeps producing. A detached process outlives the reload and leaves its
+evidence in a file.
 """
 
 from __future__ import annotations
