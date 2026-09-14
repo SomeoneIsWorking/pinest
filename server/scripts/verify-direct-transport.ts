@@ -415,6 +415,13 @@ async function main(): Promise<void> {
   };
   send({ type: "auth", token: idToken });
   send({ type: "subscribe", sessionIds: [] });
+  // What THIS peer did with the bytes: a DataChannel that never handed them to
+  // SCTP and one whose bytes died on the wire look identical from the far end.
+  const sent = actions as unknown as { messagesSent?: number; bytesSent?: number; bufferedAmount?: number };
+  console.log(
+    `sent: ${sent.messagesSent ?? "?"} message(s), ${sent.bytesSent ?? "?"} bytes, `
+    + `${sent.bufferedAmount ?? "?"} still buffered (channel ${actions.readyState})`,
+  );
 
   const state = await Promise.race([
     stateFrame,

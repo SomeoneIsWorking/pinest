@@ -167,7 +167,7 @@ export type ServerMessage =
        * starts must not ALSO be announced as the session finishing work. */
       kind?: "background-task";
     }
-  | { type: "state"; online: boolean; hostname: string; homePath?: string; activeSessionId?: string | null; sessions: SessionSnapshot[]; registry: SessionRow[]; tunnelUrl?: string | null; tunnelProvider?: string | null; httpKey?: string; localUrl?: string | null; p2p?: DirectTransportWireStatus | null }
+  | { type: "state"; online: boolean; hostname: string; homePath?: string; activeSessionId?: string | null; sessions: SessionSnapshot[]; registry: SessionRow[]; tunnelUrl?: string | null; tunnelProvider?: string | null; httpKey?: string; localUrl?: string | null; p2p?: DirectTransportWireStatus | null; client?: ClientReportView | null }
   | { type: "session_list"; sessions: SessionRow[] }
   | { type: "session_deleted"; sessionId: string; deleted: boolean }
   | { type: "jobs_list"; sessionId?: string; jobs: BackgroundJobSummary[] }
@@ -191,6 +191,28 @@ export type ServerMessage =
   | { type: "path_check"; cmdId?: string; exists: boolean; isDirectory: boolean }
   | { type: "folder_created"; cmdId?: string; path?: string; error?: string };
 
+/** What the APP said about itself, as the machine read it back: the other half
+ * of a direct connection's diagnosis, from the browser's own point of view. */
+export interface ClientReportView {
+  /** True when the app wrote a report the machine could read. */
+  read: boolean;
+  /** Null when it was readable; otherwise why it was not, in the reader's words
+   * (including "the app has never written one"). */
+  problem: string | null;
+  /** The browser's own clock, so the reader can see how stale it is without
+   * comparing two machines' clocks. */
+  at: number | null;
+  platform: string | null;
+  connected: boolean | null;
+  path: string | null;
+  note: string | null;
+  lastError: string | null;
+  /** One line for a human, including the age of the report. */
+  summary: string;
+  /** The bundle the browser is running, which names a stale tab. */
+  bundle: string | null;
+}
+
 /** The direct (no-tunnel) transport as the app sees it: whether the machine is
  * offering, how old its offer is, and whether anyone is connected through it. */
 export interface DirectTransportWireStatus {
@@ -205,6 +227,9 @@ export interface DirectTransportWireStatus {
   /** How many bridges were built: a channel that opens and builds none is a
    * different failure from a bridge that carries nothing. */
   bridges: number;
+  /** DataChannel messages that reached the bridge, before framing: zero means
+   * the peer's bytes never arrived, nonzero means they were refused. */
+  rawIn: number;
   /** Whole messages the bridge relayed in each direction. This is what
    * separates "the peer sent nothing" from "the machine never got it". */
   framesToServer: number;
@@ -248,6 +273,7 @@ export type ClientCommand =
   | { type: "list_paths"; sessionId?: string; prefix?: string; id?: string }
   | { type: "path_check"; path: string; id?: string }
   | { type: "folder_create"; path: string; id?: string }
+  | { type: "reload_client"; id?: string }
   | { type: "set_compact_threshold"; thresholdTokens: number }
   | { type: "set_max_image_bytes"; maxBytes: number; id?: string }
   | { type: "jobs_list"; sessionId?: string }

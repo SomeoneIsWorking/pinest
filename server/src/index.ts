@@ -9,6 +9,8 @@ import {
 } from "./host-interactive-commands.ts";
 import { sessionHistory as querySessionHistory, listModels as queryModels } from "./pi-context-queries.ts";
 import { createP2PSignaling } from "./p2p-signaling.ts";
+import { CLIENT_REPORT_FIELD, CLIENT_RELOAD_FIELD, describeClientReport, parseClientReport, type ClientReport } from "./client-report.ts";
+import type { ClientReportView } from "./protocol.ts";
 import debug from "./log.ts";
 /**
  * remote-code — WebSocket direct connection + tunnel.
@@ -155,6 +157,46 @@ let _submitter: MessageSubmitter | null = null;
 // In-memory session snapshots (the live view; registry is the durable view)
 // Session state lives in the publisher, which owns the wire shape and when a
 // broadcast happens; this entry point wires it to the live pieces.
+/** What the app last said about itself, as read from the discovery document.
+ * Kept as the reader's own answer (a report, or the reason there is none) so a
+ * diagnosis can never be silently empty. */
+let _clientReport: { report: ClientReport } | { problem: string } | null = null;
+
+/** The app's own report, in the shape the wire and the app's Settings screen
+ * use. Null until the first poll reads something. */
+function clientReportView(): ClientReportView | null {
+  if (!_clientReport) {
+    return null;
+  }
+  if ("problem" in _clientReport) {
+    return {
+      read: false,
+      problem: _clientReport.problem,
+      at: null,
+      platform: null,
+      connected: null,
+      path: null,
+      note: null,
+      lastError: null,
+      summary: `This browser has not reported anything this machine can read: ${_clientReport.problem}.`,
+      bundle: null,
+    };
+  }
+  const report = _clientReport.report;
+  return {
+    read: true,
+    problem: null,
+    at: report.at,
+    platform: report.platform,
+    connected: report.connected,
+    path: report.path,
+    note: report.note,
+    lastError: report.lastError,
+    summary: describeClientReport(report, Date.now()),
+    bundle: report.bundle,
+  };
+}
+
 const _publisher = new StatePublisher({
   hostname,
   homePath: () => homedir(),
@@ -168,6 +210,7 @@ const _publisher = new StatePublisher({
   tunnelProvider: () => _ws?.tunnel?.provider ?? null,
   localUrl: () => (_ws ? `ws://127.0.0.1:${_ws.port}` : null),
   p2p: () => _directTransport?.status() ?? null,
+  client: () => clientReportView(),
   refreshUsage: () => { _supervisor?.refreshUsage?.(false); },
   send: (msg) => broadcast(msg),
 });
@@ -457,7 +500,10 @@ async function bootstrap(): Promise<void> {
     } else {
       publishCurrentPresence(true).catch(() => {});
     }
-  }, 20_000);
+    // Every write to the discovery document is metered, and so is every read
+    // it provokes in the app: the app treats an update older than 60s as a dead
+    // machine, so this only has to beat that, not the second.
+  }, 40_000);
   _heartbeat.unref?.();
 
   // Tunnel (background). Drifts publish the fresh URL as soon as it's up.
@@ -594,16 +640,27 @@ async function startDirectTransport(): Promise<void> {
         if (!_fb || !_ownerUid) throw new Error("no owner record to publish an offer to");
         await _fb.patchUserDoc(_ownerUid, { p2pOffer: sdp, p2pOfferTs: ts });
       },
-      readAnswer: async () => {
-        if (!_fb || !_ownerUid) return null;
+      // ONE read of the discovery document per poll: the answer and the app's
+      // own report both live in it, and every extra read is paid for out of a
+      // metered daily allowance.
+      readDiscovery: async () => {
+        if (!_fb || !_ownerUid) {
+          return { answer: null, report: { problem: "this machine has no Firebase identity" } };
+        }
         const doc = await _fb.readUserDoc(_ownerUid);
+        const report = parseClientReport(doc?.[CLIENT_REPORT_FIELD]);
         const sdp = doc?.p2pAnswer;
-        if (typeof sdp !== "string") return null;
+        if (typeof sdp !== "string") {
+          return { answer: null, report };
+        }
         // The offer the answer names, not when it was written: the app's clock
         // is not this machine's clock.
         const named = doc?.p2pAnswerOfferTs;
-        return { sdp, offerTs: typeof named === "number" ? named : null };
+        return { answer: { sdp, offerTs: typeof named === "number" ? named : null }, report };
       },
+    });
+    signaling.onReport((seen) => {
+      _clientReport = seen;
     });
     _directTransport = await offerDirectTransport({
       port,
@@ -674,6 +731,17 @@ async function dispatchCommand(command: ClientCommand): Promise<void> {
       reload: () => {
         const r = queueReload(_pi, _ctx);
         if (!r.ok) broadcast({ type: "error", message: `[remote-code] ${r.message}` });
+      },
+      reloadClient: async () => {
+        // One explicit write into the app's own document; the app obeys a
+        // request only when it is newer than the page it is running.
+        if (!_fb || !_ownerUid) {
+          broadcast({ type: "error", message: "[remote-code] no owner to reload" });
+          return;
+        }
+        const at = Date.now();
+        await _fb.patchUserDoc(_ownerUid, { [CLIENT_RELOAD_FIELD]: at });
+        broadcast({ type: "notice", message: `[pinest] asked this browser to reload (${at})` });
       },
     });
 }

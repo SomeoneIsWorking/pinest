@@ -173,13 +173,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
               title: const Text('Direct connection'),
               subtitle: Text(
-                svc.directConnection
-                    ? 'This device is connected directly — no tunnel in the data path.'
-                    : svc.hostDirectStatus?.describe() ??
-                        'The machine has not reported a direct connection.',
+                [
+                  svc.directConnection
+                      ? 'This device is connected directly — no tunnel in the data path.'
+                      : svc.hostDirectStatus?.describe() ??
+                          'The machine has not reported a direct connection.',
+                  // The machine's half is above; this is its reading of THIS
+                  // browser, so both ends of a failure are visible on the
+                  // device that is having the problem rather than only in the
+                  // machine's logs.
+                  if (svc.machineSeesClient != null) svc.machineSeesClient!,
+                ].join('\n\n'),
                 style: const TextStyle(fontSize: 11),
               ),
-              isThreeLine: !svc.directConnection,
+              isThreeLine: true,
             ),
           ),
           const SizedBox(height: 24),

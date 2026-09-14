@@ -35,6 +35,10 @@ export interface LoopbackBridge {
 export interface BridgeStats {
   /** The loopback socket's state, by name: connecting, open, closing, closed. */
   socketState: string;
+  /** DataChannel messages seen from the peer, before framing is interpreted.
+   * Zero here means the peer's bytes never reached this process at all, which
+   * is a different failure from "they arrived and could not be framed". */
+  rawIn: number;
   /** Whole messages delivered from the peer to the machine's own server. */
   framesToServer: number;
   /** Whole messages delivered from the server to the peer. */
@@ -63,6 +67,7 @@ export function bridgeToLoopback(
   /** Whether this end is closing, so a routine close is not read as a
    * server-side refusal. */
   let closing = false;
+  let rawIn = 0;
   let framesToServer = 0;
   let framesToClient = 0;
 
@@ -102,6 +107,7 @@ export function bridgeToLoopback(
   // the moment its channel opens, which is before this bridge exists.
   channels.actions.attach({
     onMessage: (data) => {
+      rawIn += 1;
       try {
         const payload = reader.accept(asBytes(data as string | Buffer | ArrayBuffer));
         if (payload === null) {
@@ -174,6 +180,7 @@ export function bridgeToLoopback(
     close,
     stats: () => ({
       socketState: SOCKET_STATE_NAMES[socket.readyState] ?? `unknown(${socket.readyState})`,
+      rawIn,
       framesToServer,
       framesToClient,
     }),

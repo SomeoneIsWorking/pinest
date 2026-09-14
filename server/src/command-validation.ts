@@ -515,6 +515,13 @@ export function parseClientCommand(input: unknown): ClientCommand {
     case "reload":
       rejectUnknownFields(command, ["type"]);
       return { type: "reload" };
+    case "reload_client":
+      // Asks the BROWSER that is signed in to this account to reload itself.
+      // It is how a stale tab - the one thing the machine cannot refresh from
+      // its side - is fixed without a human, and it is deliberately explicit:
+      // only an operator asks for it, and the app honours one request once.
+      rejectUnknownFields(command, ["type", "id"]);
+      return { type: "reload_client", id: commandId(command) };
     default:
       fail(`unsupported command type ${JSON.stringify(command.type)}`);
   }
@@ -674,6 +681,7 @@ export interface ClientCommandDispatcherDeps {
   jobKill?: (command: Extract<ClientCommand, { type: "job_kill" }>) => void | Promise<void>;
   jobLogs?: (command: Extract<ClientCommand, { type: "job_logs" }>) => void | Promise<void>;
   reload: () => void | Promise<void>;
+  reloadClient: (command: Extract<ClientCommand, { type: "reload_client" }>) => void | Promise<void>;
 }
 
 /** Validate, authorize the target, reserve new IDs, and dispatch exactly once. */
@@ -728,6 +736,7 @@ export async function dispatchClientCommand(
     case "job_kill": return void await deps.jobKill?.(command);
     case "job_logs": return void await deps.jobLogs?.(command);
     case "reload": return void await deps.reload();
+    case "reload_client": return void await deps.reloadClient(command);
     case "list_paths": return void await deps.host(command);
     case "ping": return;
   }

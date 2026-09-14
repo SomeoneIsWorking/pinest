@@ -9,8 +9,11 @@ import 'outgoing_queue.dart';
 import 'direct_channel.dart';
 import 'direct_link.dart';
 import 'control_channel.dart';
+import '../logic/client_report.dart';
 import '../logic/direct_offer.dart';
 import '../logic/command_id.dart';
+import 'client_reporter.dart';
+import 'link_bridge.dart';
 import 'server_http.dart';
 import 'session_store.dart';
 import 'user_preferences.dart';
@@ -96,6 +99,24 @@ class AgentService extends ChangeNotifier {
   int _machineSeenAt = 0;
   bool _machineSaidOnline = false;
 
+  /// What the machine says it read back about THIS browser, from the `client`
+  /// field of the state it sends. The machine's half of a diagnosis is in
+  /// `_directStatus`; this is the mirror, so both ends are visible in one place.
+  String? _machineSeesClient;
+
+  /// The browser's view of itself. Written on every notable transition
+  /// (throttled), and the machine's reload request is obeyed here: it is the
+  /// only way a stale tab gets fixed without a human.
+  late final ClientReporter _clientReport = ClientReporter(
+    loadedAtMs: _loadedAtMs,
+    write: _writeClientReport,
+    reload: reloadPage,
+  );
+
+  /// When this app was loaded, captured once: a reload request older than this
+  /// page has already had its effect and must not cause a reload loop.
+  final int _loadedAtMs = DateTime.now().millisecondsSinceEpoch;
+
   /// Whether the machine itself is up, judged from its own published presence
   /// rather than from whether this app could reach it.
   ///
@@ -117,7 +138,57 @@ class AgentService extends ChangeNotifier {
       return;
     }
     _connectionNote = note;
+    _reportToMachine();
     notifyListeners();
+  }
+
+  /// Tell the machine what this browser sees.
+  ///
+  /// Unawaited on purpose: a diagnostic must never delay or fail a connection,
+  /// and the reporter records its own failure instead.
+  void _reportToMachine() {
+    final payload = clientReportPayload(
+      at: DateTime.now().millisecondsSinceEpoch,
+      platform: browserName(_userAgent),
+      connected: _connected,
+      path: _direct.active
+          ? 'direct'
+          : _ws?.endpoint?.host ?? (_connected ? 'unknown' : 'none'),
+      note: _connectionNote,
+      lastError: _error,
+      directActive: _direct.active,
+      directIce: _direct.iceState,
+      directChannels: _direct.openChannels,
+      directPairs: _direct.candidatePairs,
+      bundle: const String.fromEnvironment('WEB_BUILD_ID').isEmpty
+          ? null
+          : const String.fromEnvironment('WEB_BUILD_ID'),
+    );
+    unawaited(_clientReport.report(payload));
+  }
+
+  /// The browser's own user agent, injected by the platform layer.
+  String _userAgent = '';
+
+  /// Record the platform's user agent, once, from the platform boundary.
+  void setUserAgent(String userAgent) {
+    _userAgent = userAgent;
+  }
+
+  /// What the machine reported reading back about this browser, or null when it
+  /// has not said. Shown in Settings so the diagnosis is visible on the device
+  /// that is having the problem.
+  String? get machineSeesClient => _machineSeesClient;
+
+  Future<void> _writeClientReport(Map<String, dynamic> payload) async {
+    final uid = _boundUid;
+    if (uid == null) {
+      throw StateError('no uid to report the client state for');
+    }
+    await _db
+        .collection('users')
+        .doc(uid)
+        .set({kClientReportField: payload}, SetOptions(merge: true));
   }
 
   /// Transient server messages the user must SEE: `notice` (something they
@@ -245,6 +316,11 @@ class AgentService extends ChangeNotifier {
           (doc) async {
             if (_boundUid != uid) return;
             try {
+              // The machine's request for this tab to reload rides the document
+              // this listener already watches: a stale bundle is otherwise
+              // something only a human can fix. Honoured once per request, and
+              // only when it is newer than this page.
+              _clientReport.offerReload(doc.data()?[kClientReloadField]);
               await _applyDiscovery(doc);
             } catch (e) {
               // This body is async and the listener swallows what it throws: a
@@ -480,6 +556,7 @@ class AgentService extends ChangeNotifier {
         break;
       case 'state':
         _httpKey = (msg['httpKey'] as String?) ?? _httpKey;
+        _machineSeesClient = (msg['client'] as Map?)?['summary'] as String?;
         _localEndpoint = secureLoopbackUri(msg['localUrl']);
         _tunnelUrl = msg['tunnelUrl'] as String?;
         _tunnelProvider = msg['tunnelProvider'] as String?;
@@ -493,6 +570,7 @@ class AgentService extends ChangeNotifier {
           _resyncNeeded = false;
           _reflushUnconfirmed();
         }
+        _reportToMachine();
         break;
       case 'image':
         images.received(

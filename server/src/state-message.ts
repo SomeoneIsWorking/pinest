@@ -4,7 +4,7 @@
  * Pure: the caller supplies the live pieces, so the wire shape is testable
  * without the supervisor, the registry or a socket.
  */
-import type { ServerMessage, SessionRow, SessionSnapshot } from "./protocol.ts";
+import type { ClientReportView, ServerMessage, SessionRow, SessionSnapshot } from "./protocol.ts";
 import type { DirectTransportStatus } from "./direct-transport.ts";
 
 export interface StateSnapshot {
@@ -21,6 +21,8 @@ export interface StateSnapshot {
   /** The direct transport's own state, or null when peer-to-peer is off. A
    * punch that fails silently is indistinguishable from one never attempted. */
   p2p: DirectTransportStatus | null;
+  /** The app's own report, as the machine read it. */
+  client: ClientReportView | null;
 }
 
 export function buildStateMessage(snapshot: StateSnapshot): ServerMessage {
@@ -39,6 +41,7 @@ export function buildStateMessage(snapshot: StateSnapshot): ServerMessage {
     tunnelProvider: snapshot.tunnelProvider,
     localUrl: snapshot.localUrl,
     p2p: snapshot.p2p,
+    client: snapshot.client,
   };
 }
 

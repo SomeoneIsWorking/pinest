@@ -13,6 +13,7 @@
  */
 
 import debug from "./log.ts";
+import type { ClientReport } from "./client-report.ts";
 
 /** An answer as it was written: a description plus the offer it describes.
  *
@@ -29,12 +30,30 @@ export interface SignalingAnswer {
   offerTs: number | null;
 }
 
+/** What one read of the discovery document yields.
+ *
+ * ONE read, because the document is metered: the machine reads it on a timer and
+ * every extra read is paid for out of a daily allowance. Measured live, an
+ * exhausted Firestore quota is what a silently failing punch looks like from
+ * both ends at once. */
+export interface DiscoveryRead {
+  answer: SignalingAnswer | null;
+  report: { report: ClientReport } | { problem: string } | null;
+}
+
 export interface P2PSignalingDeps {
   /** Merge the offer into the owner's discovery doc. */
   writeOffer(sdp: string, ts: number): Promise<void>;
-  /** Read the current answer, or null when the app has not sent one. */
-  readAnswer(): Promise<SignalingAnswer | null>;
+  /** Read the app's answer and its own report in ONE document read. */
+  readDiscovery(): Promise<DiscoveryRead>;
+  /** How often to read while a punch is in flight (an offer is published and
+   * unanswered). Slow while idle: the document is metered. */
   pollMs?: number;
+  /** How often to read once the punch has had its chance. */
+  idlePollMs?: number;
+  /** How long an offer is worth polling fast for (an exchange's own lifetime,
+   * plus the time an answer takes to travel). */
+  hotWindowMs?: number;
 }
 
 export interface P2PSignaling {
@@ -44,10 +63,15 @@ export interface P2PSignaling {
   publishOffer(sdp: string, ts: number): Promise<void>;
   /** Called at most once per exchange, with an answer that names THIS offer. */
   onAnswer(handler: (sdp: string) => void): void;
+  /** Called on every poll with what the app last said about itself, or with the
+   * reason its report could not be read. */
+  onReport(handler: (seen: { report: ClientReport } | { problem: string } | null) => void): void;
   stop(): void;
 }
 
 const DEFAULT_POLL_MS = 2_000;
+const DEFAULT_IDLE_POLL_MS = 15_000;
+const DEFAULT_HOT_WINDOW_MS = 90_000;
 
 /** A description this peer can be asked to apply. */
 export function looksLikeSdp(value: unknown): value is string {
@@ -59,6 +83,7 @@ export function looksLikeSdp(value: unknown): value is string {
 
 export function createP2PSignaling(deps: P2PSignalingDeps): P2PSignaling {
   const handlers: ((sdp: string) => void)[] = [];
+  const reportHandlers: ((seen: { report: ClientReport } | { problem: string } | null) => void)[] = [];
   let liveOfferTs = 0;
   let delivered = false;
   /** The last nameless-or-mismatched answer reported, so a poll every two
@@ -68,13 +93,17 @@ export function createP2PSignaling(deps: P2PSignalingDeps): P2PSignaling {
   let timer: NodeJS.Timeout | undefined;
 
   const poll = async (): Promise<void> => {
-    let answer: SignalingAnswer | null = null;
+    let read: DiscoveryRead;
     try {
-      answer = await deps.readAnswer();
+      read = await deps.readDiscovery();
     } catch (error) {
-      debug(`[pinest] p2p signaling: answer read failed: ${(error as Error).message}`);
+      // A failed read is reported on every poll: it is the difference between
+      // "the app is not answering" and "this machine cannot look".
+      debug(`[pinest] p2p signaling: discovery read failed: ${(error as Error).message}`);
       return;
     }
+    for (const handler of reportHandlers) handler(read.report);
+    const answer = read.answer;
     if (!answer) return;
     if (!looksLikeSdp(answer.sdp)) {
       // Feed a malformed description to the peer and it stalls much later with
@@ -103,12 +132,35 @@ export function createP2PSignaling(deps: P2PSignalingDeps): P2PSignaling {
     for (const handler of handlers) handler(answer.sdp);
   };
 
+  const hotPollMs = deps.pollMs ?? DEFAULT_POLL_MS;
+  const idlePollMs = deps.idlePollMs ?? DEFAULT_IDLE_POLL_MS;
+  const hotWindowMs = deps.hotWindowMs ?? DEFAULT_HOT_WINDOW_MS;
+
+  /** The wait before the next read.
+   *
+   * An offer that has just been published may be answered any second, and that
+   * answer is what makes a direct connection possible - so that window is read
+   * every couple of seconds. Once the punch has had its chance there is nothing
+   * to learn from reading faster, and the document is metered: measured, two
+   * reads every two seconds is 86,400 reads a day against an allowance of
+   * 50,000, which blinds the machine and the app with quota errors. */
+  const nextDelay = (): number => {
+    if (delivered || !liveOfferTs) return idlePollMs;
+    return Date.now() - liveOfferTs < hotWindowMs ? hotPollMs : idlePollMs;
+  };
+
+  const schedule = (): void => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = undefined;
+      void poll().finally(schedule);
+    }, nextDelay());
+    timer.unref?.();
+  };
+
   const start = (): void => {
     if (timer) return;
-    timer = setInterval(() => {
-      void poll();
-    }, deps.pollMs ?? DEFAULT_POLL_MS);
-    timer.unref?.();
+    schedule();
   };
 
   return {
@@ -125,10 +177,14 @@ export function createP2PSignaling(deps: P2PSignalingDeps): P2PSignaling {
     onAnswer: (handler) => {
       handlers.push(handler);
     },
+    onReport: (handler) => {
+      reportHandlers.push(handler);
+    },
     stop: () => {
-      if (timer) clearInterval(timer);
+      if (timer) clearTimeout(timer);
       timer = undefined;
       handlers.length = 0;
+      reportHandlers.length = 0;
     },
   };
 }

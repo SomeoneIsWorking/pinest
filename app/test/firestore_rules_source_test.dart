@@ -12,6 +12,11 @@ const List<String> signalingFields = [
   'p2pAnswerOfferTs',
 ];
 
+/// The app's own report, and the machine's one request back. Both are written on
+/// their own rather than as part of a presence update, so each needs its own
+/// exemption — and the app's report must stay bounded: it is client-supplied.
+const List<String> clientFields = ['client', 'clientReload'];
+
 /// The field names in the first `hasOnly([...])` list that follows [marker].
 List<String> _keyList(String source, String marker) {
   final start = source.indexOf(marker);
@@ -107,24 +112,54 @@ void main() {
       contains("data.keys().hasAny(['p2pAnswerOfferTs'])"),
     );
     expect(normalized, contains('data.p2pAnswerOfferTs is int'));
-    // And the two field lists must be the SAME set: a signaling key that one
-    // list knows and the other does not is a write that is either refused or
-    // judged by presence shape, depending on which clause wins.
+    // Every field a writer may touch must appear in the document key whitelist,
+    // or the write is refused no matter which exemption matches it.
     final presenceKeys = _keyList(normalized, 'data.keys().hasOnly(').toSet();
+    // The two exemptions are separate and each covers exactly its own fields: a
+    // field in both would let one writer's update be judged by the other's
+    // shape, which is how "the app wrote a report" turns into "presence is
+    // stale".
     final signalingKeys = _keyList(normalized, 'affected.hasOnly(').toSet();
-    for (final field in signalingFields) {
+    final clientKeys = _keyList(normalized, 'touchesOnlyClientReport').toSet();
+    for (final field in [...signalingFields, ...clientFields]) {
       expect(
         presenceKeys,
         contains(field),
         reason: 'the document key whitelist does not allow $field',
       );
+    }
+    for (final field in signalingFields) {
       expect(
         signalingKeys,
         contains(field),
         reason: 'the signaling exemption does not cover $field, so a write of '
             'it would be judged by presence shape and refused',
       );
+      expect(clientKeys, isNot(contains(field)));
     }
+    for (final field in clientFields) {
+      expect(
+        clientKeys,
+        contains(field),
+        reason: "the client exemption does not cover $field, so the app's "
+            "report or the machine's reload request would be refused",
+      );
+      expect(signalingKeys, isNot(contains(field)));
+    }
+  });
+
+  test("the app's own report is bounded by the rules, not by trust", () {
+    // Client-supplied state inside the owner's document: shape-checked and
+    // size-capped before it is stored at all.
+    expect(normalized, contains('function hasValidClientReport()'));
+    expect(normalized, contains('data.client is map'));
+    expect(normalized, contains('data.client.at is int'));
+    expect(normalized, contains('data.client.connected is bool'));
+    expect(normalized, contains('data.client.platform.size() <= 80'));
+    expect(normalized, contains('data.client.size() <= 20'));
+    expect(normalized, contains('data.clientReload is int'));
+    expect(normalized, contains('hasValidClientReport()'));
+    expect(normalized, contains('touchesOnlyClientReport()'));
   });
 
   test('signaling-only writes are the only ones exempt from presence shape', () {

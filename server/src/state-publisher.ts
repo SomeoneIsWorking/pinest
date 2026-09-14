@@ -7,6 +7,7 @@
  */
 import type { DirectTransportWireStatus, ServerMessage, SessionRow, SessionSnapshot } from "./protocol.ts";
 import { buildStateMessage, mergeRegistryRows, snapshotsWithJobs } from "./state-message.ts";
+import type { ClientReportView } from "./protocol.ts";
 
 export interface StatePublisherDeps {
   hostname: () => string;
@@ -22,6 +23,8 @@ export interface StatePublisherDeps {
   localUrl: () => string | null;
   /** The direct transport's state, or null when peer-to-peer is off. */
   p2p: () => DirectTransportWireStatus | null;
+  /** What the app last said about itself, as this machine read it back. */
+  client: () => ClientReportView | null;
   /** Cheap synchronous usage overlay, applied before each state message. */
   refreshUsage: () => void;
   send: (message: ServerMessage) => void;
@@ -93,6 +96,7 @@ export class StatePublisher {
       tunnelProvider: this.deps.tunnelProvider(),
       localUrl: this.deps.localUrl(),
       p2p: this.deps.p2p(),
+      client: this.deps.client(),
     });
   }
 

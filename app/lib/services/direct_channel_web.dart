@@ -10,6 +10,7 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:js_interop';
+import 'dart:js_interop_unsafe';
 
 import 'package:web/web.dart' as web;
 
@@ -157,7 +158,7 @@ JSArray<web.RTCIceServer> _iceServers(List<String> urls) {
   ].toJS;
 }
 
-class DataChannelConnection implements ControlChannel {
+class DataChannelConnection implements ControlChannel, PathReporting {
   DataChannelConnection({
     required web.RTCDataChannel push,
     required web.RTCDataChannel actions,
@@ -207,6 +208,68 @@ class DataChannelConnection implements ControlChannel {
   final web.RTCDataChannel _push;
   final web.RTCDataChannel _actions;
   final web.RTCPeerConnection _pc;
+  String? _pairs;
+
+  @override
+  String? get iceState => _pc.iceConnectionState;
+
+  @override
+  List<String> get openChannels => [
+        if (_push.readyState == 'open') kPushChannelLabel,
+        if (_actions.readyState == 'open') kActionsChannelLabel,
+      ];
+
+  @override
+  String? get candidatePairs => _pairs;
+
+  /// Ask the browser which candidate pair it settled on.
+  ///
+  /// "ICE connected" does not say whether the connection crossed a network or
+  /// used a local shortcut, and the two are indistinguishable from the machine.
+  /// A pair with a reflexive address on both sides crossed NATs; a pair of host
+  /// addresses is two peers on one machine, which no phone could repeat.
+  Future<void> refreshCandidatePairs() async {
+    try {
+      final entries = <JSObject>[];
+      final report = _pc.getStats();
+      (report as JSObject).callMethod<JSAny?>(
+        'forEach'.toJS,
+        ((JSAny value, JSAny _) {
+          entries.add(value as JSObject);
+        }).toJS,
+      );
+      final types = <String, String>{};
+      final succeeded = <String>[];
+      for (final entry in entries) {
+        final type = _string(entry, 'type');
+        if (type == 'local-candidate' || type == 'remote-candidate') {
+          types[_string(entry, 'id')] = _string(entry, 'candidateType');
+        }
+      }
+      for (final entry in entries) {
+        if (_string(entry, 'type') != 'candidate-pair') continue;
+        if (_string(entry, 'state') != 'succeeded') continue;
+        final local = types[_string(entry, 'localCandidateId')] ?? 'unknown';
+        final remote = types[_string(entry, 'remoteCandidateId')] ?? 'unknown';
+        succeeded.add('$local\u2194$remote');
+      }
+      if (succeeded.isEmpty) {
+        _pairs = 'none succeeded';
+      } else {
+        final gathered = types.values.toSet().toList()..sort();
+        _pairs = '${succeeded.join(', ')} (gathered: ${gathered.join(', ')})';
+      }
+    } catch (e) {
+      // The report is a diagnostic: it must never fail the connection, and it
+      // must not pretend it read something it did not.
+      _pairs = 'unreadable: $e';
+    }
+  }
+
+  static String _string(JSObject object, String key) {
+    final value = object.getProperty<JSAny?>(key.toJS);
+    return value.dartify() as String? ?? '';
+  }
   final FrameReader _reader = FrameReader();
   final FrameWriter _writer = FrameWriter();
   void Function(Map<String, dynamic>)? _onMessage;
@@ -233,6 +296,10 @@ class DataChannelConnection implements ControlChannel {
     _onClose = onClose;
     final idToken = await token();
     _sendJson({'type': 'auth', 'token': idToken});
+    // The pairs are only meaningful once ICE has settled, and asking costs a
+    // round trip through the browser's stats cache: do it beside the handshake,
+    // never in front of it.
+    unawaited(refreshCandidatePairs());
   }
 
   @override

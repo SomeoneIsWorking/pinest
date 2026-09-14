@@ -23,8 +23,11 @@ function harness(pollMs = 5): Harness {
   };
   state.signaling = createP2PSignaling({
     writeOffer: state.writeOffer,
-    readAnswer: state.readAnswer,
+    // One read yields both halves, and the tests drive the poll fast: the
+    // production cadence is the subject of its own test below.
+    readDiscovery: async () => ({ answer: await state.readAnswer(), report: null }),
     pollMs,
+    idlePollMs: pollMs,
   });
   return state;
 }
@@ -135,11 +138,12 @@ test("a failing read does not kill signaling, and stop() ends the polling", asyn
   let reads = 0;
   h.signaling = createP2PSignaling({
     writeOffer: h.writeOffer,
-    readAnswer: async () => {
+    readDiscovery: async () => {
       reads += 1;
       throw new Error("network down");
     },
     pollMs: 5,
+    idlePollMs: 5,
   });
   await h.signaling.publishOffer(SDP, OFFER_TS);
   await settle();
@@ -155,4 +159,99 @@ test("the SDP check is a shape check, not a substring guess", () => {
   assert.equal(looksLikeSdp("v=0"), false);
   assert.equal(looksLikeSdp(undefined), false);
   assert.equal(looksLikeSdp(`v=0\r\nm=${"x".repeat(200_001)}`), false, "an oversized description is refused");
+});
+
+test("the app's own report reaches the machine on the same poll", async () => {
+  const reads: string[] = [];
+  const seen: ({ report: { platform: string } } | { problem: string } | null)[] = [];
+  const signaling = createP2PSignaling({
+    writeOffer: async () => {},
+    readDiscovery: async () => {
+      reads.push("read");
+      return { answer: null, report: { report: { platform: "Zen" } as never } };
+    },
+    pollMs: 5,
+    idlePollMs: 5,
+  });
+  signaling.onReport((update) => seen.push(update as never));
+  await signaling.publishOffer(SDP, OFFER_TS);
+  await settle();
+  signaling.stop();
+  assert.ok(reads.length > 1, "the report rides the same poll as the answer");
+  assert.ok(
+    seen.some((entry) => entry && "report" in entry && entry.report.platform === "Zen"),
+    `the report was not delivered: ${JSON.stringify(seen.slice(0, 3))}`,
+  );
+});
+
+test("a report the app could not write is delivered as a problem, not as silence", async () => {
+  const seen: unknown[] = [];
+  const signaling = createP2PSignaling({
+    writeOffer: async () => {},
+    readDiscovery: async () => ({
+      answer: null,
+      report: { problem: "the app has never written a report" },
+    }),
+    pollMs: 5,
+    idlePollMs: 5,
+  });
+  signaling.onReport((update) => seen.push(update));
+  await signaling.publishOffer(SDP, OFFER_TS);
+  await settle();
+  signaling.stop();
+  assert.ok(
+    seen.some((entry) => entry !== null && typeof entry === "object" && "problem" in (entry as object)),
+    "an unreadable report must be visible as such",
+  );
+});
+
+test("reads are paced: fast only while a punch can still land", async () => {
+  // The document is METERED. Measured live: two reads every two seconds is
+  // 86,400 reads a day against a free allowance of 50,000, and an exhausted
+  // quota makes a punch fail with nothing said at either end. So the fast poll
+  // belongs to the window in which an answer can still arrive, and nowhere else.
+  let reads = 0;
+  const signaling = createP2PSignaling({
+    writeOffer: async () => {},
+    readDiscovery: async () => {
+      reads += 1;
+      return { answer: null, report: null };
+    },
+    pollMs: 5,
+    idlePollMs: 400,
+    hotWindowMs: 60,
+  });
+  await signaling.publishOffer(SDP, Date.now());
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const hot = reads;
+  assert.ok(hot > 5, `a fresh offer is polled fast (saw ${hot} reads)`);
+
+  // Past the hot window with nothing answered, the same elapsed time must cost
+  // far fewer reads.
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  const afterHot = reads - hot;
+  assert.ok(afterHot <= 3, `an idle offer is polled slowly (saw ${afterHot} more reads)`);
+  signaling.stop();
+});
+
+test("a delivered answer stops the fast poll entirely", async () => {
+  let reads = 0;
+  const signaling = createP2PSignaling({
+    writeOffer: async () => {},
+    readDiscovery: async () => {
+      reads += 1;
+      return { answer: { sdp: SDP, offerTs: OFFER_TS }, report: null };
+    },
+    pollMs: 5,
+    idlePollMs: 400,
+  });
+  signaling.onAnswer(() => {});
+  await signaling.publishOffer(SDP, OFFER_TS);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  const afterAnswer = reads;
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  // Once the answer is applied there is nothing left to learn: the peer is
+  // either connected (the transport stops refreshing) or it is not.
+  assert.ok(reads - afterAnswer <= 3, `kept reading after the answer (${reads - afterAnswer} reads)`);
+  signaling.stop();
 });

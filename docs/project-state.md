@@ -186,6 +186,30 @@ the MACHINE is doing - not offering, offering with nobody connected, or a peer
 connected - so "nobody answered" and "the machine stopped offering" no longer
 look alike (`app/lib/models/direct_status.dart`).
 
+The app's OWN half of that picture now travels back. The machine can see which
+bridges it built and how many frames crossed them, and could see nothing of the
+browser: which browser, which channel it believes it opened, which candidate pair
+its peer connection chose, and the words of its last failure. The app writes that
+report into the same discovery document it already answers offers in
+(`app/lib/logic/client_report.dart`), the machine reads it on the poll it was
+already making and refuses by name anything that is not a report
+(`server/src/client-report.ts`), and both ends of a failure are visible in
+Settings. The bridge counts what it relays - bridges built, DataChannel messages
+seen, whole frames in each direction, and the loopback socket's state - because
+"the peer sent nothing" and "the machine never got it" were otherwise identical
+from the outside (`server/src/p2p-bridge.ts`).
+
+That document is METERED, and the transport stops treating it as free. Measured
+live: two document reads every two seconds (the answer and the report) is 86,400
+reads a day against a free allowance of 50,000, and the machine's presence write
+every 20 seconds is another 4,320 - so the allowance ran out, the machine could
+not read the app's answer, the app could not read the machine's presence, and the
+result was a punch that failed with a 1008 timeout at one end and "Machine online,
+not reachable" at the other (issue #57). One read now yields both halves, the poll
+is fast only while an answer can still arrive, the app's report is floored at one
+write per five seconds with a 30-second heartbeat, and presence is republished
+every 40 seconds instead of every 20.
+
 Gap: the direct transport is browser-only (a Dart VM has no ICE stack here), the
 tunnel stays in use until a direct channel is actually open, and travel across a
 third network is still unproven: every live verification so far ran both peers on
