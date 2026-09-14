@@ -12,3 +12,8 @@ void reloadPage() {
   html.window.location.reload();
 }
 
+/// The browser's own name. WebRTC behaves differently per engine, so a failure
+/// has to be attributable to one: "the app is broken" is the wrong conclusion
+/// when it is one browser's policy.
+String platformUserAgent() => html.window.navigator.userAgent;
+

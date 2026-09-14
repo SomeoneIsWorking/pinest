@@ -57,6 +57,10 @@ export interface DirectTransportStatus {
   /** How many bridges have been built. A channel that opens and produces no
    * bridge is a different failure from a bridge that carries nothing. */
   bridges: number;
+  /** DataChannel messages that reached the bridge, before framing. Zero means
+   * the peer's bytes never got here; nonzero with no frames relayed means they
+   * arrived and were refused. */
+  rawIn: number;
   /** Whole messages the bridges relayed in each direction, so "the peer said
    * nothing" and "the machine never got it" stop looking alike. */
   framesToServer: number;
@@ -120,6 +124,7 @@ export async function offerDirectTransport(
   let channelCloses = 0;
   let lastError: string | null = null;
   let bridges = 0;
+  let rawIn = 0;
   /** The bridge of the live exchange, if it has one. Its counters are read
    * while it runs, so a status is current rather than the last thing a closed
    * bridge happened to say. */
@@ -182,6 +187,7 @@ export async function offerDirectTransport(
           onClosed: () => {
             if (currentBridge === bridge) {
               const stats = bridge.stats();
+              rawIn += stats.rawIn;
               framesToServer += stats.framesToServer;
               framesToClient += stats.framesToClient;
               bridgeSocket = stats.socketState;
@@ -272,6 +278,7 @@ export async function offerDirectTransport(
       // Counted while the bridge is live, so the numbers are current even
       // before a channel ends.
       bridges,
+      rawIn: rawIn + (currentBridge?.stats().rawIn ?? 0),
       framesToServer: framesToServer + (currentBridge?.stats().framesToServer ?? 0),
       framesToClient: framesToClient + (currentBridge?.stats().framesToClient ?? 0),
       bridgeSocket: currentBridge?.stats().socketState ?? bridgeSocket,

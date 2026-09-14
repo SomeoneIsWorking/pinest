@@ -195,6 +195,7 @@ test("the app's framed handshake crosses the bridge to the real server and back"
   // went in, and the two the server answered with came out.
   assert.equal(status.bridges, 1, "a channel that opens builds exactly one bridge");
   assert.equal(status.bridgeSocket, "open", "and the bridge's socket is the live one");
+  assert.equal(status.rawIn, 2, "both DataChannel messages reached the bridge");
   assert.equal(status.framesToServer, 2, "auth and subscribe reached the server");
   assert.equal(status.framesToClient, 2, "authed and the state snapshot came back");
 });
@@ -211,6 +212,7 @@ test("a peer that connects and says nothing is visible as such", async (t) => {
   const status = transport.status();
   assert.equal(status.channelOpen, true);
   assert.equal(status.bridges, 1);
+  assert.equal(status.rawIn, 0, "and no DataChannel message reached the bridge");
   assert.equal(status.framesToServer, 0, "no frames came from the peer");
   assert.equal(status.framesToClient, 0);
   assert.equal(status.lastError, null, "and that is not itself an error");
