@@ -104,6 +104,9 @@ node drills/compact-clear.mjs --negative
 ```
 
 Flutter changes must pass `flutter analyze` and `flutter test` from `app/`.
+The browser-only suites (the direct-transport interop) need a real browser and a
+different runner: `python3 tools/verify_web_client.py` finds one, names it, and
+says which install command to run when there is none.
 The web client deploys locally with `app/deploy.sh`; pushes affecting `app/`
 build, sign, attest, and publish an immutable per-commit Android release through
 CI.
