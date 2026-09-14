@@ -28,6 +28,7 @@ test("FooterManager renders owner, sessions, and url to UI", () => {
     getLiveSessionCount: () => ({ live: 2, working: 1 }),
     getTunnelUrl: () => "https://example.ngrok.app",
     isTunnelStarting: () => false,
+    isDirectConnected: () => false,
   };
 
   const footer = new FooterManager(state);
@@ -54,12 +55,14 @@ test("FooterManager renders starting and local-only url states correctly", () =>
 
   let starting = true;
   let url: string | null = null;
+  let direct = false;
 
   const state: FooterStateProvider = {
     getOwnerEmail: () => null,
     getLiveSessionCount: () => ({ live: 1, working: 0 }),
     getTunnelUrl: () => url,
     isTunnelStarting: () => starting,
+    isDirectConnected: () => direct,
   };
 
   const footer = new FooterManager(state);
@@ -83,6 +86,14 @@ test("FooterManager renders starting and local-only url states correctly", () =>
   urlCall = ui.calls.filter((c) => c.key === "pinest:url").pop();
   assert.equal(urlCall?.text, "ngrok: https://connected.ngrok.app");
 
+  // 4. A direct channel carrying the session: the footer must not credit the
+  //    tunnel for a connection it is not part of. Measured confusion: the
+  //    footer said "cloudflared: …" while the app was talking directly.
+  direct = true;
+  footer.render();
+  urlCall = ui.calls.filter((c) => c.key === "pinest:url").pop();
+  assert.equal(urlCall?.text, "direct: connected");
+
   footer.dispose();
   resetConfig();
 });
@@ -93,6 +104,7 @@ test("FooterManager drops direct calls from stale callers with pinest: keys", ()
     getLiveSessionCount: () => ({ live: 1, working: 0 }),
     getTunnelUrl: () => "https://valid.ngrok.app",
     isTunnelStarting: () => false,
+    isDirectConnected: () => false,
   };
 
   const footer = new FooterManager(state);
@@ -129,6 +141,7 @@ test("FooterManager timer starts, renders, and stops on dispose", async () => {
       return "https://test.url";
     },
     isTunnelStarting: () => false,
+    isDirectConnected: () => false,
   };
 
   const footer = new FooterManager(state);
@@ -158,6 +171,7 @@ test("FooterManager setOffline updates pinest:url status", () => {
     getLiveSessionCount: () => ({ live: 1, working: 0 }),
     getTunnelUrl: () => null,
     isTunnelStarting: () => false,
+    isDirectConnected: () => false,
   };
 
   const footer = new FooterManager(state);

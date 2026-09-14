@@ -24,7 +24,7 @@
  */
 
 import { DEFAULT_STUN, startP2PExchange, type P2PExchange } from "./p2p.ts";
-import { bridgeToLoopback } from "./p2p-bridge.ts";
+import { bridgeToLoopback, type LoopbackBridge } from "./p2p-bridge.ts";
 
 /**
  * How long an exchange may stay live without a connected channel.
@@ -54,6 +54,15 @@ export interface DirectTransportStatus {
   channelCloses: number;
   /** The last thing that went wrong, verbatim. Null when nothing has. */
   lastError: string | null;
+  /** How many bridges have been built. A channel that opens and produces no
+   * bridge is a different failure from a bridge that carries nothing. */
+  bridges: number;
+  /** Whole messages the bridges relayed in each direction, so "the peer said
+   * nothing" and "the machine never got it" stop looking alike. */
+  framesToServer: number;
+  framesToClient: number;
+  /** The loopback socket's state, as the bridge last saw it. */
+  bridgeSocket: string | null;
 }
 
 export interface DirectTransportOptions {
@@ -110,6 +119,14 @@ export async function offerDirectTransport(
   let exchanges = 0;
   let channelCloses = 0;
   let lastError: string | null = null;
+  let bridges = 0;
+  /** The bridge of the live exchange, if it has one. Its counters are read
+   * while it runs, so a status is current rather than the last thing a closed
+   * bridge happened to say. */
+  let currentBridge: LoopbackBridge | null = null;
+  let framesToServer = 0;
+  let framesToClient = 0;
+  let bridgeSocket: string | null = null;
   let closed = false;
   let refreshing = false;
 
@@ -145,8 +162,16 @@ export async function offerDirectTransport(
         }
         current.channelOpen = true;
         log("direct transport: both channels open, bridging to the loopback server");
-        bridgeToLoopback(channels, port, {
+        bridges += 1;
+        const bridge: LoopbackBridge = bridgeToLoopback(channels, port, {
           onClosed: () => {
+            if (currentBridge === bridge) {
+              const stats = bridge.stats();
+              framesToServer += stats.framesToServer;
+              framesToClient += stats.framesToClient;
+              bridgeSocket = stats.socketState;
+              currentBridge = null;
+            }
             if (live !== current) {
               return;
             }
@@ -163,6 +188,7 @@ export async function offerDirectTransport(
             log(`direct transport: bridge failed: ${message}`);
           },
         });
+        currentBridge = bridge;
       })
       .catch((error: Error) => {
         if (closed || live !== current) {
@@ -219,6 +245,12 @@ export async function offerDirectTransport(
       exchanges,
       channelCloses,
       lastError,
+      // Counted while the bridge is live, so the numbers are current even
+      // before a channel ends.
+      bridges,
+      framesToServer: framesToServer + (currentBridge?.stats().framesToServer ?? 0),
+      framesToClient: framesToClient + (currentBridge?.stats().framesToClient ?? 0),
+      bridgeSocket: currentBridge?.stats().socketState ?? bridgeSocket,
     }),
     close: async () => {
       closed = true;
