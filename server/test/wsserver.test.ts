@@ -4,6 +4,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import WebSocket from "ws";
 import { WSServer, type VerifiedToken } from "../src/wsserver.ts";
+import { commandFromFrame } from "../src/command-validation.ts";
+import type { ClientCommand } from "../src/protocol.ts";
 
 const OWNER_UID = "owner-uid";
 
@@ -236,6 +238,63 @@ test("malformed JSON and outer envelopes close only the offending socket", async
   const good = await openClient(server);
   clients.push(good);
   assert.deepEqual(await authenticate(good), { type: "authed" });
+});
+
+test("a command reaches the sink validated, and one that cannot is refused by name", async (t) => {
+  const received: ClientCommand[] = [];
+  const server = await startServer(undefined, undefined);
+  const clients: WebSocket[] = [];
+  t.after(() => stopAll(server, clients));
+  server.on("command", (command) => received.push(command));
+
+  const socket = await openClient(server);
+  clients.push(socket);
+  await authenticate(socket);
+  const frame = { type: "command", cmd: { type: "user_message", sessionId: "s1", text: "hello" } };
+  socket.send(JSON.stringify(frame));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  // Same conversion as the HTTP routes run: the sink got a validated command,
+  // not the frame around it, and not an assertion that it looked right.
+  assert.deepEqual(received, [commandFromFrame(frame)]);
+
+  const invalid = await openClient(server);
+  clients.push(invalid);
+  await authenticate(invalid);
+  const closed = nextClose(invalid);
+  invalid.send(JSON.stringify({ type: "command", cmd: { type: "user_message", text: 5 } }));
+  const close = await closed;
+  assert.equal(close.code, 1008);
+  assert.match(close.reason, /text must be a string/, "the refusal names what was wrong");
+  assert.equal(received.length, 1, "nothing invalid reached the sink");
+});
+
+test("the same frame produces the same command on the socket and over HTTP", async (t) => {
+  // The two transports feed one sink, so a command may not be built one way on
+  // one and another way on the other - which is how a posted message arrived as
+  // `unsupported command type "command"`.
+  const received: ClientCommand[] = [];
+  const server = await startServer();
+  const clients: WebSocket[] = [];
+  t.after(() => stopAll(server, clients));
+  server.on("command", (command) => received.push(command));
+  const frame = { type: "command", cmd: { type: "user_message", sessionId: "s1", text: "hello" } };
+
+  const socket = await openClient(server);
+  clients.push(socket);
+  await authenticate(socket);
+  socket.send(JSON.stringify(frame));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const response = await fetch(`http://127.0.0.1:${server.port}/message`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-pinest-key": server.accessKey },
+    body: JSON.stringify(frame),
+  });
+  assert.equal(response.status, 202);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  assert.equal(received.length, 2, "one command from each transport");
+  assert.deepEqual(received[0], received[1], "the transports produced the same command");
 });
 
 test("closing during verification cannot retain or authenticate the dead socket", async (t) => {

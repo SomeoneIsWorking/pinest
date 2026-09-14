@@ -5,6 +5,7 @@ import {
   assertNewSessionIdAvailable,
   COMMAND_LIMITS,
   CommandValidationError,
+  commandFromFrame,
   dispatchClientCommand,
   isSessionCommand,
   parseClientCommand,
@@ -391,4 +392,33 @@ test("rename and select preserve stale-row support but reject unknown IDs", asyn
     /unknown session unknown/,
   );
   assert.deepEqual(events, ["rename:stale", "select:stale"]);
+});
+
+test("a command frame is the one way a command reaches a sink", () => {
+  const frame = { type: "command", cmd: { type: "user_message", sessionId: "s1", text: "hello" } };
+  // The frame becomes the concrete command the validator builds - so every
+  // transport gets the same normalisation, not a shape check plus a cast.
+  assert.deepEqual(commandFromFrame(frame), parseClientCommand(frame.cmd));
+
+  // A bare command is NOT a frame: there is one wire shape, and accepting the
+  // inner command here would give each transport its own way to send one.
+  assert.throws(() => commandFromFrame(frame.cmd), /expected a command frame/);
+  // A frame with no command object says which part is missing.
+  assert.throws(() => commandFromFrame({ type: "command" }), /no cmd object/);
+  assert.throws(() => commandFromFrame({ type: "command", cmd: [1] }), /no cmd object/);
+  // A wrong frame type says what it got.
+  assert.throws(() => commandFromFrame({ type: "auth", cmd: {} }), /got type "auth"/);
+  assert.throws(() => commandFromFrame(null), /expected a command frame/);
+  // And an invalid command inside a valid frame is refused with the validator's
+  // own reason, so the socket can name it.
+  assert.throws(
+    () => commandFromFrame({ type: "command", cmd: { type: "user_message", text: 5 } }),
+    /text must be a string/,
+  );
+  // The shape a dispatched envelope produced - a frame inside a frame - is
+  // refused by name rather than dispatched.
+  assert.throws(
+    () => commandFromFrame({ type: "command", cmd: frame }),
+    /unsupported command type "command"/,
+  );
 });
