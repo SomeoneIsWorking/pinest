@@ -187,15 +187,6 @@ class _MockAuthService extends ChangeNotifier implements AuthService {
   Future<void> signOut() async {}
 
   @override
-  @override
-  SessionGoal? get goal => null;
-
-  @override
-  void clearGoal() {}
-
-  @override
-  void setGoal(String objective) {}
-
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
@@ -394,7 +385,6 @@ class _MockAgentService extends ChangeNotifier implements AgentService {
   Future<void> restoreOutgoing() async {}
 
   @override
-  @override
   SessionGoal? get goal => null;
 
   @override
@@ -403,5 +393,6 @@ class _MockAgentService extends ChangeNotifier implements AgentService {
   @override
   void setGoal(String objective) {}
 
+  @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
