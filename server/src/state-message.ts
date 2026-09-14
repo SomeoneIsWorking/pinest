@@ -16,6 +16,9 @@ export interface StateSnapshot {
   tunnelProvider: string | null;
   /** The objective being worked toward; shown persistently by the app. */
   goal: { text: string; setAt: number } | null;
+  /** The server's own loopback endpoint, for a browser on the same machine:
+   * no tunnel, no DNS, no churn. The app prefers it when it is dialable. */
+  localUrl: string | null;
 }
 
 export function buildStateMessage(snapshot: StateSnapshot): ServerMessage {
@@ -33,6 +36,7 @@ export function buildStateMessage(snapshot: StateSnapshot): ServerMessage {
     tunnelUrl: snapshot.tunnelUrl,
     tunnelProvider: snapshot.tunnelProvider,
     goal: snapshot.goal,
+    localUrl: snapshot.localUrl,
   };
 }
 

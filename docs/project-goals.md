@@ -85,3 +85,29 @@ restarts against the same local registry.
   (WS server, tunnel, Firebase auth) + SDK sessions in the same process.
 - One machine = one online doc (`users/{uid}`), same as PiNest today; a
   multi-machine model is a future goal, not this one.
+
+## G7 — Remote access without a third party in the data path
+
+The host sits behind an ISP carrier-grade NAT (measured: the router's own WAN
+address is RFC1918 10.139.201.212 while the internet sees 151.250.60.80), so no
+router-side port mapping (uPnP or manual) is reachable from the internet. The
+mechanism P2P games use on exactly this kind of network — UDP hole punching with
+STUN — is available to us through WebRTC DataChannel: browsers speak it natively,
+it punches through CGNAT the same way game netcode does, and DTLS encrypts it
+end to end by protocol.
+
+- Success: a browser NOT on the host's machine connects and drives sessions
+  (chat, steer, images, history) with no tunnel process running, using only the
+  owner's own infrastructure: Firestore for signaling (already in use for
+  discovery), a STUN server for reflexive-address discovery (stateless — no
+  data flows through it), and a self-hosted TURN fallback only if punching
+  fails for a peer pair.
+- The existing explicitly chosen tunnel remains the fallback transport, never a
+  silent replacement: if punching fails, that failure is surfaced, and the user
+  decides which fallback to allow (per the provider-choice rule).
+- Trust boundaries stay explicit: DTLS is transport encryption, not
+  application auth — the Firebase-token handshake runs over the DataChannel
+  exactly as it does over any socket, and the signaling channel holds no chat
+  data (same rule as the discovery doc today).
+- Non-goals: replacing the Firebase auth/discovery role, hosting other people's
+  machines, a fully offline (LAN-only) mode.

@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer } from "node:http";
+import { parseClientCommand } from "./command-validation.ts";
 import debug from "./log.ts";
 import { lookupImage } from "./logic.ts";
 
@@ -20,11 +21,30 @@ import { lookupImage } from "./logic.ts";
  * there is one policy for what a message may say and where it goes.
  */
 
+export interface HttpHistoryRequest {
+  sessionId: string;
+  limit?: number;
+  cursor?: number;
+}
+
+export type HttpHistoryRunner = (
+  command: HttpHistoryRequest,
+) => Promise<
+  | { ok: true; payload: Record<string, unknown> }
+  | { ok: false; status: number; error: string }
+>;
+
 export interface HttpApiOptions {
   /** Secret handed to the app in its state frame; required on every request. */
   accessKey: string;
   /** The same command sink the WebSocket dispatches through. */
   dispatch: (command: unknown) => Promise<void> | void;
+  /** Runs a history request and returns the reply payload.
+   *
+   * History is a client request with a response, so it belongs here rather than
+   * on the push channel. The implementation must be the same path the
+   * WebSocket uses, so the two cannot answer with different paging. */
+  history: HttpHistoryRunner;
   /** Body ceiling; images make a message with attachments genuinely large. */
   maxBodyBytes?: number;
 }
@@ -131,6 +151,55 @@ async function serveMessage(
   sendJson(response, 202, { status: "accepted" });
 }
 
+async function serveHistory(
+  request: IncomingMessage,
+  response: ServerResponse,
+  options: HttpApiOptions,
+): Promise<void> {
+  const raw = await readBody(request, options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES);
+  if (raw === null) {
+    sendJson(response, 413, { error: "request larger than this server accepts" });
+    return;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    sendJson(response, 400, { error: "body must be JSON" });
+    return;
+  }
+  // The socket's own validator decides what a history request may be, so the
+  // HTTP route cannot accept a shape the socket would have refused.
+  let command;
+  try {
+    // The validator takes the inner command, the same shape the socket's
+    // dispatcher receives - not the {type:"command",cmd} envelope around it.
+    const validated = parseClientCommand({ ...(parsed as object), type: "get_history" });
+    command = validated as { sessionId: string; limit?: number; cursor?: number };
+  } catch (error) {
+    sendJson(response, 400, { error: (error as Error).message });
+    return;
+  }
+  // On the socket, a missing session id means "the host session" because the
+  // socket belongs to someone. An HTTP route has no such implication: the
+  // caller names the session it wants history for.
+  if (!command.sessionId) {
+    sendJson(response, 400, { error: "sessionId is required over HTTP" });
+    return;
+  }
+  try {
+    const result = await options.history(command);
+    if (!result.ok) {
+      sendJson(response, result.status, { error: result.error });
+      return;
+    }
+    sendJson(response, 200, result.payload);
+  } catch (error) {
+    debug("[remote-code] HTTP history failed:", (error as Error).message);
+    sendJson(response, 500, { error: (error as Error).message || "history failed" });
+  }
+}
+
 export function createHttpApi(options: HttpApiOptions): (request: IncomingMessage, response: ServerResponse) => void {
   return (request, response) => {
     void (async () => {
@@ -147,6 +216,13 @@ export function createHttpApi(options: HttpApiOptions): (request: IncomingMessag
       }
       if (request.method === "GET" && url.pathname.startsWith("/image/")) {
         serveImage(url, response);
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/history") {
+        void serveHistory(request, response, options).catch((error: unknown) => {
+          debug("[remote-code] HTTP history route error:", error);
+          sendJson(response, 500, { error: "history failed" });
+        });
         return;
       }
       if (request.method === "POST" && url.pathname === "/message") {

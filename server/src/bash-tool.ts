@@ -46,6 +46,16 @@ export interface BackgroundTask {
    * once no matter how many paths notice the end.
    */
   notifiedCompletion?: boolean;
+  /** How the task came to an end, when someone ended it deliberately.
+   *
+   * A task stopped through `bg_kill`/`job_kill` is NOT a completion: the actor
+   * that stopped it was already told the outcome synchronously (the tool result
+   * or the app's job list), and the output captured on the way down is a
+   * snapshot from before the kill. Reporting it as a completion arrives late and
+   * hands the agent stale state to reason from - measured: an agent received two
+   * kill notifications whose <output> still showed `gh run list` with the runs
+   * mid-flight, and spent a turn on each re-establishing what was true now. */
+  settledBy?: "exit" | "cancel";
   triggerOnCompletion?: boolean;
 }
 
@@ -227,6 +237,8 @@ export class BackgroundProcessManager {
    */
   private notifyTaskOnce(task: BackgroundTask): void {
     if (task.notifyOnCompletion === false) return;
+    // A deliberate stop is not a completion report; see `settledBy`.
+    if (task.settledBy === "cancel") return;
     if (task.notifiedCompletion === true) return;
     task.notifiedCompletion = true;
     if (!this.notifyCompletion) return;
@@ -313,6 +325,9 @@ export class BackgroundProcessManager {
     task.status = "cancelled";
     task.error = "Cancelled by user";
     task.finishedAt = Date.now();
+    // Marked before the process tree dies: the close handler runs afterwards and
+    // would otherwise report this stop as a completion.
+    task.settledBy = "cancel";
     killProcessTree(task.pid);
     this.onTaskUpdate?.(task);
     return true;

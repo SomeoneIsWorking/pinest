@@ -5,6 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createServer } from "node:http";
+import type { HttpHistoryRunner } from "../src/http-api.ts";
 import { createHttpApi } from "../src/http-api.ts";
 import { registerImage } from "../src/logic.ts";
 
@@ -13,18 +14,20 @@ const KEY = "test-access-key";
 async function startApi(
   seen: unknown[],
   maxBodyBytes?: number,
+  history?: HttpHistoryRunner,
 ): Promise<{ port: number; close: () => void }> {
   const server = createServer(
     createHttpApi({
       accessKey: KEY,
       dispatch: (command) => { seen.push(command); },
+      history: history ?? (async () => ({ ok: false, status: 503, error: "history unavailable" })),
       ...(maxBodyBytes === undefined ? {} : { maxBodyBytes }),
     }),
   );
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const { port } = server.address() as { port: number };
-  return { port, close: () => server.close() };
+  return { port, close: () => { server.closeAllConnections(); server.close(); } };
 }
 
 function url(port: number, path: string): string {
@@ -67,6 +70,49 @@ test("a request without the key is refused", async (t) => {
   });
   assert.equal(response.status, 401);
   assert.deepEqual(seen, [], "nothing may be dispatched without the key");
+});
+
+test("history is answered over HTTP from the socket path's own reply", async (t) => {
+  const calls: unknown[] = [];
+  const { port, close } = await startApi([], undefined, async (command) => {
+    calls.push(command);
+    return {
+      ok: true,
+      payload: { type: "history", sessionId: command.sessionId, history: [{ role: "user" }], hasMore: false },
+    };
+  });
+  const response = await fetch(url(port, "/history"), {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-pinest-key": KEY },
+    body: JSON.stringify({ sessionId: "host-1", limit: 50, cursor: 0 }),
+  });
+  assert.equal(response.status, 200, "a history request gets a real answer, not a push");
+  const body = await response.json();
+  assert.equal(body.sessionId, "host-1");
+  assert.equal(body.history.length, 1);
+  assert.deepEqual(
+    calls,
+    [{ type: "get_history", sessionId: "host-1", limit: 50, cursor: 0 }],
+    "the socket's validator decided the shape",
+  );
+  t.after(close);
+});
+
+test("history refuses a request the socket validator would refuse", async (t) => {
+  let called = false;
+  const { port, close } = await startApi([], undefined, async () => {
+    called = true;
+    return { ok: true, payload: {} };
+  });
+  t.after(close);
+  const response = await fetch(url(port, "/history"), {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-pinest-key": KEY },
+    body: JSON.stringify({ limit: 50 }),
+  });
+  assert.equal(response.status, 400, "no session id: refused before anything is dispatched");
+  assert.equal(called, false);
+  close();
 });
 
 test("a posted message dispatches through the SAME sink as the socket", async (t) => {

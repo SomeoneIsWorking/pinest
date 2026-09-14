@@ -149,6 +149,7 @@ const _publisher = new StatePublisher({
   tunnelUrl: () => _ws?.tunnelUrl ?? null,
   tunnelProvider: () => _ws?.tunnel?.provider ?? null,
   goal: () => currentGoal(),
+  localUrl: () => (_ws ? `ws://127.0.0.1:${_ws.port}` : null),
   refreshUsage: () => { _supervisor?.refreshUsage?.(false); },
   send: (msg) => broadcast(msg),
 });
