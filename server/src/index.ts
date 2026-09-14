@@ -211,6 +211,7 @@ const _publisher = new StatePublisher({
   localUrl: () => (_ws ? `ws://127.0.0.1:${_ws.port}` : null),
   p2p: () => _directTransport?.status() ?? null,
   client: () => clientReportView(),
+  presenceError: () => _presenceError,
   refreshUsage: () => { _supervisor?.refreshUsage?.(false); },
   send: (msg) => broadcast(msg),
 });
@@ -336,10 +337,35 @@ function broadcastState(): void {
   _publisher.broadcast();
 }
 
+/** The last refusal from the discovery document, in the words of whoever
+ * refused it. A presence write that fails is why the app cannot find this
+ * machine at all, and it used to be swallowed: the app showed "offline" and the
+ * machine showed nothing, so the reason existed nowhere. */
+let _presenceError: string | null = null;
+
 function publishCurrentPresence(online: boolean): Promise<void> {
   return publishPresence(
     { fb: _fb, ownerUid: _ownerUid, ownerEmail: _ownerEmail, tunnelUrl: () => _ws?.tunnelUrl ?? null, hostname },
     online,
+  ).then(
+    () => {
+      if (_presenceError !== null) {
+        _presenceError = null;
+        debug("[remote-code] discovery publishing recovered");
+      }
+    },
+    (error: Error) => {
+      // Recorded and broadcast: an exceeded quota, a revoked credential, or a
+      // rejected field is information the operator can act on, and "the app
+      // cannot see this machine" is otherwise indistinguishable from a network
+      // problem on the app's side.
+      if (_presenceError !== error.message) {
+        debug(`[remote-code] discovery publish failed: ${error.message}`);
+      }
+      _presenceError = error.message;
+      broadcastState();
+      throw error;
+    },
   );
 }
 
