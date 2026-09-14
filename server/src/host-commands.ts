@@ -76,7 +76,7 @@ export async function showAttachOverlay(
       }),
     {
       overlay: true,
-      overlayOptions: { width: "96%", maxHeight: "92%", anchor: "center", margin: 0 },
+      overlayOptions: { width: "100%", maxHeight: "100%", anchor: "top-left", margin: 0 },
     },
   );
   return { back };
@@ -168,7 +168,7 @@ export async function showSessionsFlow(
         }),
       {
         overlay: true,
-        overlayOptions: { width: "96%", maxHeight: "92%", anchor: "center", margin: 0 },
+        overlayOptions: { width: "100%", maxHeight: "100%", anchor: "top-left", margin: 0 },
       },
     );
 
