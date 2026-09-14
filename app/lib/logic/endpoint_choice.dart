@@ -7,6 +7,10 @@
 /// instant connection refusal, and retrying a refused loopback forever would
 /// leave that browser staring at "reconnecting" while a working endpoint sat
 /// unused. A new generation (a different local port) resets the choice.
+library;
+
+import '../services/control_channel.dart';
+
 Uri? pickEndpoint({
   required Uri? local,
   required Uri? remote,
@@ -69,10 +73,7 @@ Uri? secureLoopbackUri(Object? rawUrl) {
   if (uri.userInfo.isNotEmpty || uri.hasQuery || uri.hasFragment) {
     return null;
   }
-  final host = uri.host;
-  final loopback =
-      host == '127.0.0.1' || host == 'localhost' || host == '::1' || host == '[::1]';
-  if (!loopback) {
+  if (!isLoopbackHost(uri.host)) {
     return null;
   }
   final port = uri.port;

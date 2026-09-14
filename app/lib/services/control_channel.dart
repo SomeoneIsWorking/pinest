@@ -23,6 +23,11 @@ Map<String, dynamic> commandFrame(Map<String, dynamic> command) => {
       'cmd': command,
     };
 
+/// Whether a host names this device's own loopback, where a plain connection
+/// cannot leave the machine.
+bool isLoopbackHost(String host) =>
+    host == '127.0.0.1' || host == 'localhost' || host == '::1' || host == '[::1]';
+
 /// Wait for a handshake, or report the deadline and close the socket.
 ///
 /// The one rule behind the timeout, as its own function: a dial that never
@@ -88,14 +93,37 @@ class WebSocketConnection implements ControlChannel {
 
   WebSocketConnection(this.endpoint, {Duration? openTimeout})
       : _openTimeout = openTimeout ?? kChannelOpenTimeout {
-    if (endpoint.scheme != 'wss' ||
-        !endpoint.hasAuthority ||
+    if (!_isSafeEndpoint(endpoint)) {
+      throw ArgumentError.value(
+        endpoint,
+        'endpoint',
+        'must be wss, or ws on loopback where no network is involved',
+      );
+    }
+  }
+
+  /// Whether a credential may be sent to this endpoint.
+  ///
+  /// The machine reports its own loopback address, and it serves that with a
+  /// plain ws:// because there is no network in between and nothing to encrypt.
+  /// Refusing it outright was a real bug: the local endpoint is preferred, and
+  /// constructing the channel threw before any dial - inside an async listener
+  /// that swallowed it - so no connection was attempted and nothing was
+  /// reported. Nothing but loopback may be plain, and the rule is here so every
+  /// caller is held to it.
+  static bool _isSafeEndpoint(Uri endpoint) {
+    if (!endpoint.hasAuthority ||
         endpoint.host.isEmpty ||
         endpoint.userInfo.isNotEmpty ||
         endpoint.hasQuery ||
         endpoint.hasFragment) {
-      throw ArgumentError.value(endpoint, 'endpoint', 'must be a safe WSS URI');
+      return false;
     }
+    final scheme = endpoint.scheme.toLowerCase();
+    if (scheme == 'wss') {
+      return true;
+    }
+    return scheme == 'ws' && isLoopbackHost(endpoint.host);
   }
 
   @override

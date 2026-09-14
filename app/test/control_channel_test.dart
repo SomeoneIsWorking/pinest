@@ -37,12 +37,31 @@ void main() {
     expect(closed, 0);
   });
 
-  test('an unsafe endpoint is refused when the channel is built', () {
-    // Nothing may send the Firebase token to a URL that is not a safe WSS one.
+  test('the machine\'s own loopback may be plain, nothing else may', () {
+    // The host serves its loopback with ws:// because no network is involved.
+    // Refusing it threw while the local endpoint was still PREFERRED - inside an
+    // async listener that swallowed it - so no dial happened and nothing was
+    // reported. This is the regression that made every client look offline.
+    expect(
+      () => WebSocketConnection(Uri.parse('ws://127.0.0.1:41234/')),
+      returnsNormally,
+    );
+    expect(
+      () => WebSocketConnection(Uri.parse('ws://localhost:41234/')),
+      returnsNormally,
+    );
+    // Plain ws anywhere else would put the Firebase token on the wire.
     expect(
       () => WebSocketConnection(Uri.parse('ws://plain.example/')),
       throwsArgumentError,
     );
+    expect(
+      () => WebSocketConnection(Uri.parse('ws://10.0.0.7:41234/')),
+      throwsArgumentError,
+    );
+  });
+
+  test('an unsafe endpoint is refused when the channel is built', () {
     expect(
       () => WebSocketConnection(Uri.parse('wss://host.example/?x=1')),
       throwsArgumentError,
@@ -51,5 +70,18 @@ void main() {
       () => WebSocketConnection(Uri.parse('wss://user:pw@host.example/')),
       throwsArgumentError,
     );
+    expect(
+      () => WebSocketConnection(Uri.parse('http://host.example/')),
+      throwsArgumentError,
+    );
+  });
+
+  test('a discovered loopback is recognised as loopback', () {
+    // The same rule the endpoint choice and the channel guard share.
+    expect(isLoopbackHost('127.0.0.1'), isTrue);
+    expect(isLoopbackHost('localhost'), isTrue);
+    expect(isLoopbackHost('::1'), isTrue);
+    expect(isLoopbackHost('example.com'), isFalse);
+    expect(isLoopbackHost('127.0.0.1.example.com'), isFalse);
   });
 }

@@ -249,60 +249,13 @@ class AgentService extends ChangeNotifier {
         .listen(
           (doc) async {
             if (_boundUid != uid) return;
-            if (!doc.exists) {
-              _note('the machine has not published anything for this account yet');
-              _transitionToDisconnected(forgetEndpoint: true);
-              return;
-            }
-            final data = doc.data()!;
-            final ts = (data['ts'] as num?)?.toInt() ?? 0;
-            final now = DateTime.now().millisecondsSinceEpoch;
-            final age = now - ts;
-            final fresh = age >= -30000 && age < 60000;
-            final endpoint = secureDiscoveryWebSocketUri(data['url']);
-
-            if (!fresh) {
-              _note('the machine\'s last update is ${(age / 1000).round()}s old, so it is not being used');
-              _transitionToDisconnected(forgetEndpoint: true);
-              return;
-            }
-            // A published URL that is not a safe WSS endpoint is refused
-            // outright: nothing may receive the Firebase token instead.
-            if (data['url'] != null && endpoint == null) {
-              _transitionToDisconnected(forgetEndpoint: true, notify: false);
-              _error = 'Rejected insecure discovery URL';
-              notifyListeners();
-              return;
-            }
-            if (endpoint != null) _lastEndpoint = endpoint;
-
-            // The tunnel is dialled FIRST and the direct attempt runs beside
-            // it: a punch takes as long as ICE takes, and making the only
-            // working path wait for it left the app disconnected for the
-            // duration - the machine looked offline while an exchange that may
-            // never land was in flight. A direct channel replaces the tunnel
-            // once it is actually open, so nothing is lost by trying it second.
-            if (endpoint != null) {
-              final picked = pickEndpoint(
-                local: _localEndpoint,
-                remote: endpoint,
-                lastFailedLocal: _localFailed,
-              );
-              if (picked != null) {
-                _note('connecting to ${picked.host}');
-                _dialTarget = picked;
-                await _dial(picked);
-              } else {
-                _note('the machine published no endpoint this app can dial');
-              }
-            }
-            // A direct connection needs no third party in the data path. A
-            // failure is not silent: the link records why, and a machine with
-            // no tunnel at all is still reachable this way.
-            _direct.tryConnectInBackground(data);
-            if (endpoint == null && !_direct.active) {
-              _note('the machine published no tunnel URL; a direct connection is being attempted');
-              _transitionToDisconnected(forgetEndpoint: true, notify: false);
+            try {
+              await _applyDiscovery(doc);
+            } catch (e) {
+              // This body is async and the listener swallows what it throws: a
+              // defect in here looked exactly like a machine that was simply
+              // offline, with nothing recorded and no further attempt.
+              _note('the connection could not be started: $e');
               notifyListeners();
             }
           },
@@ -313,6 +266,69 @@ class AgentService extends ChangeNotifier {
             notifyListeners();
           },
         );
+  }
+
+  /// Apply one discovery update: pick an endpoint, dial it, try direct beside it.
+  Future<void> _applyDiscovery(DocumentSnapshot<Map<String, dynamic>> doc) async {
+    if (!doc.exists) {
+      _note('the machine has not published anything for this account yet');
+      _transitionToDisconnected(forgetEndpoint: true);
+      return;
+    }
+    final data = doc.data();
+    if (data == null) {
+      _note('the machine published an update this app could not read');
+      return;
+    }
+    final ts = (data['ts'] as num?)?.toInt() ?? 0;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final age = now - ts;
+    final fresh = age >= -30000 && age < 60000;
+    final endpoint = secureDiscoveryWebSocketUri(data['url']);
+
+    if (!fresh) {
+      _note("the machine's last update is ${(age / 1000).round()}s old, so it is not being used");
+      _transitionToDisconnected(forgetEndpoint: true);
+      return;
+    }
+    // A published URL that is not a safe WSS endpoint is refused outright:
+    // nothing may receive the Firebase token instead.
+    if (data['url'] != null && endpoint == null) {
+      _transitionToDisconnected(forgetEndpoint: true, notify: false);
+      _error = 'Rejected insecure discovery URL';
+      notifyListeners();
+      return;
+    }
+    if (endpoint != null) _lastEndpoint = endpoint;
+
+    // The tunnel is dialled FIRST and the direct attempt runs beside it: a
+    // punch takes as long as ICE takes, and making the only working path wait
+    // for it left the app disconnected for the duration - the machine looked
+    // offline while an exchange that may never land was in flight. A direct
+    // channel replaces the tunnel once it is actually open.
+    if (endpoint != null) {
+      final picked = pickEndpoint(
+        local: _localEndpoint,
+        remote: endpoint,
+        lastFailedLocal: _localFailed,
+      );
+      if (picked != null) {
+        _note('connecting to ${picked.host}');
+        _dialTarget = picked;
+        await _dial(picked);
+      } else {
+        _note('the machine published no endpoint this app can dial');
+      }
+    }
+    // A direct connection needs no third party in the data path. A failure is
+    // not silent: the link records why, and a machine with no tunnel at all is
+    // still reachable this way.
+    _direct.tryConnectInBackground(data);
+    if (endpoint == null && !_direct.active) {
+      _note('the machine published no tunnel URL; a direct connection is being attempted');
+      _transitionToDisconnected(forgetEndpoint: true, notify: false);
+      notifyListeners();
+    }
   }
 
   /// Dial the tunnel URL. Safe to call repeatedly — skips if already
