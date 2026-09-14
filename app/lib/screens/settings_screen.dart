@@ -132,10 +132,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 color: svc.anyMachineOnline ? Colors.green : Colors.red,
               ),
               title: Text(svc.hostname.isNotEmpty ? svc.hostname : 'No machine online'),
-              subtitle: svc.tunnelUrl != null
-                  ? Text('${svc.tunnelProvider ?? 'tunnel'}: ${svc.tunnelUrl}',
-                      style: const TextStyle(fontSize: 11))
-                  : const Text('No tunnel URL published'),
+              subtitle: svc.directConnection
+                  // The transport the session is actually on matters: a direct
+                  // channel carries no traffic through anyone else.
+                  ? const Text('Connected directly (no tunnel in the data path)',
+                      style: TextStyle(fontSize: 11))
+                  : svc.tunnelUrl != null
+                      ? Text('${svc.tunnelProvider ?? 'tunnel'}: ${svc.tunnelUrl}',
+                          style: const TextStyle(fontSize: 11))
+                      : Text(
+                          svc.directFailure == null
+                              ? 'No tunnel URL published'
+                              : 'No tunnel; direct connection failed: ${svc.directFailure}',
+                          style: const TextStyle(fontSize: 11),
+                        ),
               isThreeLine: svc.tunnelUrl != null,
               trailing: svc.tunnelUrl == null
                   ? null

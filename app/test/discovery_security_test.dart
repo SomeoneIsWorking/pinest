@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pinest_app/services/control_channel.dart';
 import 'package:pinest_app/logic/endpoint_choice.dart';
-import 'package:pinest_app/services/agent_service.dart';
 
 void main() {
   test('accepts only credential-free HTTPS discovery URLs', () {

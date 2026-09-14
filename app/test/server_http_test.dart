@@ -7,7 +7,7 @@ import 'package:pinest_app/services/server_http.dart';
 
 /// Records what the caller was told, so a failure mode that silently does
 /// nothing cannot pass.
-class _Sink {
+class RecordingSink {
   final List<String> images = [];
   final List<String> missing = [];
   final List<Map<String, dynamic>> offline = [];
@@ -15,7 +15,7 @@ class _Sink {
 }
 
 ServerHttp build(
-  _Sink sink, {
+  RecordingSink sink, {
   Uri? endpoint,
   String? key,
   http.Client? client,
@@ -57,7 +57,7 @@ void main() {
   });
 
   test('an image is fetched with the access key and delivered', () async {
-    final sink = _Sink();
+    final sink = RecordingSink();
     Uri? sawUrl;
     Map<String, String>? sawHeaders;
     final service = build(
@@ -80,7 +80,7 @@ void main() {
   });
 
   test('a failed image fetch reports the reason instead of staying blank', () async {
-    final sink = _Sink();
+    final sink = RecordingSink();
     final service = build(
       sink,
       endpoint: Uri.parse('wss://host.example'),
@@ -95,13 +95,13 @@ void main() {
   });
 
   test('an image fetch without a connection says so', () async {
-    final sink = _Sink();
+    final sink = RecordingSink();
     await build(sink).fetchImage('img-3');
     expect(sink.missing, ['img-3:not connected yet']);
   });
 
   test('a message is posted as JSON and 202 means accepted', () async {
-    final sink = _Sink();
+    final sink = RecordingSink();
     Uri? sawUrl;
     String? sawBody;
     Map<String, String>? sawHeaders;
@@ -128,7 +128,7 @@ void main() {
   });
 
   test('a refused message is reported with its reason, never swallowed', () async {
-    final sink = _Sink();
+    final sink = RecordingSink();
     final service = build(
       sink,
       endpoint: Uri.parse('wss://host.example'),
@@ -144,7 +144,7 @@ void main() {
   });
 
   test('offline and unconfigured sends are parked instead of posted', () async {
-    final sink = _Sink();
+    final sink = RecordingSink();
     var requests = 0;
     final service = build(
       sink,
@@ -166,7 +166,7 @@ void main() {
   });
 
   test('a transport failure is a refusal with the error, not silence', () async {
-    final sink = _Sink();
+    final sink = RecordingSink();
     final service = build(
       sink,
       endpoint: Uri.parse('wss://host.example'),
