@@ -373,14 +373,26 @@ test("startTunnel: preferred provider is tried first when available", async () =
   assert.equal(a.calls.start, 0, "non-preferred (a) not reached");
 });
 
-test("startTunnel: falls back to next provider when preferred fails", async () => {
+test("startTunnel: an explicit preferred provider is honored, never silently replaced", async () => {
+  // The user chose a provider. Answering its failure with a different provider
+  // is what put ngrok back under a cloudflared preference.
   const a = mockProvider("a", { fail: true });
   const b = mockProvider("b", { url: "https://b.example" });
   const r = await startTunnel({ port: 1, preferred: "a", providers: [a, b] });
+  assert.equal(r.provider, null);
+  assert.equal(r.url, null);
+  assert.equal(a.calls.start, 1, "the chosen provider was attempted");
+  assert.equal(b.calls.start, 0, "no other provider runs behind the user's back");
+});
+
+test("startTunnel: with no preference, providers are tried in registry order", async () => {
+  const a = mockProvider("a", { fail: true });
+  const b = mockProvider("b", { url: "https://b.example" });
+  const r = await startTunnel({ port: 1, providers: [a, b] });
   assert.equal(r.provider, "b");
   assert.equal(r.url, "https://b.example");
-  assert.equal(a.calls.start, 1, "preferred (a) was attempted");
-  assert.equal(b.calls.start, 1, "fallback (b) was attempted");
+  assert.equal(a.calls.start, 1);
+  assert.equal(b.calls.start, 1);
 });
 
 test("startTunnel: skips unavailable providers", async () => {
