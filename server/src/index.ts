@@ -392,6 +392,9 @@ async function bootstrap(): Promise<void> {
     return verifiedOwnerToken(identity);
   });
   _ws.on("command", (cmd) => { void handleCommand(cmd); });
+  // The HTTP routes get the same dispatcher, with refusals propagating so they
+  // can be answered with a status code instead of an unread push.
+  _ws.setCommandRunner((cmd) => dispatchCommand(cmd));
   _ws.setStateProvider(() => _publisher.message());
   // A moved tunnel URL is only useful once the app can see it: republish the
   // discovery document the app watches, and refresh the local state snapshot.
@@ -597,9 +600,35 @@ async function startDirectTransport(): Promise<void> {
   }
 }
 
+/**
+ * Dispatch a command from a socket: a refusal is pushed to the client as a
+ * notice, because a socket has no reply channel for it.
+ */
 async function handleCommand(command: ClientCommand): Promise<void> {
   try {
-    await dispatchClientCommand(command, {
+    await dispatchCommand(command);
+  } catch (e) {
+    debug("[remote-code] command error:", (e as Error).message);
+    // Attribute the failure to its session when the command had one: without
+    // it the client cannot tell that ITS message was refused, and a refused
+    // send sat at "sending…" forever.
+    const sessionId = "sessionId" in command ? command.sessionId : undefined;
+    broadcast({
+      type: "error",
+      message: String((e as Error).message || e),
+      ...(sessionId ? { sessionId } : {}),
+    });
+  }
+}
+
+/**
+ * Dispatch a command and let a refusal escape.
+ *
+ * The HTTP routes call this: a refused message has to be a status code the app
+ * can act on, not a notice it may never see.
+ */
+async function dispatchCommand(command: ClientCommand): Promise<void> {
+  await dispatchClientCommand(command, {
       hostSessionId: _sessionId,
       isLiveSpawned: (id) => !!_supervisor?.sessions.has(id),
       isRegistered: (id) => !!_registry?.get(id),
@@ -650,18 +679,6 @@ async function handleCommand(command: ClientCommand): Promise<void> {
         }
       },
     });
-  } catch (e) {
-    debug("[remote-code] command error:", (e as Error).message);
-    // Attribute the failure to its session when the command had one: without
-    // it the client cannot tell that ITS message was refused, and a refused
-    // send sat at "sending…" forever.
-    const sessionId = "sessionId" in command ? command.sessionId : undefined;
-    broadcast({
-      type: "error",
-      message: String((e as Error).message || e),
-      ...(sessionId ? { sessionId } : {}),
-    });
-  }
 }
 
 async function handleInteractiveCommand(cmd: ClientCommand): Promise<void> {

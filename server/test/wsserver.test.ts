@@ -277,6 +277,8 @@ test("the same frame produces the same command on the socket and over HTTP", asy
   const clients: WebSocket[] = [];
   t.after(() => stopAll(server, clients));
   server.on("command", (command) => received.push(command));
+  // Both transports feed one sink; the strict equality below is the claim.
+  server.setCommandRunner((command) => received.push(command));
   const frame = { type: "command", cmd: { type: "user_message", sessionId: "s1", text: "hello" } };
 
   const socket = await openClient(server);
@@ -295,6 +297,28 @@ test("the same frame produces the same command on the socket and over HTTP", asy
 
   assert.equal(received.length, 2, "one command from each transport");
   assert.deepEqual(received[0], received[1], "the transports produced the same command");
+});
+
+test("a command the machine refuses is answered with a status, never a 202", async (t) => {
+  // The phone read "accepted" while the machine refused the command: the socket
+  // path pushes its refusals, so the HTTP path must report its own as a status.
+  const server = await startServer();
+  t.after(() => server.stop());
+  server.setCommandRunner(() => {
+    throw new Error("no session no-such-session");
+  });
+
+  const response = await fetch(`http://127.0.0.1:${server.port}/message`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-pinest-key": server.accessKey },
+    body: JSON.stringify({
+      type: "command",
+      cmd: { type: "user_message", sessionId: "no-such-session", text: "hi" },
+    }),
+  });
+  assert.equal(response.status, 409);
+  const body = await response.json() as { error: string };
+  assert.match(body.error, /no session no-such-session/);
 });
 
 test("closing during verification cannot retain or authenticate the dead socket", async (t) => {
