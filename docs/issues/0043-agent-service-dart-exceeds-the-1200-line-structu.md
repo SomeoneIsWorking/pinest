@@ -22,3 +22,6 @@ Resolved: agent_service.dart is 1173 lines after extracting history_merge.dart, 
 
 ### Resolution (2026-09-14)
 agent_service.dart 1350 -> 1173 lines; index.ts 1310 -> 1158. npm test structure check passes; flutter analyze clean; 11 new tests (9 server_http + 2 verifier mask).
+
+### Note (2026-09-14)
+Second pass: agent_service.dart 1205 -> 1168 by extracting DirectLink (answer-the-offer state machine, 7 tests). Structure check passes.
