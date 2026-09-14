@@ -9,6 +9,7 @@
 import { createServer } from "node:http";
 import type { Server } from "node:http";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
+import type { HttpHistoryRunner } from "./http-api.ts";
 import { createAccessKey, createHttpApi } from "./http-api.ts";
 import debug from "./log.ts";
 import { startTunnel as startProviderTunnel, type StartTunnelResult } from "./tunnel.ts";
@@ -116,6 +117,9 @@ export class WSServer {
   /** authenticated clients */
   clients: Set<AuthedSocket> = new Set();
   private handlers: { command?: CommandHandler } = {};
+  /** Answers a history request for the HTTP route. Injected by the composition
+   * root because it must reuse the socket's own dispatch path. */
+  private historyRunner?: HttpHistoryRunner;
   private verifyFn: VerifyFn | null = null;
   private stateProvider: (() => ServerMessage) | null = null;
   private unauthenticatedClients: Set<AuthedSocket> = new Set();
@@ -143,6 +147,10 @@ export class WSServer {
     if (event === "command") this.handlers.command = handler;
   }
 
+  setHistoryRunner(runner: HttpHistoryRunner): void {
+    this.historyRunner = runner;
+  }
+
   /** Secret the app presents on HTTP. Per process, never persisted. */
   private httpKey = createAccessKey();
 
@@ -160,6 +168,10 @@ export class WSServer {
         createHttpApi({
           accessKey: this.httpKey,
           dispatch: (command) => this.handlers.command?.(command as ClientCommand),
+          history: (command) =>
+            this.historyRunner
+              ? this.historyRunner(command)
+              : Promise.resolve({ ok: false as const, status: 503, error: "history is not available yet" }),
         }),
       );
       this.httpServer = server;
@@ -541,9 +553,22 @@ export class WSServer {
   async startTunnel(preferred?: string): Promise<string | null> {
     this.tunnel = await startProviderTunnel({ port: this.port, preferred });
     this.tunnelUrl = this.tunnel?.url ?? null;
-    if (this.tunnel) this.tunnel.onDead = () => this.tunnelOnDead?.();
+    if (this.tunnel) {
+      this.tunnel.onDead = () => this.tunnelOnDead?.();
+      // A quick tunnel can re-register under a new hostname while its process
+      // stays alive. The published URL must follow it or the app is pointed at
+      // a name that no longer resolves.
+      this.tunnel.onUrlChanged = (url) => {
+        this.tunnelUrl = url;
+        this.tunnelUrlChanged?.();
+      };
+    }
     return this.tunnel?.provider ?? null;
   }
+
+  /** Fired when the live tunnel's URL moves (re-registration); the composition
+   * root republishes presence so the app's discovery document follows. */
+  tunnelUrlChanged?: () => void;
 
   /** Called when the active tunnel process dies (auto-restart hook). */
   tunnelOnDead?: () => void;

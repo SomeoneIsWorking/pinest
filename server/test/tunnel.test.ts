@@ -7,7 +7,8 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import {
   PROVIDERS, PROVIDER_NAMES, DEFAULT_PROVIDER, cloudflaredArgs, cloudflaredInstallHint,
-  firstValidTunnelEndpoint, getProvider, makeLineReader, ngrokArgs, readNgrokApiUrl,
+  adoptTunnelEndpoint, firstValidTunnelEndpoint, getProvider, makeLineReader, ngrokArgs,
+  readNgrokApiUrl,
   resolveRunnableSystemExecutable, resolveSystemExecutable, startTunnel,
   tailscaleInstallHint, validateTunnelEndpoint,
 } from "../src/tunnel.ts";
@@ -440,4 +441,22 @@ test("a chunk holding several whole lines yields each of them", () => {
   const feed = makeLineReader((line) => lines.push(line));
   feed("one\ntwo\nthree\n");
   assert.deepEqual(lines, ["one", "two", "three"]);
+});
+
+test("a re-registered endpoint moves the handle and is reported once", () => {
+  const handle = { url: null as string | null };
+  // First sighting is the handle's own construction, not an adoption.
+  handle.url = "https://first-name.trycloudflare.com";
+  const changes: string[] = [];
+  const note = (url: string) => changes.push(url);
+
+  // The banner repeats the same name: not a change, no churn.
+  assert.equal(adoptTunnelEndpoint(handle, "https://first-name.trycloudflare.com"), false);
+  assert.deepEqual(changes, []);
+
+  // The connection re-establishes under a new name: the old one is dead.
+  assert.equal(adoptTunnelEndpoint(handle, "https://second-name.trycloudflare.com"), true);
+  note(handle.url!);
+  assert.deepEqual(changes, ["https://second-name.trycloudflare.com"]);
+  assert.equal(handle.url, "https://second-name.trycloudflare.com");
 });
