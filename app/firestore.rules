@@ -47,8 +47,13 @@ service cloud.firestore {
         && (!data.keys().hasAny(['p2pAnswer'])
           || (hasValidDescription(data.p2pAnswer)
               && data.keys().hasAny(['p2pAnswerTs'])
-              && data.p2pAnswerTs is int))
-        && (!data.keys().hasAny(['p2pAnswerTs']) || data.p2pAnswerTs is int);
+              && data.p2pAnswerTs is int
+              // The answer NAMES the offer it describes, so the machine can
+              // match it by identity instead of comparing two devices' clocks.
+              && data.keys().hasAny(['p2pAnswerOfferTs'])
+              && data.p2pAnswerOfferTs is int))
+        && (!data.keys().hasAny(['p2pAnswerTs']) || data.p2pAnswerTs is int)
+        && (!data.keys().hasAny(['p2pAnswerOfferTs']) || data.p2pAnswerOfferTs is int);
     }
 
     function hasValidPresenceShape() {
@@ -57,7 +62,8 @@ service cloud.firestore {
       return data.keys().hasAll(['url', 'online', 'ts'])
         && data.keys().hasOnly(
           ['url', 'online', 'ownerEmail', 'hostname', 'ts',
-           'p2pOffer', 'p2pOfferTs', 'p2pAnswer', 'p2pAnswerTs'])
+           'p2pOffer', 'p2pOfferTs', 'p2pAnswer', 'p2pAnswerTs',
+           'p2pAnswerOfferTs'])
         && hasValidHttpsUrl(data.url)
         && data.online is bool
         && (!data.keys().hasAny(['ownerEmail'])
@@ -83,7 +89,8 @@ service cloud.firestore {
     function touchesOnlySignaling() {
       let affected = request.resource.data.diff(resource.data).affectedKeys();
       return affected.hasOnly(
-          ['p2pOffer', 'p2pOfferTs', 'p2pAnswer', 'p2pAnswerTs'])
+          ['p2pOffer', 'p2pOfferTs', 'p2pAnswer', 'p2pAnswerTs',
+           'p2pAnswerOfferTs'])
         && (affected.hasAny(
           ['p2pOffer', 'p2pOfferTs', 'p2pAnswer', 'p2pAnswerTs']));
     }
