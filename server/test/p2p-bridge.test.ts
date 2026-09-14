@@ -11,26 +11,19 @@ import assert from "node:assert/strict";
 import { RTCPeerConnection, RTCSessionDescription, type RTCDataChannel } from "werift";
 import { WebSocketServer } from "ws";
 
-import { startP2PHost, type Signaling } from "../src/p2p.ts";
+import { startP2PExchange } from "../src/p2p.ts";
 import { bridgeToLoopback } from "../src/p2p-bridge.ts";
 
-/** Signaling with no network: offers are handed straight to the answering
- * peer, answers straight back. The same shape Firestore will carry. */
-function inMemorySignaling(): {
-  signaling: Parameters<typeof startP2PHost>[0]["signaling"];
-  deliverAnswer: (sdp: string) => void;
-} {
-  const answerHandlers: ((sdp: string) => void)[] = [];
-  return {
-    signaling: {
-      publishOffer: async () => {},
-      onAnswer: (handler) => { answerHandlers.push(handler); },
-    },
-    deliverAnswer: (sdp) => {
-      assert.ok(answerHandlers.length > 0, "the host registered for answers before one arrived");
-      for (const handler of answerHandlers) handler(sdp);
-    },
-  };
+/** An exchange that publishes nowhere: the offer is handed straight to the
+ * answering peer in this process, the way Firestore carries it in production. */
+function localExchange(opts: { log?: (m: string) => void } = {}) {
+  const published: { sdp: string; ts: number }[] = [];
+  const exchange = startP2PExchange({
+    publish: async (sdp, ts) => { published.push({ sdp, ts }); },
+    stunServers: [],
+    log: opts.log,
+  });
+  return { exchange, published };
 }
 
 /** A stub loopback server that echoes, prefixed, so the assertion proves the
@@ -55,18 +48,17 @@ function stubLoopbackServer(): Promise<{ port: number; close: () => Promise<void
 }
 
 test("a DataChannel bridges to the loopback server in both directions", async () => {
-  const { signaling, deliverAnswer } = inMemorySignaling();
   const loop = await stubLoopbackServer();
   let bridge: import("../src/p2p-bridge.ts").LoopbackBridge | null = null;
 
-  const host = startP2PHost({ signaling, port: loop.port, stunServers: [] });
+  const { exchange: host } = localExchange();
 
   const answering = new RTCPeerConnection();
   const remoteChannelReady = new Promise<RTCDataChannel>((resolve) => {
     answering.ondatachannel = (event) => resolve(event.channel);
   });
 
-  const offer = await host.offerSdp;
+  const offer = await host.offer(1_000);
   assert.match(offer, /a=mid:/, "the offer is a real SDP");
 
   await answering.setRemoteDescription(new RTCSessionDescription(offer, "offer"));
@@ -84,8 +76,8 @@ test("a DataChannel bridges to the loopback server in both directions", async ()
       });
     });
   }
-  // One answer, through signaling only: the host's own handler applies it.
-  deliverAnswer((answering.localDescription as RTCSessionDescription).sdp);
+  // One answer, through signaling only: the exchange applies it.
+  await host.acceptAnswer((answering.localDescription as RTCSessionDescription).sdp);
 
   try {
     const remote = await remoteChannelReady;
@@ -140,23 +132,17 @@ test("a DataChannel bridges to the loopback server in both directions", async ()
 
 // ── The host side of the exchange ─────────────────────────────────────────
 
-/** The host peer alone, with a fake signaling channel and a recording log. */
+/** The host peer alone, with a recording log and its published offer. */
 async function hostPeer() {
-  const answerHandlers: ((sdp: string) => void)[] = [];
   const logged: string[] = [];
-  const published: string[] = [];
-  const peer = startP2PHost({
-    port: 0,
-    // No STUN: gathering must not depend on the network in a unit test.
+  const published: { sdp: string; ts: number }[] = [];
+  const exchange = startP2PExchange({
+    publish: async (sdp, ts) => { published.push({ sdp, ts }); },
     stunServers: [],
     log: (message) => logged.push(message),
-    signaling: {
-      publishOffer: async (sdp) => { published.push(sdp); },
-      onAnswer: (handler) => { answerHandlers.push(handler); },
-    },
   });
-  const offer = await peer.offerSdp;
-  return { peer, answerHandlers, logged, published, offer };
+  const offer = await exchange.offer(1_000);
+  return { peer: exchange, logged, published, offer };
 }
 
 test("a repeated answer is ignored and reported, not fatal", async () => {
@@ -169,11 +155,11 @@ test("a repeated answer is ignored and reported, not fatal", async () => {
   await answerer.setLocalDescription(answer);
   const sdp = answerer.localDescription!.sdp!;
 
-  // Delivered twice: the app answers from state that does not survive a page
+  // Applied twice: the app answers from state that does not survive a page
   // reload, so this is a normal retry rather than an attack.
-  for (const handler of host.answerHandlers) handler(sdp);
+  await host.peer.acceptAnswer(sdp);
   await new Promise((r) => setTimeout(r, 300));
-  for (const handler of host.answerHandlers) handler(sdp);
+  await host.peer.acceptAnswer(sdp);
   await new Promise((r) => setTimeout(r, 300));
 
   assert.equal(
@@ -197,16 +183,11 @@ test("an answer that cannot be applied is reported, and the exchange survives it
   // escaped an un-awaited promise, and the host logged it as FATAL. The answer
   // is applied defensively here, and the exchange has to keep working after a
   // bad one arrives - a refused answer must not poison the peer.
-  const answerHandlers: ((sdp: string) => void)[] = [];
   const logged: string[] = [];
-  const peer = startP2PHost({
-    port: 0,
+  const peer = startP2PExchange({
+    publish: async () => {},
     stunServers: [],
     log: (message) => logged.push(message),
-    signaling: {
-      publishOffer: async () => {},
-      onAnswer: (handler) => { answerHandlers.push(handler); },
-    },
   });
 
   const rejections: unknown[] = [];
@@ -214,7 +195,7 @@ test("an answer that cannot be applied is reported, and the exchange survives it
   process.on("unhandledRejection", onRejection);
   try {
     // Delivered before the host has even set its own offer locally.
-    for (const handler of answerHandlers) handler("v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\n");
+    await peer.acceptAnswer("v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\n");
     await new Promise((r) => setTimeout(r, 300));
   } finally {
     process.off("unhandledRejection", onRejection);
@@ -227,13 +208,13 @@ test("an answer that cannot be applied is reported, and the exchange survives it
   );
 
   // And the real answer still completes the exchange.
-  const offer = await peer.offerSdp;
+  const offer = await peer.offer(1_000);
   const answerer = new RTCPeerConnection();
   answerer.ondatachannel = () => {};
   await answerer.setRemoteDescription(new RTCSessionDescription(offer, "offer"));
   const answer = await answerer.createAnswer();
   await answerer.setLocalDescription(answer);
-  for (const handler of answerHandlers) handler(answerer.localDescription!.sdp!);
+  await peer.acceptAnswer(answerer.localDescription!.sdp!);
   const channel = await Promise.race([
     peer.channel,
     new Promise((resolve) => setTimeout(() => resolve(null), 5_000)),

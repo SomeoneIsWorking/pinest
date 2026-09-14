@@ -19,7 +19,17 @@ export interface LoopbackBridge {
   close(): void;
 }
 
-export function bridgeToLoopback(channel: RTCDataChannel, port: number): LoopbackBridge {
+/** Told when the channel that feeds this bridge ends, so a transport can stop
+ * believing it is still connected. */
+export interface LoopbackBridgeEvents {
+  onClosed?: () => void;
+}
+
+export function bridgeToLoopback(
+  channel: RTCDataChannel,
+  port: number,
+  events: LoopbackBridgeEvents = {},
+): LoopbackBridge {
   const socket = new WebSocket(`ws://127.0.0.1:${port}/`);
   let open = false;
   const pending: (string | Buffer)[] = [];
@@ -38,6 +48,7 @@ export function bridgeToLoopback(channel: RTCDataChannel, port: number): Loopbac
   };
   channel.onclose = () => {
     socket.close();
+    events.onClosed?.();
   };
 
   socket.on("open", () => {

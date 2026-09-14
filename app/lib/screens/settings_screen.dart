@@ -159,6 +159,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
             ),
           ),
+          const SizedBox(height: 8),
+          // The other half of peer-to-peer: what the MACHINE is doing. Its own
+          // line because a punch that fails silently reads exactly like one
+          // that was never attempted.
+          Card(
+            child: ListTile(
+              leading: Icon(
+                svc.directConnection || svc.hostDirectStatus?.channelOpen == true
+                    ? Icons.leak_add
+                    : Icons.link_off,
+                color: svc.directConnection ? Colors.green : null,
+              ),
+              title: const Text('Direct connection'),
+              subtitle: Text(
+                svc.directConnection
+                    ? 'This device is connected directly — no tunnel in the data path.'
+                    : svc.hostDirectStatus?.describe() ??
+                        'The machine has not reported a direct connection.',
+                style: const TextStyle(fontSize: 11),
+              ),
+              isThreeLine: !svc.directConnection,
+            ),
+          ),
           const SizedBox(height: 24),
 
           // ── Image cap ─────────────────────────────────────────────────────

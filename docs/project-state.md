@@ -147,11 +147,19 @@ is published and the channel carries the auth handshake, a command, and an
 inbound frame; a peer that never opens a channel fails as a timeout rather than
 hanging; a description that is not an offer is refused.
 
+A failed punch is now visible from both sides: the app reports its own failure
+whenever a direct attempt fails (not only when offline), and Settings names what
+the MACHINE is doing - not offering, offering with nobody connected, or a peer
+connected - so "nobody answered" and "the machine stopped offering" no longer
+look alike (`app/lib/models/direct_status.dart`).
+
 Gap: the direct transport is browser-only (a Dart VM has no ICE stack here), the
-tunnel stays in use until a direct channel is actually open, and no real
-phone/browser has connected to the live host end to end yet. `p2p` is off by
-default in a fresh install. A punch that fails is reported as a failure to reach the machine
-directly - it never silently falls back to a tunnel.
+tunnel stays in use until a direct channel is actually open, and travel across a
+third network is still unproven: every live verification so far ran both peers on
+one machine, where ICE can succeed on a local candidate, so a real phone on
+another network is the remaining evidence. `npm run verify:direct` prints that
+limitation itself rather than letting a local success stand in for it. `p2p` is
+off by default in a fresh install.
 
 ### S10 — Context and compaction controls
 
@@ -667,13 +675,11 @@ Evidence: Node suite (`npm test`) passes with 296 tests and 0 failures; `npm run
 
 ## Current focus
 
-S19 is the current focus: sessions must not stop for a context budget that does
-not exist (the statements, both wire paths, and the tests are in; what is missing
-is observation that it changes behaviour). S15/G7 stays open and is the previous
-focus: both halves of the direct transport exist and are verified separately —
-the host's offer is published through the real discovery document and a peer
-completes the exchange, the browser's answer path runs in real Chromium, and the
-tunnel path is verified live end to end — and the one thing that needs the
-operator's device is a real phone/browser reaching the live host over the direct
-channel with no tunnel in the data path (#46).
+S15/G7 is the current focus: the direct transport works, is refresh-aware, and is
+verifiable against the running machine from the command line, and what remains is
+traversal from a network other than this machine's — the operator's own device
+reaching the live host over the direct channel with no tunnel in the data path
+(#46). S19 stays open behind it: sessions must not stop for a context budget that
+does not exist (the statements, both wire paths, and the tests are in; what is
+missing is observation that it changes behaviour).
 `p2p` is off by default in a fresh install.
