@@ -37,6 +37,15 @@ export interface BackgroundTask {
   child?: ChildProcess;
   isAgent?: boolean;
   notifyOnCompletion?: boolean;
+  /**
+   * Set once its completion has been reported.
+   *
+   * A finishing task could be observed by both the process-close handler and
+   * the generic settle path, and each of them notified independently, so an
+   * agent received the same result twice. This flag makes the report happen
+   * once no matter how many paths notice the end.
+   */
+  notifiedCompletion?: boolean;
   triggerOnCompletion?: boolean;
 }
 
@@ -208,6 +217,23 @@ export class BackgroundProcessManager {
    * so a manager that survived a runtime reload adopts the CURRENT delivery
    * policy instead of the stale closure it was created with. */
   public notifyCompletion?: (task: BackgroundTask) => void | Promise<void>;
+
+  /**
+   * Report a finished task exactly once, and only when it asked to be reported.
+   *
+   * Every path that can observe the end calls this instead of `notifyCompletion`
+   * directly: two of them ran for the same completion, which is how a result was
+   * delivered twice, and one of them ignored `notifyOnCompletion` entirely.
+   */
+  private notifyTaskOnce(task: BackgroundTask): void {
+    if (task.notifyOnCompletion === false) return;
+    if (task.notifiedCompletion === true) return;
+    task.notifiedCompletion = true;
+    if (!this.notifyCompletion) return;
+    Promise.resolve(this.notifyCompletion(task)).catch((err) => {
+      debug(`[pinest] task ${task.id} completion notification error:`, err);
+    });
+  }
   public onTaskUpdate?: (task: BackgroundTask) => void;
   /** Resolves an owner for a task that carries no session id (a task created by
    * an older build and still running across a reload). Without it, "no id"
@@ -443,13 +469,7 @@ export class BackgroundProcessManager {
         task.finishedAt = Date.now();
       }
       this.onTaskUpdate?.(task);
-      if (task.notifyOnCompletion) {
-        try {
-          void this.notifyCompletion?.(task);
-        } catch {
-          // Ignore notification failures.
-        }
-      }
+      this.notifyTaskOnce(task);
     };
 
     child.on("error", (err) => {
@@ -725,11 +745,7 @@ export class BackgroundProcessManager {
           // Finished in background after 30s threshold.
           debug(`[pinest] background task ${task.id} finished with code ${code}`);
           this.onTaskUpdate?.(task);
-          if (this.notifyCompletion) {
-            Promise.resolve(this.notifyCompletion(task)).catch((err) => {
-              debug(`[pinest] task ${task.id} completion notification error:`, err);
-            });
-          }
+          this.notifyTaskOnce(task);
         }
       });
 
@@ -744,9 +760,7 @@ export class BackgroundProcessManager {
           reject(err);
         } else if (isBackground) {
           this.onTaskUpdate?.(task);
-          if (this.notifyCompletion) {
-            Promise.resolve(this.notifyCompletion(task)).catch(() => {});
-          }
+          this.notifyTaskOnce(task);
         }
       });
     });
