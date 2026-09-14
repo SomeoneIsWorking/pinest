@@ -7,7 +7,7 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import {
   PROVIDERS, PROVIDER_NAMES, DEFAULT_PROVIDER, cloudflaredArgs, cloudflaredInstallHint,
-  adoptTunnelEndpoint, firstValidTunnelEndpoint, getProvider, makeLineReader, ngrokArgs,
+  adoptTunnelEndpoint, endpointAnswers, firstValidTunnelEndpoint, getProvider, makeLineReader, ngrokArgs,
   readNgrokApiUrl,
   resolveRunnableSystemExecutable, resolveSystemExecutable, startTunnel,
   tailscaleInstallHint, validateTunnelEndpoint,
@@ -459,4 +459,33 @@ test("a re-registered endpoint moves the handle and is reported once", () => {
   note(handle.url!);
   assert.deepEqual(changes, ["https://second-name.trycloudflare.com"]);
   assert.equal(handle.url, "https://second-name.trycloudflare.com");
+});
+
+test("an endpoint is not confirmed until the public path answers", async () => {
+  // First two attempts fail the way a too-early DNS lookup does (the name is
+  // not resolvable yet); the third reaches the origin and 401 is the auth
+  // boundary answering - success, not an error.
+  let attempts = 0;
+  const sleeps: number[] = [];
+  const ok = await endpointAnswers("https://t.example", {
+    fetchImpl: (async () => {
+      attempts++;
+      if (attempts <= 2) throw new TypeError("getaddrinfo ENOTFOUND");
+      return { status: 401 } as Response;
+    }) as typeof fetch,
+    sleepMs: async (ms) => { sleeps.push(ms); },
+    deadlineMs: 10_000,
+  });
+  assert.equal(ok, true, "a status code through the public path is reachability");
+  assert.equal(attempts, 3);
+  assert.ok(sleeps.length >= 2, "it retried instead of failing on the first lookup");
+});
+
+test("an endpoint that never answers is refused, not published on faith", async () => {
+  const ok = await endpointAnswers("https://never.example", {
+    fetchImpl: (async () => { throw new TypeError("getaddrinfo ENOTFOUND"); }) as unknown as typeof fetch,
+    sleepMs: async () => {},
+    deadlineMs: 50,
+  });
+  assert.equal(ok, false);
 });

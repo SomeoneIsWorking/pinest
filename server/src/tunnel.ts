@@ -183,6 +183,41 @@ export function firstValidTunnelEndpoint(
   return null;
 }
 
+/** A published endpoint must answer through the public path before it is
+ * published.
+ *
+ * A quick tunnel's DNS record takes a few seconds to propagate after the URL
+ * line appears. The app looks the name up the moment it is published, and a
+ * lookup during propagation returns NXDOMAIN - which the local resolver then
+ * caches, and every app retry re-poisons it. Measured: the published name
+ * failed local resolution for minutes while resolvable via 1.1.1.1 and
+ * answering 401 through the edge. Any HTTP status through the public URL
+ * proves the whole path - name, edge, tunnel, local server - so 401 from our
+ * own auth boundary is success, not an error.
+ */
+export async function endpointAnswers(
+  url: string,
+  deps: {
+    fetchImpl?: typeof fetch;
+    sleepMs?: (ms: number) => Promise<void>;
+    deadlineMs?: number;
+  } = {},
+): Promise<boolean> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const sleep = deps.sleepMs ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const deadline = Date.now() + (deps.deadlineMs ?? 45_000);
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetchImpl(`${url}/image/tunnel-probe`, { signal: AbortSignal.timeout(5_000) });
+      if (res.status > 0) return true;
+    } catch {
+      // The name does not resolve yet; that is the normal early state.
+    }
+    await sleep(2_000);
+  }
+  return false;
+}
+
 export function cloudflaredInstallHint(platform: NodeJS.Platform = process.platform): string {
   if (platform === "darwin") return "brew install cloudflared";
   if (platform === "win32") return "winget install --id Cloudflare.cloudflared";
@@ -249,7 +284,12 @@ const cloudflaredProvider: TunnelProvider = {
       });
       const killProc = makeProcKill(proc);
       timer = setTimeout(
-        () => done(reject)(new Error("cloudflared timeout (no URL after 30s)") as unknown as void), 30000);
+        // The budget covers URL capture (a few seconds) plus the reachability
+        // verification, which waits out DNS propagation. Killing the process is
+        // part of failing: a timeout that only rejects leaves the tunnel
+        // running with nobody owning it.
+        () => { killProc(); done(reject)(new Error("cloudflared produced no reachable endpoint within 90s") as unknown as void); },
+        90_000);
       // MUST handle 'error' — a missing binary emits an unhandled 'error'
       // event on the child, crashing the process (the original bug).
       proc.on("error", done((err) => reject(new Error(`cloudflared spawn failed: ${err.message}`))));
@@ -272,7 +312,17 @@ const cloudflaredProvider: TunnelProvider = {
               created.onDead?.();
             }
           });
-          done(resolve)(created);
+          // Do not hand the endpoint to the app until the app's own path works:
+          // an early lookup poisons the local resolver's cache with NXDOMAIN and
+          // the app then cannot resolve a healthy name. See endpointAnswers.
+          endpointAnswers(endpoint).then((answers) => {
+            if (answers) {
+              done(resolve)(created);
+              return;
+            }
+            created.stop();
+            done(reject)(new Error(`cloudflared endpoint ${endpoint} never answered; refusing to publish an unreachable URL`));
+          });
           return;
         }
         // Still alive, but re-registered under a new name: the captured URL is
