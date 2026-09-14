@@ -468,6 +468,11 @@ export class BackgroundProcessManager {
           task.finishedAt = Date.now();
           killProcessTree(child.pid);
           this.onTaskUpdate?.(task);
+          // A timeout is an end like any other: reporting it is what stops the
+          // agent from having to poll to discover that its task ran out of time.
+          // The close handler cannot do it - it returns early because the
+          // status is no longer "running" - so it was never reported at all.
+          this.notifyTaskOnce(task);
         }
       }, options.timeoutSeconds * 1000);
     }
