@@ -221,6 +221,35 @@ async function fetchBounded(url: string, init: RequestInit, timeoutMs: number): 
   ]);
 }
 
+
+/** Which candidate pairs actually succeeded, by type.
+ *
+ * "ICE connected" is not the same as "this traversal works from another
+ * network": two peers on one machine can connect over a host candidate that no
+ * phone could ever use. Naming the pair types is what separates the two, so the
+ * on-machine result is quantified instead of assumed. */
+async function describeCandidatePairs(pc: RTCPeerConnection): Promise<string> {
+  let entries: any[];
+  try {
+    const report: any = await pc.getStats();
+    entries = typeof report?.values === "function" ? [...report.values()] : Object.values(report ?? {});
+  } catch (error) {
+    return `the stats report could not be read (${(error as Error).message})`;
+  }
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  const typeOf = (id: string): string => String(byId.get(id)?.candidateType ?? "unknown");
+  const pairs = entries
+    .filter((entry) => entry.type === "candidate-pair" && entry.state === "succeeded")
+    .map((pair) => `${typeOf(pair.localCandidateId)}\u2194${typeOf(pair.remoteCandidateId)}`);
+  if (pairs.length === 0) {
+    return "no candidate pair was reported as succeeded";
+  }
+  const kinds = entries
+    .filter((entry) => entry.type === "local-candidate" || entry.type === "remote-candidate")
+    .map((entry) => String(entry.candidateType));
+  return `${pairs.join(", ")} (gathered: ${[...new Set(kinds)].sort().join(", ")})`;
+}
+
 async function main(): Promise<void> {
   const timeoutMs = argValue("--timeout-ms", 60_000);
   // One watchdog for the whole run, so no stage can leave the check hanging.
@@ -323,6 +352,7 @@ async function main(): Promise<void> {
         `channels: both open (${PUSH_CHANNEL_LABEL}, ${ACTIONS_CHANNEL_LABEL}; `
         + `iceConnectionState=${pc.iceConnectionState})`,
       );
+      console.log(`pairs: ${await describeCandidatePairs(pc)}`);
     } else {
       console.log(
         `punch ${answered}: no channels after 12s (saw ${sawLabels.length === 0 ? "none" : sawLabels.join(", ")}); `
