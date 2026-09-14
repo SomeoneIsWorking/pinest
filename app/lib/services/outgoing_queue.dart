@@ -128,14 +128,21 @@ class OutgoingQueue {
     }
   }
 
-  /// The server refused this session's pending sends (e.g. it is no longer
-  /// running). They stay visible WITH the reason instead of vanishing.
-  void markFailed(String sessionId, String reason) {
-    final list = _bySession[sessionId];
-    if (list == null || list.isEmpty) return;
-    for (final message in list) {
-      message.failure = reason;
+  /// The server refused ONE send, named by its command id. Only that message is
+  /// marked; a session-level error is not a refusal of anything the user sent.
+  bool failByCmdId(String cmdId, String reason) {
+    if (cmdId.isEmpty) {
+      return false;
     }
+    for (final list in _bySession.values) {
+      for (final message in list) {
+        if (message.command['id'] == cmdId) {
+          message.failure = reason;
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   void remove(String sessionId, OutgoingMessage message) {
@@ -162,8 +169,7 @@ class OutgoingQueue {
         final text = entry['text'] as String?;
         if (command is! Map || sessionId == null || text == null) continue;
         final cmd = Map<String, dynamic>.from(command)
-          ..['sessionId'] = sessionId
-          ..remove('id');
+          ..['sessionId'] = sessionId;
         commands.add(cmd);
         track(sessionId, cmd, text: text, imageCount: 0);
       }

@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { makeTempDir, removeTempDir } from "../support/tmp.ts";
 import { SessionRegistry } from "../src/registry.ts";
 import { Supervisor } from "../src/supervisor.ts";
+import { CONTEXT_BUDGET_STATEMENT } from "../src/context-budget.ts";
 
 let TMP;
 let AGENT_DIR;
@@ -164,6 +165,24 @@ test("spawn excludes pinest from child session extensions", async () => {
     const paths = runner.getExtensionPaths?.() ?? [];
     assert.ok(!paths.some((p: string) => p.includes("pinest")), "pinest is not loaded in child session");
   }
+  await sup.shutdownAll();
+});
+
+test("a spawned session is told there is no context budget", async () => {
+  const workdir = makeTempDir("rc-child-budget-");
+  const sup = new Supervisor("uid", makeCallbacks(), registry, { agentDir: AGENT_DIR });
+  await sup.spawn({ sessionId: "child-budget-check", cwd: workdir });
+  const live = sup.sessions.get("child-budget-check");
+  assert.ok(live, "child session is live");
+  const runner = (live.session as any)._extensionRunner;
+  assert.ok(runner, "the spawned session runs an extension runner");
+  // Through the REAL runner, so a dropped inline extension fails here instead of
+  // silently leaving spawned agents free to invent a limit again.
+  const result = await runner.emitBeforeAgentStart("do the work", undefined, "base prompt", {});
+  assert.ok(
+    String(result?.systemPrompt ?? "").includes(CONTEXT_BUDGET_STATEMENT),
+    `the spawned session's system prompt states there is no context budget`,
+  );
   await sup.shutdownAll();
 });
 

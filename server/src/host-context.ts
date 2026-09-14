@@ -1,5 +1,6 @@
 import debug from "./log.ts";
 import { pageHistory } from "./logic.ts";
+import { classifyCompactFailure } from "./compaction-outcome.ts";
 import type { HistoryItem, ServerMessage, SessionSnapshot } from "./protocol.ts";
 
 interface HostModel {
@@ -37,8 +38,20 @@ export interface HostContextControllerDeps {
 
 /** Owns host-session context rewrites and their client-visible aftermath. */
 export class HostContextController {
+  /** True from the moment an attempt starts until pi reports how it ended.
+   *
+   * The terminal events (`session_compact` / `session_compact_failed`) are the
+   * only place it is cleared. It used to be cleared from a microtask attached to
+   * `compact()`'s return value — but `ExtensionContext.compact` returns void, so
+   * the flag dropped while the compaction was still running and the next
+   * `agent_end` fired ANOTHER attempt against the same transcript. */
   private compacting = false;
-  private lastFailedCompactTokens?: number;
+  /** The context size at which an attempt left the transcript unchanged.
+   *
+   * A failed attempt and a "nothing to compact" answer mean the same thing for
+   * the guard: trying again at this size will do nothing but abort the next
+   * turn. Cleared whenever a compaction actually rewrites the transcript. */
+  private uncompactedAtTokens?: number;
   private readonly deps: HostContextControllerDeps;
 
   constructor(deps: HostContextControllerDeps) {
@@ -123,7 +136,8 @@ export class HostContextController {
   }
 
   onCompacted(event: { trigger?: unknown } | undefined): Promise<void> {
-    this.lastFailedCompactTokens = undefined;
+    this.compacting = false;
+    this.uncompactedAtTokens = undefined;
     const sessionId = this.deps.getSessionId();
     this.deps.upsertSession(sessionId, { contextUsage: this.contextUsage(), isCompacting: false });
     const historyPush = this.pushHistory(true);
@@ -136,22 +150,47 @@ export class HostContextController {
     return historyPush;
   }
 
-  onCompactFailed(event: { aborted?: unknown; error?: unknown; errorMessage?: unknown } | undefined): void {
-    // pi's session_compact_failed carries `errorMessage` (already prefixed
-    // "Compaction failed: …" for non-abort failures); `error` is never set.
-    const raw = event?.errorMessage ?? event?.error;
-    const text = raw == null ? "unknown error" : String(raw);
-    const cause = text.startsWith("Compaction failed: ") ? text.slice("Compaction failed: ".length) : text;
-    const why = event?.aborted ? "cancelled" : cause;
+  onCompactFailed(event: { aborted?: unknown; error?: unknown; errorMessage?: unknown; reason?: unknown } | undefined): void {
+    this.compacting = false;
+    const failure = classifyCompactFailure(event);
+    const sessionId = this.deps.getSessionId();
     const usage = this.contextUsage();
     const tokens = typeof usage?.tokens === "number" ? usage.tokens : 0;
-    if (tokens) this.lastFailedCompactTokens = tokens;
-    this.deps.upsertSession(this.deps.getSessionId(), { isCompacting: false });
+    this.deps.upsertSession(sessionId, { isCompacting: false });
+
+    if (failure.kind === "nothing-to-compact") {
+      // Not a failure: the transcript is already compacted. Record the size so
+      // the same transcript is not re-attempted on every settle — that loop is
+      // what aborted the running turn and printed the false error.
+      if (tokens) this.uncompactedAtTokens = tokens;
+      this.reportNoOp(sessionId, event?.reason, "Nothing to compact — already compacted");
+      return;
+    }
+    if (failure.kind === "cancelled") {
+      // A deliberate stop. Answer a request the user made; say nothing about a
+      // background attempt nobody was watching.
+      this.reportNoOp(sessionId, event?.reason, `${failure.detail} — compaction cancelled`);
+      return;
+    }
+
+    if (tokens) this.uncompactedAtTokens = tokens;
     this.deps.broadcast({
       type: "error",
-      sessionId: this.deps.getSessionId(),
-      message: `Compaction failed: ${why}`,
+      sessionId,
+      message: `Compaction failed: ${failure.detail}`,
     });
+  }
+
+  /** How to report an attempt that changed nothing.
+   *
+   * A user-typed `/compact` must get an answer — silence there is what made the
+   * command look broken. An automatic attempt is not the user's business. */
+  private reportNoOp(sessionId: string, reason: unknown, message: string): void {
+    if (reason === "manual") {
+      this.deps.broadcast({ type: "notice", sessionId, message });
+      return;
+    }
+    debug(`[remote-code] compaction was a no-op (${String(reason ?? "auto")}): ${message}`);
   }
 
   maybeAutoCompact(): void {
@@ -163,17 +202,22 @@ export class HostContextController {
     if (!tokens || tokens < threshold) return;
     const window = typeof usage?.contextWindow === "number" ? usage.contextWindow : 0;
     if (window && window <= threshold) return;
-    if (this.lastFailedCompactTokens && tokens <= this.lastFailedCompactTokens) return;
+    if (this.uncompactedAtTokens !== undefined && tokens <= this.uncompactedAtTokens) return;
 
     this.compacting = true;
     debug(`[remote-code] auto-compacting host session (${tokens} >= ${threshold} tokens)`);
     this.deps.upsertSession(this.deps.getSessionId(), { isCompacting: true });
-    Promise.resolve(this.deps.getContext()?.compact?.())
-      .catch((error: unknown) => {
-        this.lastFailedCompactTokens = tokens;
-        debug("[remote-code] auto-compact failed:", (error as Error).message);
-      })
-      .finally(() => { this.compacting = false; });
+    try {
+      // The outcome arrives as `session_compact` / `session_compact_failed`, so
+      // there is no promise to attach to: those events release the flag.
+      this.compact();
+    } catch (error) {
+      // It never started, so no terminal event is coming.
+      this.compacting = false;
+      this.uncompactedAtTokens = tokens;
+      this.deps.upsertSession(this.deps.getSessionId(), { isCompacting: false });
+      debug("[remote-code] auto-compaction could not start:", (error as Error).message);
+    }
   }
 
   async navigateTree(

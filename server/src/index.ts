@@ -70,6 +70,7 @@ import { installCrashReporter } from "./crash.ts";
 import { HostContextController } from "./host-context.ts";
 import { dispatchClientCommand } from "./command-validation.ts";
 import { imageBudgetExtension } from "./image-budget.ts";
+import { contextBudgetExtension } from "./context-budget.ts";
 import { imageBytesLimit, setImageBytesLimit } from "./config.ts";
 import { applyCompactThresholdCommand, reconcileStoredThreshold } from "./compaction-settings.ts";
 import { mergeRegistryRows } from "./state-message.ts";
@@ -913,7 +914,10 @@ function bridge(pi: ExtensionAPI): void {
   // Reload tears this instance down; the re-imported instance bootstraps
   // fresh (ws server, tunnel, registry reload). Spawned sessions were parked
   // idle in the registry by teardownRemote → resumable from the app.
+  // Two standing statements about the session itself, on every turn: the image
+  // cap, and the fact that there is no context budget to run out of.
   imageBudgetExtension(imageBytesLimit)(pi);
+  contextBudgetExtension()(pi);
 
   pi.on("session_shutdown", (event: any) => {
     try {

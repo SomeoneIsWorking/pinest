@@ -363,11 +363,15 @@ export class WSServer {
       } catch (error) {
         const reason = (error as Error).message;
         const sessionId = typeof message.cmd.sessionId === "string" ? message.cmd.sessionId : undefined;
+        const cmdId = typeof message.cmd.id === "string" ? message.cmd.id : undefined;
         debug("[remote-code] refused a command:", reason);
+        // The refusal names the command it refused, so the client marks THAT
+        // send undelivered instead of every message the session had pending.
         this.send(ws, {
           type: "error",
           message: reason,
           ...(sessionId ? { sessionId } : {}),
+          ...(cmdId ? { cmdId } : {}),
         });
         return;
       }
