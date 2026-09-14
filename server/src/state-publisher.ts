@@ -28,6 +28,8 @@ export interface StatePublisherDeps {
   /** Why the app cannot find this machine, when publishing its presence is
    * failing. Null when nothing is wrong. */
   presenceError: () => string | null;
+  /** Why this machine cannot read the app's answer, when reading is failing. */
+  signalingError: () => string | null;
   /** Cheap synchronous usage overlay, applied before each state message. */
   refreshUsage: () => void;
   send: (message: ServerMessage) => void;
@@ -101,6 +103,7 @@ export class StatePublisher {
       p2p: this.deps.p2p(),
       client: this.deps.client(),
       presenceError: this.deps.presenceError(),
+      signalingError: this.deps.signalingError(),
     });
   }
 
