@@ -133,6 +133,7 @@ export class WSServer {
   /** Answers a history request for the HTTP route. Injected by the composition
    * root because it must reuse the socket's own dispatch path. */
   private historyRunner?: HttpHistoryRunner;
+  private commandRunner?: CommandSink;
   private verifyFn: VerifyFn | null = null;
   private stateProvider: (() => ServerMessage) | null = null;
   private unauthenticatedClients: Set<AuthedSocket> = new Set();
@@ -176,6 +177,18 @@ export class WSServer {
     this.historyRunner = runner;
   }
 
+  /**
+   * Where commands from the HTTP routes go.
+   *
+   * Separate from the socket's handler on purpose: a socket has no reply
+   * channel, so its refusals are pushed as a notice, while an HTTP route
+   * answers with a status code and therefore needs the refusal to arrive as a
+   * thrown error. Both paths end at the same dispatcher.
+   */
+  setCommandRunner(runner: CommandSink): void {
+    this.commandRunner = runner;
+  }
+
   /** Secret the app presents on HTTP. Per process, never persisted. */
   private httpKey = createAccessKey();
 
@@ -192,7 +205,12 @@ export class WSServer {
       const server = createServer(
         createHttpApi({
           accessKey: this.httpKey,
-          dispatch: (command) => this.handlers.command?.(command),
+          dispatch: (command) => {
+            if (!this.commandRunner) {
+              throw new Error("this machine cannot take commands over HTTP");
+            }
+            return this.commandRunner(command);
+          },
           history: (command) =>
             this.historyRunner
               ? this.historyRunner(command)

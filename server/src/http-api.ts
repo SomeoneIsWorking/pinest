@@ -174,8 +174,13 @@ async function serveMessage(
   try {
     await options.dispatch(command);
   } catch (error) {
-    debug("[remote-code] HTTP message dispatch failed:", (error as Error).message);
-    sendJson(response, 500, { error: (error as Error).message || "dispatch failed" });
+    // The command was well formed; the machine refused it - an unknown session,
+    // a session that just closed. That is a real answer, so it gets a status
+    // code: answering 202 here is how a send read "accepted" while the phone was
+    // shown an error and nothing arrived.
+    const reason = (error as Error).message || "the machine refused this message";
+    debug("[remote-code] HTTP message refused:", reason);
+    sendJson(response, 409, { error: reason });
     return;
   }
   // Accepted for delivery; the transcript arrives on the WebSocket as always.

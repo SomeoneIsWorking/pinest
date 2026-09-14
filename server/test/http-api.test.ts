@@ -21,11 +21,12 @@ async function startApi(
   seen: unknown[],
   maxBodyBytes?: number,
   history?: HttpHistoryRunner,
+  dispatch?: (command: unknown) => void,
 ): Promise<{ port: number; close: () => void }> {
   const server = createServer(
     createHttpApi({
       accessKey: KEY,
-      dispatch: (command) => { seen.push(command); },
+      dispatch: dispatch ?? ((command) => { seen.push(command); }),
       history: history ?? (async () => ({ ok: false, status: 503, error: "history unavailable" })),
       ...(maxBodyBytes === undefined ? {} : { maxBodyBytes }),
     }),
@@ -143,6 +144,25 @@ test("a posted message dispatches through the SAME sink as the socket", async (t
   assert.equal(command.sessionId, "s1");
   assert.equal(command.text, "hello");
   assert.equal(command.deliverAs, "followUp");
+});
+
+test("a command the machine refuses is a status code, not a 202", async (t) => {
+  // Answering 202 for a refused send is how a phone showed "accepted" and an
+  // error at the same time while nothing arrived.
+  const { port, close } = await startApi([], undefined, undefined, () => {
+    throw new Error("no session no-such-session");
+  });
+  t.after(close);
+  const response = await fetch(url(port, "/message"), {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-pinest-key": KEY },
+    body: JSON.stringify(
+      commandFrame({ type: "user_message", sessionId: "no-such-session", text: "hi" }),
+    ),
+  });
+  assert.equal(response.status, 409);
+  const body = await response.json() as { error: string };
+  assert.match(body.error, /no session no-such-session/);
 });
 
 test("a body that is not a command frame is refused by name", async (t) => {
