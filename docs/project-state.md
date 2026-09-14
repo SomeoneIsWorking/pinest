@@ -112,6 +112,26 @@ Gap: provider and reconnect behavior remains incomplete.
 
 ### S11 — Authenticated internet connection
 
+The tunnel provider is `cloudflared` and the published endpoint is now proven
+from a vantage that does not depend on this host's resolver. Measured on this
+connection: the host's own resolver returns NXDOMAIN for a healthy
+`*.trycloudflare.com` name while public resolvers answer it, so verifying the
+tunnel through the local resolver declared a working tunnel dead, killed it, and
+restarted one every twenty seconds - with no URL ever published. Verification now
+tries the local path first and then resolves through public resolvers and
+requests the resolved address with the tunnel's own SNI/Host; any HTTP status
+(normally 401 from our own auth boundary) proves name → edge → tunnel → this
+server. Live evidence: a real quick tunnel that answers `HTTP 000` from this
+host was proven `answered=true, vantage=public-dns` by the shipping check.
+
+A tunnel still being verified has no handle, so a teardown during that window
+left its process running with a public name pointed at a dead port (one orphaned
+cloudflared per reload). Providers now report the process the moment it spawns,
+and a teardown cancels the attempt, kills it, and refuses a result that arrives
+afterwards.
+
+### S11b — Authenticated internet connection (original note)
+
 Hosted discovery, Google authentication, and the browser transport are implemented. Gap: one real
 browser sign-in through the hosted RestImpl path remains unverified.
 
