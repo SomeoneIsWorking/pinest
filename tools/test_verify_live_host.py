@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 
 import verify_live_host
@@ -52,6 +53,33 @@ class EvaluationTests(unittest.TestCase):
         self.assertIsNotNone(finding)
         self.assertIn("HTTP 500", finding)
         self.assertIn("expected 400", finding)
+
+    def test_a_reason_with_quotes_matches_through_its_escaping(self) -> None:
+        # The first live run of this checker failed a correct answer because the
+        # server's reason contains quotes and arrives JSON-escaped.
+        probe = verify_live_host.Probe(
+            name="a doubled frame",
+            path="/message",
+            body=None,
+            expect_status=400,
+            expect_pattern='unsupported command type "command"',
+            why="the old failure is refused by name",
+        )
+        raw = json.dumps({"error": 'unsupported command type "command"'})
+        self.assertIn('\\"command\\"', raw, "the body really is escaped")
+        self.assertIsNone(verify_live_host.evaluate(probe, 400, raw))
+
+    def test_a_detail_beside_the_error_field_still_counts(self) -> None:
+        probe = verify_live_host.Probe(
+            name="an image request",
+            path="/image/x",
+            body=None,
+            expect_status=404,
+            expect_pattern="imageId",
+            why="the route names what it could not find",
+        )
+        body = json.dumps({"error": "unknown image", "imageId": "not-a-real-image"})
+        self.assertIsNone(verify_live_host.evaluate(probe, 404, body))
 
     def test_a_right_status_with_the_wrong_reason_fails(self) -> None:
         # A 400 for a different reason is not the same answer: this is how a
