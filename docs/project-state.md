@@ -29,6 +29,7 @@ cited), `partial`, `blocked`, `missing`. One current focus at the bottom.
 | S12 | An installable, attested Android APK is published for the mobile client | verified | S6, S7 | G1, G6 |
 | S13 | The mobile client is distributed through Google Play | missing | S6, S7 | G1 |
 | S14 | History transport is bounded and images load on demand | verified | S6, S9 | G1, G6 |
+| S15 | Remote access works with no third party in the data path (direct WebRTC transport) | partial | S5b, S7, S11 | G7 |
 Atomic work and findings live in `docs/issues/`.
 
 ### S8 — Remote session lifecycle
@@ -57,6 +58,29 @@ page was 7.02 MB (19.36 MB of the full transcript was eight 4K screenshots) and 
 no base64 in the payload. Hiding the last page behind the 16 MiB outbound allowance is no longer
 possible: an oversized payload is dropped and counted rather than misread as a slow client, because
 closing the socket made the app reconnect-loop and never receive the transcript.
+
+### S15 — Direct (no-tunnel) transport
+
+The host offers a WebRTC DataChannel and bridges it to the same loopback server
+the tunnel reaches, so nothing downstream knows which transport carried the
+bytes. Signaling rides the discovery document the app already watches: the
+machine writes its offer, the app writes its answer, and neither adds a service
+or puts chat data anywhere new. The deployed rules validate both writes as
+bounded, SDP-shaped, timestamped descriptions without requiring a signaling
+write to re-assert the machine's presence freshness.
+
+Verified live (2026-09-14): the host published a real offer into the owner's
+discovery document (812 bytes, 3 candidate lines, including one `srflx`
+reflexive candidate obtained through the ISP's carrier-grade NAT); an answering
+peer read that offer FROM the document, wrote its answer back through the
+deployed rules, completed ICE/DTLS/SCTP, and a frame crossed the DataChannel
+into a loopback WebSocket server and back. This is the same shipping
+composition the host runs (`scratch/p2p-live-probe.mjs`).
+
+Gap: the browser client has no `RTCPeerConnection` answer path yet, so the app
+still reaches the host over the tunnel; `p2p` is off by default in a fresh
+install. A punch that fails is reported as a failure to reach the machine
+directly - it never silently falls back to a tunnel.
 
 ### S10 — Context and compaction controls
 
@@ -546,6 +570,10 @@ Evidence: Node suite (`npm test`) passes with 296 tests and 0 failures; `npm run
 
 ## Current focus
 
-S7 is the current focus: design host/device-key binding and application-level tunnel encryption for
-I-030/I-038, then run the app against the live host from a phone and exercise
-one real hosted (RestImpl) browser sign-in end-to-end.
+S15/G7 is the current focus: the host half of the direct transport is verified
+live, so the next milestone is the browser client's answer path - a
+`RTCPeerConnection` in the Flutter web app that reads the offer from discovery,
+writes its answer, and runs the existing protocol over the DataChannel (pushes
+bridged with the scheduler's drop-stale behaviour, actions framed with real
+status responses). #46 tracks it; #41, #42, #44, and #45 are the open work in
+priority order.
