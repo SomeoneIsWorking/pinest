@@ -28,6 +28,7 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { StreamSegmenter, type StreamSegmenterState } from "./stream.ts";
 import { createMessageSubmitter, type MessageSubmitter } from "./submit.ts";
 import { resolveThinkingLevel } from "./thinking.ts";
+import { dispatchSessionCommand } from "./session-command-handler.ts";
 import type { SessionRegistry } from "./registry.ts";
 import { SessionModelService } from "./session-models.ts";
 import type { SessionSnapshot, SessionRow, UserImage } from "./protocol.ts";
@@ -414,262 +415,21 @@ export class Supervisor {
     const s = this.sessions.get(cmd.sessionId);
     if (!s) return false;
     try {
-      switch (cmd.type) {
-        case "user_message": {
-          const trimmed = cmd.text.trim();
-          if (trimmed === "/reload" || trimmed === "/pinest-reload") {
-            try {
-              await s.session.reload();
-              this.callbacks.broadcast({ type: "notice", sessionId: cmd.sessionId, message: "[pinest] session reloaded" });
-            } catch (e) {
-              this.callbacks.broadcast({ type: "error", sessionId: cmd.sessionId, message: `[pinest] reload failed: ${(e as Error).message}` });
-            }
-            break;
-          }
-          s.currentTurnId = cmd.id || randomUUID();
-          if (s.status !== "working") {
-            s.segmenter?.reset();
-            this.callbacks.broadcast({ type: "stream", sessionId: cmd.sessionId, text: "", segments: [], status: "working" });
-          }
-          s.status = "working";
-          const images = (cmd.images ?? []) as UserImage[];
-          const text = cmd.text.trim().length === 0 ? "[image]" : cmd.text;
-          if (images.length > 0) {
-            s.pendingImagesByText = { ...(s.pendingImagesByText ?? {}), [text]: images };
-          }
-          this.callbacks.upsertSession(cmd.sessionId, {
-            status: "working",
-          });
-          // prompt(streamingBehavior) covers BOTH cases: idle → new turn,
-          // streaming → queued as steer/followUp. The bare prompt() this used
-          // to call THREW "Agent is already processing" whenever the session
-          // was working — steers never reached the model at all.
-          s.submitter?.submit(text, images, cmd.deliverAs === "followUp" ? "followUp" : "steer");
-          // NO local queue push: the agent reports its own queue via
-          // queue_update once prompt() actually queues (or runs) the message.
-          break;
-        }
-        case "cancel": {
-          // Park queued prompts instead of destroying them: stopping the run
-          // must drain the agent's queue, but the user's text comes back to
-          // the composer via queue_parked rather than vanishing.
-          const parked = (s.pending ?? []).map((text) => ({
-            text,
-            images: s.pendingImagesByText?.[text] ?? [],
-          }));
-          try { (s.session as any).clearQueue?.(); } catch { /* */ }
-          s.pending = [];
-          s.pendingSteering = [];
-          s.pendingImagesByText = {};
-          this.callbacks.upsertSession(cmd.sessionId as string, {
-            pendingMessages: [],
-            pendingSteering: [],
-            pendingImagesByText: {},
-          });
-          await s.session.abort();
-          if (parked.length > 0) {
-            this.callbacks.broadcast({
-              type: "queue_parked",
-              sessionId: cmd.sessionId as string,
-              messages: parked,
-            });
-          }
-          break;
-        }
-        case "model_set":
-          await this.setModel(cmd, s);
-          break;
-        case "thinking_set": {
-          const r = resolveThinkingLevel((s.session as any).model, cmd.level);
-          s.session.setThinkingLevel(r.set);
-          this.persistRow(cmd.sessionId, { thinkingLevel: r.report });
-          this.callbacks.upsertSession(cmd.sessionId, { thinkingLevel: r.report });
-          break;
-        }
-        case "session_compact": {
-          const compact = (s.session as any).compact;
-          if (typeof compact !== "function") {
-            throw new Error("this session cannot compact (no compact() on the agent session)");
-          }
-          this.callbacks.upsertSession(cmd.sessionId as string, { isCompacting: true });
-          try {
-            await compact.call(s.session);
-          } finally {
-            this.callbacks.upsertSession(cmd.sessionId as string, { isCompacting: false });
-          }
-          this.afterContextRewrite(cmd.sessionId as string, s, "Context compacted");
-          break;
-        }
-        case "session_new": {
-          const id = cmd.sessionId as string;
-          try { s.unsub?.(); } catch { /* */ }
-          await this.stopSession(id, s);
-          Supervisor.activeSpawning = true;
-          let session: AgentSession;
-          try {
-            const opts = await this.createSessionOpts(s.cwd);
-            const res = await createAgentSession(opts);
-            session = res.session;
-          } finally {
-            Supervisor.activeSpawning = false;
-          }
-          s.session = session;
-          s.status = "idle";
-          const newModel = (session as any).model;
-          if (newModel) {
-            s.model = `${newModel.provider}/${newModel.id}`;
-            s.modelName = newModel.name;
-            this.persistRow(id, { model: s.model, modelName: s.modelName });
-          }
-          // The old session's queue and mid-turn state belong to a transcript
-          // that no longer exists — carrying them over left ghost "queued"
-          // bubbles on a session that had just been cleared.
-          s.pending = [];
-          s.pendingSteering = [];
-          s.currentTurnId = null;
-          s.turnStarted = false;
-          s.segmenter.reset();
-          this.wire(id, s);
-          // persistRow re-reads the (new) session's sessionManager, so the
-          // registry's resume anchor follows the fresh pi session file.
-          this.persistRow(id, { status: "idle" });
-          this.callbacks.upsertSession(id, {
-            status: "idle", streamingText: null, pendingMessages: [], pendingSteering: [],
-          });
-          this.afterContextRewrite(id, s, "Session cleared");
-          break;
-        }
-        case "list_models":
-          this.models(s).then((models) => this.callbacks.broadcast({ type: "models", sessionId: cmd.sessionId, models }));
-          break;
-        case "get_history": {
-          const full = await this.getHistory(s);
-          const paged = pageHistory(full, { limit: cmd.limit, cursor: cmd.cursor });
-          this.callbacks.broadcast({ type: "history", sessionId: cmd.sessionId, ...paged });
-          break;
-        }
-        case "get_image": {
-          // Images are fetched on demand, never shipped in history.
-          const found = lookupImage(cmd.imageId);
-          this.callbacks.broadcast(
-            found
-              ? { type: "image", imageId: cmd.imageId, mimeType: found.mimeType, data: found.data }
-              : { type: "image_missing", imageId: cmd.imageId, reason: "the server no longer holds this image" },
-          );
-          break;
-        }
-        case "queue_clear": {
-          // pi's own queue drain — the only honest way to remove a message
-          // that is genuinely stuck in the steering/followUp queues (pi
-          // dequeues by text-match at message_start; a delivered text that
-          // never matched stays queued forever).
-          try { (s.session as any).clearQueue?.(); } catch { /* getter-absent session */ }
-          s.pendingImagesByText = {};
-          this.syncQueue(cmd.sessionId, s);
-          break;
-        }
-        case "queue_delete": {
-          try {
-            if (typeof (s.session as any).clearQueue === "function") {
-              const { steering, followUp } = (s.session as any).clearQueue();
-              const target = cmd.text;
-              const remainingSteer = (steering ?? []).filter((t: string) => t !== target);
-              const remainingFollow = (followUp ?? []).filter((t: string) => t !== target);
-              for (const t of remainingSteer) {
-                s.session.prompt(t, { streamingBehavior: "steer" });
-              }
-              for (const t of remainingFollow) {
-                s.session.prompt(t, { streamingBehavior: "followUp" });
-              }
-            }
-          } catch { /* getter-absent session */ }
-          if (s.pendingImagesByText) {
-            delete s.pendingImagesByText[cmd.text];
-          }
-          this.syncQueue(cmd.sessionId, s);
-          break;
-        }
-        case "session_tree_get": {
-          try {
-            const sessionManager = (s.session as any).sessionManager;
-            const tree = sessionManager?.getTree?.() ?? [];
-            const leafId = sessionManager?.getLeafId?.() ?? null;
-            this.callbacks.broadcast({
-              type: "session_tree",
-              cmdId: cmd.id,
-              sessionId: cmd.sessionId,
-              tree,
-              leafId,
-            });
-          } catch (e) {
-            this.callbacks.broadcast({
-              type: "error",
-              sessionId: cmd.sessionId,
-              message: `Failed to get session tree: ${(e as Error).message || e}`,
-            });
-          }
-          break;
-        }
-        case "session_tree_navigate":
-        case "session_rewind": {
-          try {
-            if ((s.session as any)?.isStreaming) {
-              try { await (s.session as any).abort?.(); } catch { /* */ }
-            }
-            let navResult: any;
-            const summarize = cmd.type === "session_tree_navigate" ? cmd.summarize : false;
-            if (typeof (s.session as any).navigateTree === "function") {
-              navResult = await (s.session as any).navigateTree(cmd.entryId, {
-                summarize,
-              });
-              s.pending = [];
-              s.pendingSteering = [];
-              s.pendingImagesByText = {};
-              this.syncQueue(cmd.sessionId, s);
-              const sessionManager = (s.session as any).sessionManager;
-              const tree = sessionManager?.getTree?.() ?? [];
-              const leafId = sessionManager?.getLeafId?.() ?? null;
-
-              const h = await this.getHistory(s);
-              this.callbacks.broadcast({
-                type: "history",
-                sessionId: cmd.sessionId,
-                ...pageHistory(h),
-                reset: true,
-              });
-              this.callbacks.upsertSession(cmd.sessionId, {
-                contextUsage: (s.session as any)?.contextUsage?.() ?? null,
-              });
-
-              if (cmd.type === "session_rewind") {
-                this.callbacks.broadcast({
-                  type: "session_rewound",
-                  cmdId: cmd.id,
-                  sessionId: cmd.sessionId,
-                  entryId: cmd.entryId,
-                  editorText: navResult?.editorText ?? "",
-                });
-              } else {
-                this.callbacks.broadcast({
-                  type: "session_tree",
-                  cmdId: cmd.id,
-                  sessionId: cmd.sessionId,
-                  tree,
-                  leafId,
-                  editorText: navResult?.editorText,
-                });
-              }
-            }
-          } catch (e) {
-            this.callbacks.broadcast({
-              type: "error",
-              sessionId: cmd.sessionId,
-              message: `Failed to ${cmd.type === "session_rewind" ? "rewind" : "navigate tree"}: ${(e as Error).message || e}`,
-            });
-          }
-          break;
-        }
-      }
+      await dispatchSessionCommand(s, cmd, {
+        callbacks: this.callbacks,
+        setModel: (c, sess) => this.setModel(c, sess),
+        persistRow: (id, patch) => this.persistRow(id, patch),
+        afterContextRewrite: (id, sess, notice) => this.afterContextRewrite(id, sess, notice),
+        stopSession: (id, sess) => this.stopSession(id, sess),
+        createSessionOpts: (cwd) => this.createSessionOpts(cwd),
+        wire: (id, sess) => this.wire(id, sess),
+        models: (sess) => this.models(sess),
+        getHistory: (sess) => this.getHistory(sess),
+        syncQueue: (id, sess) => this.syncQueue(id, sess),
+        setSpawningFlag: (spawning) => {
+          Supervisor.activeSpawning = spawning;
+        },
+      });
     } catch (e) {
       debug("[remote-code] session command error:", (e as Error).message);
       this.callbacks.broadcast({ type: "error", sessionId: cmd.sessionId, message: String((e as Error).message || e) });
