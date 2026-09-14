@@ -15,6 +15,10 @@ class DirectStatus {
     required this.exchanges,
     required this.channelCloses,
     required this.lastError,
+    this.bridges = 0,
+    this.framesToServer = 0,
+    this.framesToClient = 0,
+    this.bridgeSocket,
   });
 
   /// Whether the machine has an offer published right now.
@@ -36,6 +40,18 @@ class DirectStatus {
   /// The last thing that went wrong on the machine's side, verbatim.
   final String? lastError;
 
+  /// Bridges the machine built: a channel that opens and produces no bridge is
+  /// a different failure from a bridge that carries nothing.
+  final int bridges;
+
+  /// Whole messages the machine's bridge relayed, by direction. The difference
+  /// between "the app sent nothing" and "the machine never got it".
+  final int framesToServer;
+  final int framesToClient;
+
+  /// The loopback socket the bridge is carrying traffic over, by state name.
+  final String? bridgeSocket;
+
   static DirectStatus? fromJson(Object? raw) {
     if (raw is! Map) return null;
     final offerTs = (raw['offerTs'] as num?)?.toInt();
@@ -47,6 +63,10 @@ class DirectStatus {
       exchanges: (raw['exchanges'] as num?)?.toInt() ?? 0,
       channelCloses: (raw['channelCloses'] as num?)?.toInt() ?? 0,
       lastError: (raw['lastError'] as String?)?.trim(),
+      bridges: (raw['bridges'] as num?)?.toInt() ?? 0,
+      framesToServer: (raw['framesToServer'] as num?)?.toInt() ?? 0,
+      framesToClient: (raw['framesToClient'] as num?)?.toInt() ?? 0,
+      bridgeSocket: (raw['bridgeSocket'] as String?)?.trim(),
     );
   }
 
@@ -66,7 +86,14 @@ class DirectStatus {
     final closings = channelCloses == 0
         ? ''
         : ' A channel opened and closed ${channelCloses == 1 ? 'once' : '$channelCloses times'}.';
-    return 'Offering a direct connection$age; no peer connected yet.$closings$error';
+    // What the machine actually relayed. A peer that connected and sent
+    // nothing, and one whose frames never arrived, look identical without it.
+    final quiet = channelCloses == 0 && framesToServer == 0 && framesToClient == 0;
+    final relayed = quiet
+        ? ''
+        : ' It relayed $framesToServer frame${framesToServer == 1 ? '' : 's'} in'
+            ' and $framesToClient out.';
+    return 'Offering a direct connection$age; no peer connected yet.$closings$relayed$error';
   }
 
   String _age() {

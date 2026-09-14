@@ -25,6 +25,20 @@ import type { P2PChannel, P2PChannels } from "./p2p.ts";
 
 export interface LoopbackBridge {
   close(): void;
+  /** What this bridge has actually carried, and the state of the socket it
+   * carries it over. A bridge that opened a socket and relayed nothing is a
+   * different failure from one that never opened a socket at all, and without
+   * this they both look like "no frames arrived". */
+  stats(): BridgeStats;
+}
+
+export interface BridgeStats {
+  /** The loopback socket's state, by name: connecting, open, closing, closed. */
+  socketState: string;
+  /** Whole messages delivered from the peer to the machine's own server. */
+  framesToServer: number;
+  /** Whole messages delivered from the server to the peer. */
+  framesToClient: number;
 }
 
 /** Told when the channel that feeds this bridge ends, so a transport can stop
@@ -49,6 +63,8 @@ export function bridgeToLoopback(
   /** Whether this end is closing, so a routine close is not read as a
    * server-side refusal. */
   let closing = false;
+  let framesToServer = 0;
+  let framesToClient = 0;
 
   /** A channel that refuses to send is dead: report it and end this bridge
    * rather than throwing through whoever called `send` - an uncaught throw here
@@ -92,6 +108,7 @@ export function bridgeToLoopback(
           return;
         }
         debug(`[pinest] p2p bridge: channel → server (${payload.length}b)`);
+        framesToServer += 1;
         forwardToServer(payload);
       } catch (error) {
         failed(error);
@@ -116,6 +133,7 @@ export function bridgeToLoopback(
       for (const frame of writer.frames(data)) {
         channels.push.send(frame);
       }
+      framesToClient += 1;
       debug(`[pinest] p2p bridge: server → channel (${data.length}b)`);
     } catch (error) {
       failed(error);
@@ -152,5 +170,20 @@ export function bridgeToLoopback(
     socket.close();
   }
 
-  return { close };
+  return {
+    close,
+    stats: () => ({
+      socketState: SOCKET_STATE_NAMES[socket.readyState] ?? `unknown(${socket.readyState})`,
+      framesToServer,
+      framesToClient,
+    }),
+  };
 }
+
+/** `ws` reports its state as a number; a status a human reads must not. */
+const SOCKET_STATE_NAMES: Record<number, string> = {
+  [WebSocket.CONNECTING]: "connecting",
+  [WebSocket.OPEN]: "open",
+  [WebSocket.CLOSING]: "closing",
+  [WebSocket.CLOSED]: "closed",
+};

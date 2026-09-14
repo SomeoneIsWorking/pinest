@@ -202,6 +202,15 @@ export interface DirectTransportWireStatus {
    * reads differently from one that never landed. */
   channelCloses: number;
   lastError: string | null;
+  /** How many bridges were built: a channel that opens and builds none is a
+   * different failure from a bridge that carries nothing. */
+  bridges: number;
+  /** Whole messages the bridge relayed in each direction. This is what
+   * separates "the peer sent nothing" from "the machine never got it". */
+  framesToServer: number;
+  framesToClient: number;
+  /** The loopback socket the bridge carries traffic over, by state name. */
+  bridgeSocket: string | null;
 }
 
 /** An image attached by the client to a user_message (paste/upload). */
