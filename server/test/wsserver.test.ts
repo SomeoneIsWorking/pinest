@@ -257,15 +257,25 @@ test("a command reaches the sink validated, and one that cannot is refused by na
   // not the frame around it, and not an assertion that it looked right.
   assert.deepEqual(received, [commandFromFrame(frame)]);
 
-  const invalid = await openClient(server);
-  clients.push(invalid);
-  await authenticate(invalid);
-  const closed = nextClose(invalid);
-  invalid.send(JSON.stringify({ type: "command", cmd: { type: "user_message", text: 5 } }));
-  const close = await closed;
-  assert.equal(close.code, 1008);
-  assert.match(close.reason, /text must be a string/, "the refusal names what was wrong");
+  // A command the machine will not take is reported, NOT a reason to hang up:
+  // the client must be able to keep using the socket it already has, or one bad
+  // command becomes an endless reconnect loop.
+  const refused = await openClient(server);
+  clients.push(refused);
+  await authenticate(refused);
+  const answer = nextMessage(refused);
+  refused.send(JSON.stringify({ type: "command", cmd: { type: "user_message", sessionId: "s1", text: 5 } }));
+  const refusal = await answer;
+  assert.equal(refusal.type, "error");
+  assert.match(String(refusal.message), /text must be a string/, "the refusal names what was wrong");
+  assert.equal(refusal.sessionId, "s1", "it is attributed to the session that sent it");
   assert.equal(received.length, 1, "nothing invalid reached the sink");
+  assert.equal(refused.readyState, WebSocket.OPEN, "the socket survived its own bad command");
+
+  // And the socket still works after being told no.
+  const pong = nextMessage(refused);
+  refused.send(JSON.stringify({ type: "command", cmd: { type: "ping" } }));
+  assert.deepEqual(await pong, { type: "pong" }, "a framed ping is answered like a bare one");
 });
 
 test("the same frame produces the same command on the socket and over HTTP", async (t) => {
