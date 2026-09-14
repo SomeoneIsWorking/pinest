@@ -26,6 +26,11 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { RTCPeerConnection, RTCSessionDescription } from "werift";
+import {
+  ACTIONS_CHANNEL_LABEL,
+  PUSH_CHANNEL_LABEL,
+} from "../src/p2p.ts";
+import { FrameReader, FrameWriter } from "../src/p2p-framing.ts";
 
 const PROJECT = "pinest-app";
 const AUTH_PATH = join(homedir(), ".pi", "agent", "remote-code", "auth.json");
@@ -227,9 +232,27 @@ async function main(): Promise<void> {
   }
 
   const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
-  let channelResolve: (channel: any) => void = () => {};
-  const channelPromise = new Promise<any>((resolve) => { channelResolve = resolve; });
-  pc.ondatachannel = (event) => channelResolve(event.channel);
+  // Two channels, one per direction, as the machine offers them: the app
+  // receives on push and sends on actions.
+  const opened = new Map<string, any>();
+  let channelsResolve: () => void = () => {};
+  const bothOpen = new Promise<void>((resolve) => { channelsResolve = resolve; });
+  pc.ondatachannel = (event) => {
+    const channel = event.channel;
+    const settle = (): void => {
+      opened.set(channel.label, channel);
+      if (opened.has(PUSH_CHANNEL_LABEL) && opened.has(ACTIONS_CHANNEL_LABEL)) {
+        channelsResolve();
+      }
+    };
+    if (channel.readyState === "open") {
+      settle();
+      return;
+    }
+    channel.stateChange.subscribe((state: string) => {
+      if (state === "open") settle();
+    });
+  };
 
   await pc.setRemoteDescription(new RTCSessionDescription(offer, "offer"));
   const answer = await pc.createAnswer();
@@ -238,51 +261,66 @@ async function main(): Promise<void> {
   await writeAnswer(uid, idToken, pc.localDescription!.sdp!, offerTs, timeoutMs);
   console.log(`answer: published, naming the offer (${offerTs}) it describes`);
 
-  const channel = await Promise.race([channelPromise, timeout(timeoutMs, "the DataChannel")]);
-  if (channel.readyState !== "open") {
-    await Promise.race([
-      new Promise<void>((resolve) => {
-        channel.onopen = () => resolve();
-        channel.stateChange.subscribe((state: string) => { if (state === "open") resolve(); });
-      }),
-      timeout(timeoutMs, "the DataChannel opening"),
-    ]);
-  }
-  console.log(`channel: open (iceConnectionState=${pc.iceConnectionState})`);
+  await Promise.race([bothOpen, timeout(timeoutMs, "both DataChannels")]);
+  const push = opened.get(PUSH_CHANNEL_LABEL)!;
+  const actions = opened.get(ACTIONS_CHANNEL_LABEL)!;
+  console.log(
+    `channels: both open (${push.label}, ${actions.label}; `
+    + `iceConnectionState=${pc.iceConnectionState})`,
+  );
 
   // Speak the REAL protocol over it: authenticate, then subscribe. Anything
   // less would only prove that bytes can move, not that this is a transport the
   // app could actually use.
-  const frames: any[] = [];
+  const reader = new FrameReader();
+  const writer = new FrameWriter();
+  let largest = 0;
   const stateFrame = new Promise<any>((resolve, reject) => {
-    channel.onMessage.subscribe((data: unknown) => {
+    push.onMessage.subscribe((data: unknown) => {
+      let payload: string | null;
+      try {
+        payload = reader.accept(Buffer.from(data as ArrayBuffer | Buffer));
+      } catch (error) {
+        reject(new VerificationError(`a push arrived that is not a frame: ${(error as Error).message}`));
+        return;
+      }
+      if (payload === null) {
+        return;
+      }
+      largest = Math.max(largest, payload.length);
       let parsed: any;
       try {
-        parsed = JSON.parse(String(data));
+        parsed = JSON.parse(payload);
       } catch {
         return;
       }
-      frames.push(parsed);
       if (parsed.type === "state") resolve(parsed);
       if (parsed.type === "error") reject(new VerificationError(`host refused: ${parsed.message}`));
     });
   });
-  channel.send(JSON.stringify({ type: "auth", token: idToken }));
-  channel.send(JSON.stringify({ type: "subscribe", sessionIds: [] }));
+  // The same frames the app sends, split the same way.
+  const send = (message: unknown): void => {
+    for (const frame of writer.frames(JSON.stringify(message))) {
+      actions.send(frame);
+    }
+  };
+  send({ type: "auth", token: idToken });
+  send({ type: "subscribe", sessionIds: [] });
 
   const state = await Promise.race([stateFrame, timeout(timeoutMs, "a state frame")]);
   const sessions = Array.isArray(state.sessions) ? state.sessions.length : 0;
   console.log(`protocol: authenticated and received state with ${sessions} session(s)`);
   console.log(
     `status: OK — a second peer reached this machine over the direct channel `
-    + `(${hostCandidates.srflx} srflx candidate(s) on offer, ICE ${pc.iceConnectionState})`,
+    + `(ice=${pc.iceConnectionState}, largest push ${largest} bytes)`,
   );
   console.log(
     "unproven here: traversal from a third network. Both peers ran on this machine, so a local "
     + "candidate could have carried the channel; a phone on another network is the remaining check.",
   );
 
-  channel.close();
+  push.close();
+  actions.close();
   pc.close();
   clearTimeout(watchdog);
 }
