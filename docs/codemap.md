@@ -40,6 +40,11 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Server test fixtures/helpers and Node test suites | `server` | `server/support/`, `server/test/` |
 | Pi package identity, dependency graph, extension discovery + normal test entry points | repo root | `package.json`, `package-lock.json` (`pi install git:github.com/SomeoneIsWorking/pinest`) |
 | Flutter client (chat, sessions, spawn, auth) | `app` | `app/lib/` (forked from PiNest) |
+| Client control-channel abstraction (a tunnel WebSocket and a WebRTC DataChannel are one interface) | `app` | `app/lib/services/control_channel.dart` (`ControlChannel`, `WebSocketConnection` with its heartbeat) |
+| Client direct (no-tunnel) transport: answer the machine's offer, publish the answer, carry the protocol over the DataChannel | `app` | `app/lib/services/direct_channel.dart` (platform select), `direct_channel_web.dart` (WebRTC interop), `direct_channel_stub.dart` (reports unavailable off-browser); which offer to answer: `app/lib/logic/direct_offer.dart` |
+| Client HTTP action transport (images, messages, history) over the socket's origin | `app` | `app/lib/services/server_http.dart` (`ServerHttp`) |
+| Client history page merging | `app` | `app/lib/logic/history_merge.dart` (`mergeHistoryPage`) |
+| Client endpoint choice + external URL validation | `app` | `app/lib/logic/endpoint_choice.dart` (`pickEndpoint`, `secureLoopbackUri`, `secureDiscoveryWebSocketUri`) |
 | Attachment selection/routing and platform file-byte readers | `app` | `app/lib/services/attachment_selection.dart`, `file_pick_bridge.dart`, `file_reader_bytes.dart`, `picked_file.dart` |
 | Image paste event bridge (web) | `app` | `app/lib/services/paste_bridge.dart` (conditional import: `paste_web.dart` / `paste_stub.dart`) |
 | Historical/live tool payload normalization for UI cards | `app` | `app/lib/models/tool_call_view.dart` (`ToolCallView`) |
