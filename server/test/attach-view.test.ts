@@ -18,7 +18,7 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
 
-import { getKeybindings } from "@earendil-works/pi-tui";
+import { getKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 
 import { createAttachView, scrollbar } from "../src/attach-view.ts";
@@ -122,10 +122,26 @@ test("an empty transcript says how to use it", () => {
   assert.match(h.lines().join("\n"), /no messages yet/);
 });
 
+test("the view is framed, full height, and every line is exactly the width", () => {
+  // Measured: the operator's terminal showed a small borderless box, because an
+  // overlay is sized from the lines the component returns and the view returned
+  // only what its content needed.
+  const h = harness({ messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] });
+  const lines = h.view.render(100);
+  assert.equal(lines.length, 40, "the frame must fill the terminal it is given");
+  for (const line of lines) {
+    assert.equal(visibleWidth(line), 100, `a line is not 100 cells: ${JSON.stringify(line)}`);
+  }
+  const plain = lines.map(stripAnsi).join("\n");
+  assert.match(plain, /^┌─/, "a top border with the title");
+  assert.match(plain, /└─/, "a bottom border with the keys");
+  assert.match(plain, /enter send/, "the keys must be on the bottom border");
+});
+
 test("the session being viewed is named, with its status and model", () => {
   const h = harness({ messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] });
   const lines = h.lines();
-  assert.match(lines[0]!, /session: pinest/, `header did not name the session: ${lines[0]}`);
+  assert.match(lines[0]!, /session: pinest/, `the title did not name the session: ${lines[0]}`);
   assert.match(lines[0]!, /idle/);
   assert.match(lines[0]!, /gemini-3\.8-flash/);
   assert.match(lines.join("\n"), /srv\/checkout\/pinest/);
@@ -145,6 +161,7 @@ test("the prompt stays on screen when the transcript is taller than the overlay"
   );
   const joined = lines.join("\n");
   assert.match(joined, /─{20,}/, "the editor's border must be visible");
+  assert.match(joined, /enter send/, "and the keys must be too");
   // ...and it must be the NEWEST output that is visible, not an arbitrary
   // window: a view that always showed the first N lines would also fit.
   assert.match(joined, /question 11/, "the newest output must be on screen with the prompt");

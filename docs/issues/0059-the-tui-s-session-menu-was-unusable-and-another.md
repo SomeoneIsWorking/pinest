@@ -64,17 +64,31 @@ a subscriber as `tool_execution_start/update/end`.
   prompt is Pi's own `CustomEditor`; **left arrow on an empty prompt returns to
   the sessions list** (Esc still detaches).
 * `server/src/sessions-view.ts`: Pi's own `SelectList`, sized to the terminal
-  with its own scroll indicator, type-to-filter (every printable key filters, so
-  no letter is also a command), Enter opens an action menu (Open / Kill /
-  Cancel), and Kill asks again before ending a session.
+  with its own scroll indicator, and type-to-filter (every printable key
+  filters, so no letter is also a command). **Enter opens the session directly**:
+  measured in the operator's terminal, a menu between the selection and the open
+  was one step too many, and it was removed rather than reordered. Killing moved
+  to **Ctrl-D**, Pi's own `app.session.delete` binding, and still asks once
+  (Enter confirms, Esc keeps).
+* `server/src/tui-frame.ts`: both views draw a bordered, full-height panel with
+  the title in the top border and the keys in the bottom one. Measured in the
+  operator's terminal: the overlay was a small borderless box in the middle of
+  the screen, because an overlay is sized from the lines a component returns and
+  both views returned only what their content needed. The frame is one owner of
+  the geometry, and every line is exactly the terminal's width — wide characters
+  counted as the cells they occupy, colours as none.
 * `server/src/session-submit.ts`: ONE owner for sending a user message, used by
   the HTTP command path and the TUI. A send that cannot be delivered is reported
   by name, never swallowed.
 * `teardownRemote` now stops the signaling watch and closes the direct transport;
   the attach view unsubscribes from its session on dispose.
 
-Evidence: 15 sessions-view tests and 12 attach-view tests assert the RENDERED
-lines — the session is named, the prompt survives a transcript taller than the
-overlay, scrolling moves the window and End returns to it, a command reaches the
-session, a refusal is shown, left arrow goes back — plus 5 tests for the shared
-submit owner.
+Evidence: 19 rendered-line tests for the sessions list, 19 for the attach view,
+and 7 for the frame's geometry (exact height and width, colours, wide characters,
+over-long labels, content taller or shorter than the frame) — the session is
+named, the prompt survives a transcript taller than the overlay, scrolling moves
+the window and End returns to it, a command reaches the session, a refusal is
+shown, left arrow goes back — plus 5 tests for the shared submit owner, and 3
+end-to-end flow tests. The mechanisms that matter were each verified to FAIL when
+broken: dropping the chosen session's id, rendering the transcript unwindowed,
+re-inserting the action menu, and returning only the content's own height.

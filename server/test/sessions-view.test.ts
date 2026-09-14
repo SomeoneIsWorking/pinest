@@ -9,6 +9,8 @@ import test from "node:test";
 
 import { initTheme } from "@earendil-works/pi-coding-agent";
 
+import { visibleWidth } from "@earendil-works/pi-tui";
+
 import { createSessionsView, shortenPath, visibleRows } from "../src/sessions-view.ts";
 
 // Pi's own hint formatter reads the global theme; the running terminal has it
@@ -34,13 +36,13 @@ function sessions(count: number): SessionSummary[] {
   ];
 }
 
-function harness(list: SessionSummary[], rows = 24) {
+function harness(list: SessionSummary[], rows = 24, columns = 100) {
   const calls: string[] = [];
   let selected: string | null = null;
   const view = createSessionsView({
     sessions: list,
     theme: { fg: (_c: string, t: string) => t, bold: (t: string) => t },
-    tui: { requestRender: () => {}, terminal: { rows, columns: 100 } },
+    tui: { requestRender: () => {}, terminal: { rows, columns } },
     rows,
     onSelect: (s) => {
       selected = s.id;
@@ -54,8 +56,24 @@ function harness(list: SessionSummary[], rows = 24) {
     },
     onCancel: () => calls.push("cancel"),
   });
-  return { view, calls, selected: () => selected, lines: () => view.render(100).map(stripAnsi) };
+  return { view, calls, selected: () => selected, lines: () => view.render(columns).map(stripAnsi) };
 }
+
+test("the view is framed, and every line is exactly the terminal's width", () => {
+  // The TUI treats a line longer than the width as corruption, so this is a hard
+  // contract, and the frame is what the operator asked for.
+  const h = harness(sessions(3), 24, 100);
+  const lines = h.view.render(100);
+  assert.equal(lines.length, 24, "the frame must fill the terminal it is given");
+  for (const line of lines) {
+    assert.equal(visibleWidth(line), 100, `a line is not 100 cells: ${JSON.stringify(line)}`);
+  }
+  const plain = lines.map(stripAnsi).join("\n");
+  assert.match(plain, /^┌─/, "the frame must have a top border with the title");
+  assert.match(plain, /└─/, "and a bottom border with the keys");
+  assert.match(plain, /│.*│/s, "and sides");
+  assert.match(plain, /enter open/, "the keys must be on the bottom border");
+});
 
 test("every session is listed with what it is and where it runs", () => {
   const h = harness(sessions(3));
@@ -77,49 +95,45 @@ test("a list longer than the terminal says how much more there is", () => {
   assert.match(text, /\(\d+\/41\)/, `no scroll indicator in:\n${text}`);
 });
 
-test("enter offers what can be done, and never acts on its own", () => {
+test("enter opens the selected session directly, with no menu in between", () => {
   const h = harness(sessions(2));
   h.view.handleInput("\r"); // on the host row
-  assert.deepEqual(h.calls, [], "nothing may be done by opening the menu");
-  assert.match(h.lines().join("\n"), /terminal you are typing in/);
+  assert.deepEqual(h.calls, [], "the host row is not an agent to open");
+  assert.match(h.lines().join("\n"), /That is this terminal/);
 
-  h.view.handleInput("\x1b"); // back out
   h.view.handleInput("\x1b[B"); // down to the first agent
-  h.view.handleInput("\r");
-  const menu = h.lines().join("\n");
-  assert.match(menu, /Open/);
-  assert.match(menu, /Kill/);
-  assert.deepEqual(h.calls, [], "opening the menu is not a choice");
-});
-
-test("an agent session is opened from its menu", () => {
-  const h = harness(sessions(2));
-  h.view.handleInput("\x1b[B"); // down
-  h.view.handleInput("\r"); // actions
-  h.view.handleInput("\r"); // the first action is Open
+  h.view.handleInput("\r"); // straight in
   assert.deepEqual(h.calls, ["select:s0"]);
 });
 
-test("killing takes two deliberate answers", () => {
+test("ctrl+d kills, after one confirmation", () => {
   const h = harness(sessions(3));
   h.view.handleInput("\x1b[B"); // first agent
-  h.view.handleInput("\r"); // actions
-  h.view.handleInput("\x1b[B"); // down to Kill
-  h.view.handleInput("\r"); // asks
-  assert.deepEqual(h.calls, [], "choosing Kill must not kill yet");
+  h.view.handleInput("\x04"); // ctrl+d
+  assert.deepEqual(h.calls, [], "ctrl+d must ask before ending a session");
   assert.match(h.lines().join("\n"), /Kill "agent-0"\?/);
 
-  h.view.handleInput("\x1b[B"); // "Keep it"
-  h.view.handleInput("\r");
-  assert.deepEqual(h.calls, [], "answering keep must not kill");
+  h.view.handleInput("\x1b"); // escape keeps it
+  assert.deepEqual(h.calls, [], "escaping the question must not kill");
   assert.doesNotMatch(h.lines().join("\n"), /Kill "/);
 
-  h.view.handleInput("\r");
-  h.view.handleInput("\x1b[B");
-  h.view.handleInput("\r"); // ask again
-  h.view.handleInput("\r"); // the first answer is "Kill it"
+  h.view.handleInput("\x04"); // ask again
+  h.view.handleInput("\r"); // enter confirms
   assert.deepEqual(h.calls, ["kill:s0"]);
   assert.match(h.lines().join("\n"), /Killed "agent-0"/);
+});
+
+test("ctrl+d on the host terminal is refused, like pi refuses to delete the running session", () => {
+  const h = harness(sessions(2));
+  h.view.handleInput("\x04"); // on the host row
+  assert.deepEqual(h.calls, []);
+  assert.match(h.lines().join("\n"), /terminal you are typing in/);
+});
+
+test("a plain d is a filter letter, not a kill", () => {
+  const h = harness(sessions(2));
+  h.view.handleInput("d");
+  assert.deepEqual(h.calls, []);
 });
 
 test("typing narrows the list, and every letter is part of the filter", () => {
@@ -185,8 +199,7 @@ test("narrowing the list keeps the cursor on the same session", () => {
   for (const ch of "agent") {
     h.view.handleInput(ch);
   }
-  h.view.handleInput("\r"); // actions for whatever is selected
-  h.view.handleInput("\r"); // Open
+  h.view.handleInput("\r"); // open whatever is selected
   assert.deepEqual(h.calls, ["select:s1"], "the filter moved the cursor to another session");
 });
 
@@ -217,7 +230,10 @@ test("an empty list is a sentence, not an empty box", () => {
 
 test("the list is sized to the terminal, never taller than it", () => {
   assert.equal(visibleRows(24, 5), 5, "a short list uses its own height");
-  assert.ok(visibleRows(24, 100) <= 18, "a long list is capped by the terminal");
+  assert.ok(
+    visibleRows(24, 100) <= 24 - 2,
+    "a long list must fit inside the frame's borders",
+  );
   assert.ok(visibleRows(8, 100) >= 1, "a tiny terminal still shows one row");
   assert.equal(visibleRows(40, 0), 1, "an empty list still has a row to render");
 });
@@ -275,7 +291,6 @@ test("the list, the session, and the way back form one loop", async () => {
           // opens the attach view, which is call 2.
           view.handleInput("\x1b[B");
           view.handleInput("a"); // filter: only the child matches "a"
-          view.handleInput("\r");
           view.handleInput("\r");
         } else if (calls === 2) {
           seen.push("attach");
@@ -347,7 +362,6 @@ test("closing a session with escape ends the flow instead of re-opening the list
         );
         if (calls === 1) {
           view.handleInput("\x1b[B");
-          view.handleInput("\r");
           view.handleInput("\r");
         } else if (calls === 2) {
           view.handleInput("\x1b"); // detach for good
