@@ -110,22 +110,37 @@ async function ownerIdToken(
   return { idToken: body.id_token, uid: body.user_id };
 }
 
+/** The signaling fields this check needs, with the offer's identity intact. */
+interface Signaling {
+  offer: string;
+  offerTs: number;
+  /** The offer the app has already answered, when it has. */
+  answerOfferTs: number | null;
+}
+
 function docUrl(uid: string): string {
   return `https://firestore.googleapis.com/v1/projects/${PROJECT}/databases/(default)/documents/users/${uid}`;
 }
 
-async function readDoc(
-  uid: string,
-  token: string,
-  timeoutMs: number,
-): Promise<Record<string, any>> {
+/** Read the live offer, and whether that exchange is already taken. */
+async function readSignaling(uid: string, token: string, timeoutMs: number): Promise<Signaling> {
   const response = await fetchBounded(
     docUrl(uid),
     { headers: { Authorization: `Bearer ${token}` } },
     timeoutMs,
   );
   if (!response.ok) throw new VerificationError(`discovery read failed: HTTP ${response.status}`);
-  return ((await response.json()) as { fields?: Record<string, any> }).fields ?? {};
+  const fields = ((await response.json()) as { fields?: Record<string, any> }).fields ?? {};
+  const offer = fields.p2pOffer?.stringValue;
+  const offerTs = Number(fields.p2pOfferTs?.integerValue ?? NaN);
+  if (typeof offer !== "string" || !Number.isFinite(offerTs)) {
+    throw new VerificationError(
+      "the discovery document carries no direct offer: peer-to-peer is off there (config `p2p`) "
+      + "or the machine is not running the direct transport",
+    );
+  }
+  const answerOfferTs = Number(fields.p2pAnswerOfferTs?.integerValue ?? NaN);
+  return { offer, offerTs, answerOfferTs: Number.isFinite(answerOfferTs) ? answerOfferTs : null };
 }
 
 async function writeAnswer(
@@ -183,10 +198,18 @@ async function gather(pc: RTCPeerConnection, timeoutMs: number): Promise<void> {
   ]);
 }
 
+/** Wait. The timer is deliberately NOT unref'd: an unref'd timer with no other
+ * pending work lets Node exit mid-await (measured: exit 13, "unsettled
+ * top-level await"), which would report a check that never happened. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 function timeout(ms: number, label: string): Promise<never> {
   return new Promise((_, reject) => {
-    const timer = setTimeout(() => reject(new VerificationError(`${label} timed out after ${ms}ms`)), ms);
-    timer.unref?.();
+    setTimeout(() => reject(new VerificationError(`${label} timed out after ${ms}ms`)), ms);
   });
 }
 
@@ -205,76 +228,126 @@ async function main(): Promise<void> {
     console.error(`status: FAILED — the verification exceeded ${timeoutMs * 4}ms in total`);
     process.exit(1);
   }, timeoutMs * 4);
-  watchdog.unref?.();
 
   const { idToken, uid } = await ownerIdToken(ownerRefreshToken(), timeoutMs);
-  const fields = await readDoc(uid, idToken, timeoutMs);
+  const first = await readSignaling(uid, idToken, timeoutMs);
 
-  const offer = fields.p2pOffer?.stringValue;
-  const offerTs = Number(fields.p2pOfferTs?.integerValue ?? NaN);
-  if (typeof offer !== "string" || !Number.isFinite(offerTs)) {
-    throw new VerificationError(
-      "the discovery document carries no direct offer: peer-to-peer is off there (config `p2p`) "
-      + "or the machine is not running the direct transport",
-    );
-  }
-  const age = Date.now() - offerTs;
-  const hostCandidates = candidateReport(offer);
+  const age = Date.now() - first.offerTs;
+  const hostCandidates = candidateReport(first.offer);
   console.log(
-    `offer: ${offer.length} bytes, ${hostCandidates.total} candidate(s), `
+    `offer: ${first.offer.length} bytes, ${hostCandidates.total} candidate(s), `
     + `${hostCandidates.srflx} srflx, published ${Math.round(age / 1000)}s ago`,
   );
   if (age > 60_000) {
     console.log(
       "NOTE: that offer is over a minute old, so its carrier-grade NAT mapping has probably "
-      + "expired. The host refreshes a stale offer on its own; this run answers what is published.",
+      + "expired. The machine refreshes a stale offer on its own; this run answers what it finds.",
     );
   }
 
-  const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
-  // Two channels, one per direction, as the machine offers them: the app
-  // receives on push and sends on actions.
-  const opened = new Map<string, any>();
-  let channelsResolve: () => void = () => {};
-  const bothOpen = new Promise<void>((resolve) => { channelsResolve = resolve; });
-  pc.ondatachannel = (event) => {
-    const channel = event.channel;
-    const settle = (): void => {
-      opened.set(channel.label, channel);
-      if (opened.has(PUSH_CHANNEL_LABEL) && opened.has(ACTIONS_CHANNEL_LABEL)) {
-        channelsResolve();
+  // The machine withdraws and republishes a stale offer on its own clock (45 s
+  // while nothing is connected), so an answer written against the offer read a
+  // moment ago can describe an exchange that no longer exists - exactly how the
+  // app's own retry works, and why this has to read and answer again rather
+  // than answer once and wait. An exchange the app has already answered is left
+  // alone: one exchange takes one answer, and racing the app for it would prove
+  // nothing about either peer.
+  const deadline = Date.now() + timeoutMs * 4;
+  let connected: { push: any; actions: any; pc: RTCPeerConnection } | null = null;
+  let sawLabels: string[] = [];
+  let answered = 0;
+  while (Date.now() < deadline && connected === null) {
+    // Poll tightly for an offer nobody has answered yet. The machine replaces a
+    // stale offer every ~45s and the app answers within a few seconds, so an
+    // exchange is only free briefly; a slow poll would never see one and would
+    // report a failure of the transport that is really a race with the app.
+    const signaling = await readSignaling(uid, idToken, timeoutMs);
+    if (signaling.answerOfferTs === signaling.offerTs) {
+      if (Date.now() + 1_500 < deadline) {
+        await sleep(1_000);
+        continue;
       }
-    };
-    if (channel.readyState === "open") {
-      settle();
-      return;
+      console.log(
+        `offer ${signaling.offerTs}: already answered, and no newer offer appeared `
+        + "- the app holds the exchange",
+      );
+      continue;
     }
-    channel.stateChange.subscribe((state: string) => {
-      if (state === "open") settle();
-    });
-  };
 
-  await pc.setRemoteDescription(new RTCSessionDescription(offer, "offer"));
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
-  await gather(pc, timeoutMs);
-  await writeAnswer(uid, idToken, pc.localDescription!.sdp!, offerTs, timeoutMs);
-  console.log(`answer: published, naming the offer (${offerTs}) it describes`);
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    const opened = new Map<string, any>();
+    let channelsResolve: () => void = () => {};
+    const bothOpen = new Promise<void>((resolve) => { channelsResolve = resolve; });
+    pc.ondatachannel = (event) => {
+      const channel = event.channel;
+      const settle = (): void => {
+        opened.set(channel.label, channel);
+        if (opened.has(PUSH_CHANNEL_LABEL) && opened.has(ACTIONS_CHANNEL_LABEL)) {
+          channelsResolve();
+        }
+      };
+      if (channel.readyState === "open") {
+        settle();
+        return;
+      }
+      channel.stateChange.subscribe((state: string) => {
+        if (state === "open") settle();
+      });
+    };
 
-  await Promise.race([bothOpen, timeout(timeoutMs, "both DataChannels")]);
-  const push = opened.get(PUSH_CHANNEL_LABEL)!;
-  const actions = opened.get(ACTIONS_CHANNEL_LABEL)!;
-  console.log(
-    `channels: both open (${push.label}, ${actions.label}; `
-    + `iceConnectionState=${pc.iceConnectionState})`,
-  );
+    await pc.setRemoteDescription(new RTCSessionDescription(signaling.offer, "offer"));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await gather(pc, timeoutMs);
+    await writeAnswer(uid, idToken, pc.localDescription!.sdp!, signaling.offerTs, timeoutMs);
+    answered += 1;
+    console.log(
+      `answer ${answered}: published, naming the offer (${signaling.offerTs}) it describes, `
+      + `${Math.round((Date.now() - signaling.offerTs) / 1000)}s after that offer was published`,
+    );
 
-  // Speak the REAL protocol over it: authenticate, then subscribe. Anything
-  // less would only prove that bytes can move, not that this is a transport the
-  // app could actually use.
+    // One offer's punch has this long to land before the exchange is presumed
+    // replaced; the outer loop then reads the document again.
+    const won = await Promise.race([
+      bothOpen.then(() => true),
+      sleep(Math.min(12_000, Math.max(1_000, deadline - Date.now()))).then(() => false),
+    ]);
+    sawLabels = [...opened.keys()];
+    if (won) {
+      connected = {
+        push: opened.get(PUSH_CHANNEL_LABEL)!,
+        actions: opened.get(ACTIONS_CHANNEL_LABEL)!,
+        pc,
+      };
+      console.log(
+        `channels: both open (${PUSH_CHANNEL_LABEL}, ${ACTIONS_CHANNEL_LABEL}; `
+        + `iceConnectionState=${pc.iceConnectionState})`,
+      );
+    } else {
+      console.log(
+        `punch ${answered}: no channels after 12s (saw ${sawLabels.length === 0 ? "none" : sawLabels.join(", ")}); `
+        + "reading the document for a newer offer",
+      );
+      pc.close();
+    }
+  }
+
+  if (connected === null) {
+    throw new VerificationError(
+      `${answered} answer(s) were published but no pair of channels ever opened `
+      + `(last attempt saw ${sawLabels.length === 0 ? "none" : sawLabels.join(", ")}, expected `
+      + `${PUSH_CHANNEL_LABEL} and ${ACTIONS_CHANNEL_LABEL})`,
+    );
+  }
+  const { push, actions, pc } = connected;
+
+  // Speak the REAL protocol over the framed channels: authenticate, then
+  // subscribe. Anything less would only prove that bytes can move, not that
+  // this is a transport the app could actually use.
   const reader = new FrameReader();
   const writer = new FrameWriter();
   let largest = 0;
+  let framesIn = 0;
   const stateFrame = new Promise<any>((resolve, reject) => {
     push.onMessage.subscribe((data: unknown) => {
       let payload: string | null;
@@ -287,6 +360,7 @@ async function main(): Promise<void> {
       if (payload === null) {
         return;
       }
+      framesIn += 1;
       largest = Math.max(largest, payload.length);
       let parsed: any;
       try {
@@ -295,7 +369,7 @@ async function main(): Promise<void> {
         return;
       }
       if (parsed.type === "state") resolve(parsed);
-      if (parsed.type === "error") reject(new VerificationError(`host refused: ${parsed.message}`));
+      if (parsed.type === "error") reject(new VerificationError(`the machine refused: ${parsed.message}`));
     });
   });
   // The same frames the app sends, split the same way.
@@ -307,12 +381,24 @@ async function main(): Promise<void> {
   send({ type: "auth", token: idToken });
   send({ type: "subscribe", sessionIds: [] });
 
-  const state = await Promise.race([stateFrame, timeout(timeoutMs, "a state frame")]);
+  const state = await Promise.race([
+    stateFrame,
+    timeout(timeoutMs, "a state frame over the direct channel"),
+  ]);
   const sessions = Array.isArray(state.sessions) ? state.sessions.length : 0;
-  console.log(`protocol: authenticated and received state with ${sessions} session(s)`);
+  console.log(
+    `protocol: authenticated over the direct channel and received state with ${sessions} session(s) `
+    + `(${framesIn} frame(s) reassembled, largest ${largest} bytes)`,
+  );
+  const reported = state.p2p as { channelOpen?: boolean; exchanges?: number } | undefined;
+  if (reported) {
+    console.log(
+      `machine status: channelOpen=${reported.channelOpen} exchanges=${reported.exchanges}`,
+    );
+  }
   console.log(
     `status: OK — a second peer reached this machine over the direct channel `
-    + `(ice=${pc.iceConnectionState}, largest push ${largest} bytes)`,
+    + `(ice=${pc.iceConnectionState}, framed two-channel protocol, ${framesIn} frame(s) in)`,
   );
   console.log(
     "unproven here: traversal from a third network. Both peers ran on this machine, so a local "

@@ -48,8 +48,8 @@ function harness() {
       // "connected" before the test says so, and the refresh policy is driven
       // by a liveness signal rather than by a construction. 
       connect: () => resolveChannel({
-        push: { send: () => {}, close: () => {} },
-        actions: { send: () => {}, close: () => {} },
+        push: { send: () => {}, attach: () => {} },
+        actions: { send: () => {}, attach: () => {} },
       }),
       fail: (error) => rejectChannel(error),
       // The real exchange hands its description to `publish`, which is what
