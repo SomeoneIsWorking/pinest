@@ -164,18 +164,30 @@ class WebSocket:
 
     GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
-    def __init__(self, port: int, timeout: float) -> None:
+    def __init__(
+        self,
+        port: int,
+        timeout: float,
+        *,
+        sock: socket.socket | None = None,
+        host_header: str | None = None,
+    ) -> None:
         self._closed = False
         self.close_code: int | None = None
         self.close_reason = ""
         self.frames_seen: list[str] = []
-        self.sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+        # A caller that has already opened a socket - a TLS one, to reach the
+        # machine through its published name - hands it in. The handshake below
+        # is the same either way, so the tunnel and the loopback are exercised
+        # by one implementation.
+        self.sock = sock or socket.create_connection(("127.0.0.1", port), timeout=5)
         self.sock.settimeout(timeout)
         key = base64.b64encode(os.urandom(16)).decode()
+        host = host_header or f"127.0.0.1:{port}"
         self.sock.sendall(
             (
                 f"GET / HTTP/1.1\r\n"
-                f"Host: 127.0.0.1:{port}\r\n"
+                f"Host: {host}\r\n"
                 "Upgrade: websocket\r\n"
                 "Connection: Upgrade\r\n"
                 f"Sec-WebSocket-Key: {key}\r\n"
@@ -186,16 +198,16 @@ class WebSocket:
         while b"\r\n\r\n" not in headers:
             chunk = self.sock.recv(4096)
             if not chunk:
-                raise WebSocketError(f"handshake closed early on port {port}")
+                raise WebSocketError(f"handshake closed early on {host}")
             headers += chunk
         status = headers.split(b"\r\n", 1)[0].decode(errors="replace")
         if "101" not in status:
-            raise WebSocketError(f"handshake rejected on port {port}: {status}")
+            raise WebSocketError(f"handshake rejected on {host}: {status}")
         expected = base64.b64encode(
             hashlib.sha1((key + self.GUID).encode()).digest()
         ).decode()
         if expected.encode() not in headers:
-            raise WebSocketError(f"handshake accept key mismatch on port {port}")
+            raise WebSocketError(f"handshake accept key mismatch on {host}")
 
     def send_text(self, text: str) -> None:
         payload = text.encode()

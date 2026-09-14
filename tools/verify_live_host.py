@@ -199,6 +199,54 @@ class ProbeUnreachable(RuntimeError):
     """The origin did not answer at all."""
 
 
+def tunnel_socket(origin: str, resolver: Callable[[str], list[str]]) -> tuple[socket.socket, str, int]:
+    """A TLS socket to the tunnel's own address, with its name for SNI."""
+    parsed = origin.removeprefix("https://").removeprefix("http://")
+    hostname, _, port_text = parsed.partition(":")
+    port = int(port_text) if port_text else 443
+    address = resolve_public(hostname, resolver)
+    context = ssl.create_default_context()
+    connection = socket.create_connection((address, port), timeout=REQUEST_TIMEOUT_SECONDS)
+    return context.wrap_socket(connection, server_hostname=hostname), hostname, port
+
+
+def ws_handshake(origin: str, token: str, resolver: Callable[[str], list[str]] | None) -> str | None:
+    """Open the app's socket exactly as the app does, and authenticate on it.
+
+    The HTTP routes can all answer while the socket path is broken, and the
+    socket is what the app needs before it will show anything but "offline".
+    Loopback and the published name go through the same client, so a pass here
+    means the phone's own dial works.
+    """
+    if resolver is None:
+        parsed = origin.removeprefix("http://").removeprefix("https://")
+        port = int(parsed.partition(":")[2] or "80")
+        socket_client = reload_host.WebSocket(port, 10.0)
+    else:
+        connection, hostname, port = tunnel_socket(origin, resolver)
+        socket_client = reload_host.WebSocket(port, 10.0, sock=connection, host_header=hostname)
+    try:
+        socket_client.send_text(json.dumps({"type": "auth", "token": token}))
+        authed = False
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            if socket_client.close_code is not None:
+                return f"the machine closed the socket ({reload_host.format_close(socket_client)})"
+            frame = reload_host.recv_json(socket_client, 2.0)
+            if frame is None:
+                continue
+            if frame.get("type") == "error":
+                return f"the machine refused the connection: {frame.get('message')}"
+            if frame.get("type") == "state":
+                return None if authed else "the machine sent state before authenticating"
+            authed = authed or frame.get("type") == "authed"
+        return "no state frame after authenticating"
+    except (OSError, reload_host.WebSocketError) as error:
+        return f"the socket did not open: {error}"
+    finally:
+        socket_client.close()
+
+
 def host_state(port: int, token: str) -> dict[str, object]:
     """The host's own state frame: what the app is told when it connects."""
     socket_client = reload_host.WebSocket(port, 5.0)
@@ -326,12 +374,27 @@ def main(argv: list[str] | None = None) -> int:
 
     findings: list[str] = []
     local_origin = f"http://127.0.0.1:{port}"
+
+    # The app's own first move: the socket. Everything else is secondary.
+    ws_problem = ws_handshake(local_origin, token, None)
+    if ws_problem is None:
+        print("  ok   loopback: the app's socket opens and authenticates")
+    else:
+        findings.append(f"loopback: socket handshake: {ws_problem}")
+        print(f"  FAIL loopback: socket handshake: {ws_problem}")
+
     findings += verify(local_origin, key, lambda probe: request_via_origin(local_origin, key, probe), "loopback")
 
     tunnel = state.get("tunnelUrl")
     if args.local_only:
         print("tunnel: skipped (--local-only)")
     elif isinstance(tunnel, str) and tunnel:
+        ws_problem = ws_handshake(tunnel, token, resolve_with_public_dns)
+        if ws_problem is None:
+            print("  ok   tunnel: the app's socket opens and authenticates")
+        else:
+            findings.append(f"tunnel: socket handshake: {ws_problem}")
+            print(f"  FAIL tunnel: socket handshake: {ws_problem}")
         try:
             findings += verify(
                 tunnel,
