@@ -246,6 +246,70 @@ test("a push larger than SCTP allows does not kill the host", async () => {
   }
 });
 
+test("a frame sent before the bridge exists is not lost", async () => {
+  // Measured live: the app speaks the instant its channel opens, while this end
+  // builds the bridge a beat later. The auth handshake arrived in that window,
+  // was dropped, and the machine's own server closed the socket for being
+  // unauthenticated after ten seconds - a direct channel that opened and then
+  // went nowhere, with nothing to show for it.
+  const loop = await stubLoopbackServer();
+  const { exchange: host } = localExchange();
+
+  const answerer = new RTCPeerConnection();
+  const channels = new Map<string, RTCDataChannel>();
+  let open: (() => void) | null = null;
+  const opened = new Promise<void>((resolve) => { open = resolve; });
+  answerer.ondatachannel = (event) => {
+    channels.set(event.channel.label, event.channel);
+    if (channels.size === 2) open?.();
+  };
+
+  const offer = await host.offer(3_000);
+  await answerer.setRemoteDescription(new RTCSessionDescription(offer, "offer"));
+  const answer = await answerer.createAnswer();
+  await answerer.setLocalDescription(answer);
+  await host.acceptAnswer(answerer.localDescription!.sdp!);
+  await Promise.race([
+    opened,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("no channels")), 10_000)),
+  ]);
+
+  const push = channels.get(PUSH_CHANNEL_LABEL)!;
+  const actions = channels.get(ACTIONS_CHANNEL_LABEL)!;
+  const frames = new FrameWriter();
+  const reader = new FrameReader();
+  const received: string[] = [];
+  let waiter: (() => void) | null = null;
+  push.onMessage.subscribe((data: unknown) => {
+    const whole = reader.accept(Buffer.from(data as ArrayBuffer | Buffer));
+    if (whole === null) return;
+    received.push(whole);
+    waiter?.();
+  });
+
+  // Speak FIRST, exactly as the app does...
+  for (const frame of frames.frames("auth-handshake")) actions.send(frame);
+  await new Promise((r) => setTimeout(r, 1_000));
+  // ...and only now build the bridge, as the host does.
+  const bridge = bridgeToLoopback(await host.channels, loop.port);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("the early frame never arrived")), 10_000);
+      waiter = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+    assert.equal(received[0], "echo:auth-handshake", "the early frame still crossed");
+  } finally {
+    bridge.close();
+    for (const channel of channels.values()) channel.close();
+    host.close();
+    answerer.close();
+    await loop.close();
+  }
+});
+
 // ── The host side of the exchange ─────────────────────────────────────────
 
 /** The host peer alone, with a recording log and its published offer. */
