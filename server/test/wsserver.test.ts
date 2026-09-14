@@ -14,8 +14,9 @@ function validToken(expiresAt = Date.now() + 60_000): VerifiedToken {
 async function startServer(
   verify: (token: string) => Promise<VerifiedToken | null> = async () => validToken(),
   now: () => number = Date.now,
+  options: { maxOutboundStallMs?: number } = {},
 ): Promise<WSServer> {
-  const server = new WSServer({ expectedUid: OWNER_UID, now });
+  const server = new WSServer({ expectedUid: OWNER_UID, now, ...options });
   server.setVerifyFn(verify);
   await server.start();
   return server;
@@ -367,7 +368,7 @@ test("verification attempts use a rolling global budget that later recovers", as
   assert.equal(verificationCalls, 31);
 });
 
-test("outbound buffering accepts the boundary then closes a slow client", async (t) => {
+test("outbound buffering accepts the boundary, then holds a frame instead of closing", async (t) => {
   const server = await startServer();
   const ws = await openClient(server);
   t.after(() => stopAll(server, [ws]));
@@ -386,15 +387,49 @@ test("outbound buffering accepts the boundary then closes a slow client", async 
   assert.deepEqual(await accepted, notice);
   assert.equal(server.clients.size, 1);
 
+  // One byte over: the frame is held, not blamed on the client. Being behind
+  // for a moment used to end the socket, which reconnected straight into the
+  // same load and lost whatever was in flight.
   Object.defineProperty(serverSocket, "bufferedAmount", {
     configurable: true,
-    value: bufferLimit - noticeBytes + 1,
+    value: bufferLimit,
   });
+  server.broadcast({ type: "notice" as const, message: "held" });
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(server.clients.size, 1, "a briefly slow client is not disconnected");
+  assert.equal(server.blocked, 1, "the held frame is counted, not forgotten");
+
+  // Once the client drains, the held frame arrives - in order, exactly once.
+  Object.defineProperty(serverSocket, "bufferedAmount", { configurable: true, value: 0 });
+  const delivered = await nextMessage(ws);
+  assert.deepEqual(delivered, { type: "notice", message: "held" });
+  assert.equal(server.stalledClosesCount, 0);
+});
+
+test("a socket that never drains is ended as stalled, not as slow", async (t) => {
+  // The distinction matters: "slow" blamed a client that would have caught up.
+  let clock = 1_000_000;
+  const server = await startServer(async () => validToken(), () => clock, { maxOutboundStallMs: 5_000 });
+  const ws = await openClient(server);
+  t.after(() => stopAll(server, [ws]));
+  assert.deepEqual(await authenticate(ws), { type: "authed" });
+  const serverSocket = [...server.clients][0]!;
+  Object.defineProperty(serverSocket, "bufferedAmount", {
+    configurable: true,
+    value: 16 * 1024 * 1024,
+  });
+
+  server.broadcast({ type: "notice" as const, message: "one" });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(server.clients.size, 1, "still held, not ended");
+
+  clock += 6_000;   // past the stall budget
   const close = nextClose(ws);
-  server.broadcast(notice);
+  server.broadcast({ type: "notice" as const, message: "two" });
   const ended = await close;
   assert.equal(ended.code, 1013);
-  assert.equal(ended.reason, "client too slow");
+  assert.equal(ended.reason, "client stalled", "the reason names what actually happened");
+  assert.equal(server.stalledClosesCount, 1);
   assert.equal(server.clients.size, 0);
 });
 

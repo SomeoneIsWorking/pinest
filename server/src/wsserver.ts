@@ -37,6 +37,10 @@ interface AuthedSocket extends WebSocket {
    */
   subscriptions?: Set<string> | null;
   outbound?: OutboundBox;
+  /** When this socket first had a discrete frame it could not accept, or null
+   * while it is keeping up. Being behind briefly is normal; never draining is
+   * the only thing that justifies ending the connection. */
+  stalledSince?: number | null;
   authAttempted: boolean;
   acceptingMessages: boolean;
   authenticatedUid?: string;
@@ -105,6 +109,12 @@ const MAX_CONCURRENT_VERIFICATIONS = 8;
 const MAX_VERIFICATIONS_PER_WINDOW = 30;
 const VERIFICATION_WINDOW_MS = 60_000;
 const MAX_OUTBOUND_BUFFER_BYTES = 16 * 1024 * 1024;
+
+/** How long a socket may hold a frame it cannot accept before it counts as
+ * stalled rather than briefly behind. */
+const MAX_OUTBOUND_STALL_MS = 30_000;
+/** How soon to retry a held frame while the socket is behind. */
+const OUTBOUND_RETRY_MS = 250;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 export class WSServer {
@@ -128,21 +138,27 @@ export class WSServer {
   private verificationsInFlight = 0;
   private verificationAttempts: number[] = [];
   private readonly now: () => number;
+  private readonly maxOutboundStallMs: number;
   private stopped = false;
 
   constructor({
     port = 0,
     expectedUid,
     now = Date.now,
+    maxOutboundStallMs = MAX_OUTBOUND_STALL_MS,
   }: {
     port?: number;
     expectedUid: string;
     /** Injectable monotonic-enough wall clock for deterministic policy tests. */
     now?: () => number;
+    /** How long a socket may have a frame it cannot accept before it is
+     * considered stalled rather than briefly behind. */
+    maxOutboundStallMs?: number;
   }) {
     this.port = port;
     this.expectedUid = expectedUid;
     this.now = now;
+    this.maxOutboundStallMs = maxOutboundStallMs;
   }
 
   on(event: "command", handler: CommandHandler): void {
@@ -518,16 +534,51 @@ export class WSServer {
         this.droppedStreamFrames += 1;
         return false;
       }
-      this.closeSocket(ws, 1013, "client too slow");
+      // A discrete frame is not superseded, so it is held: a client that is
+      // behind for a moment must not be disconnected into the same load. It is
+      // only ended when it stops draining entirely, and that is a different
+      // statement from "slow", so it is reported as one.
+      const stalledSince = ws.stalledSince ?? this.now();
+      ws.stalledSince = stalledSince;
+      if (this.now() - stalledSince > this.maxOutboundStallMs) {
+        this.stalledCloses += 1;
+        this.closeSocket(ws, 1013, "client stalled");
+        return false;
+      }
+      this.blockedWrites += 1;
+      const box = this.boxOf(ws);
+      // Back to the front: discrete frames keep their order.
+      box.urgent.unshift(frame);
+      if (box.timer === null) {
+        box.timer = setTimeout(() => {
+          box.timer = null;
+          this.flushOutbound(ws);
+        }, OUTBOUND_RETRY_MS);
+        box.timer.unref?.();
+      }
       return false;
     }
     try {
       ws.send(frame.data);
+      ws.stalledSince = null;
       return true;
     } catch {
       this.closeSocket(ws, 1011, "send failed");
       return false;
     }
+  }
+
+  /** Discrete frames held because the socket could not take them yet. */
+  private blockedWrites = 0;
+  /** Sockets ended for never draining a held frame. */
+  private stalledCloses = 0;
+
+  get blocked(): number {
+    return this.blockedWrites;
+  }
+
+  get stalledClosesCount(): number {
+    return this.stalledCloses;
   }
 
   /** Stream frames discarded because the client was behind; a superseded frame
