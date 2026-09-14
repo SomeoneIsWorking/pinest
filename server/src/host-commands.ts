@@ -5,7 +5,7 @@ import { loadConfig, saveConfig } from "./config.ts";
 import { PROVIDERS } from "./tunnel.ts";
 import { createAttachView } from "./attach-view.ts";
 import { createSessionsView, type SessionSummary } from "./sessions-view.ts";
-import { resolvePathInput, deriveSessionName } from "./logic.ts";
+import { resolvePathInput, deriveSessionName, statSyncSafe } from "./logic.ts";
 import { DEFAULT_MODEL } from "./product-defaults.ts";
 import { reauthenticateRemoteOwner } from "./owner-runtime.ts";
 import { pendingReloadState, queueReload, setIsWorkingProbe } from "./reload-manager.ts";
@@ -14,10 +14,6 @@ import { describeGoal, goalDirective } from "./session-goal.ts";
 import { Type } from "typebox";
 import { registerSessionMessaging } from "./session-messaging.ts";
 import debug from "./log.ts";
-
-function statSyncSafe(p: string): boolean {
-  try { return statSync(p).isDirectory(); } catch { return false; }
-}
 
 export interface HostCommandDeps {
   sessionId: string;
