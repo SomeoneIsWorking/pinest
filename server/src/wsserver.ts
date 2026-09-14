@@ -334,18 +334,43 @@ export class WSServer {
     }
 
     if (message.type === "command") {
-      // A validated command reaches the sink, never the frame around it, and
-      // by the same conversion the HTTP routes use. A frame that cannot become
-      // a command is refused by name rather than passed along for the router to
-      // reject later.
+      // Two different refusals, deliberately treated differently:
+      //
+      //  * a frame that cannot even be read as a command frame is a transport
+      //    error, and the socket is closed;
+      //  * a command the machine will not take is reported to this client and
+      //    the socket STAYS UP. Closing here made one unusable command into a
+      //    permanent connect-refuse-reconnect loop: the client reconnected,
+      //    replayed the same command, and was disconnected again.
+      if (!isRecord(message.cmd) || typeof message.cmd.type !== "string") {
+        this.closeSocket(ws, 1008, "invalid command frame: expected {type, cmd}");
+        return;
+      }
+      if (!ws.authed) return;
+      // A ping framed as a command is the client's heartbeat, so it is answered
+      // here exactly like the bare one below. Left to the dispatcher it was
+      // dropped silently, and the client closed its own idle connection a
+      // minute later.
+      if (message.cmd.type === "ping") {
+        this.send(ws, { type: "pong" });
+        return;
+      }
+      // A validated command reaches the sink, never the frame around it, and by
+      // the same conversion the HTTP routes use.
       let command: ClientCommand;
       try {
         command = commandFromFrame(message);
       } catch (error) {
-        this.closeSocket(ws, 1008, `invalid command: ${(error as Error).message}`);
+        const reason = (error as Error).message;
+        const sessionId = typeof message.cmd.sessionId === "string" ? message.cmd.sessionId : undefined;
+        debug("[remote-code] refused a command:", reason);
+        this.send(ws, {
+          type: "error",
+          message: reason,
+          ...(sessionId ? { sessionId } : {}),
+        });
         return;
       }
-      if (!ws.authed) return;
       try {
         this.handlers.command?.(command);
       } catch (error) {
