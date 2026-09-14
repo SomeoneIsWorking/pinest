@@ -641,13 +641,13 @@ class AgentService extends ChangeNotifier {
     connect: connectDataChannel,
     iceServers: kDirectIceServers,
     available: () => directTransportAvailable,
-    publishAnswer: (sdp, writtenAt) {
+    publishAnswer: (sdp, writtenAt, offerTs) {
       final uid = _boundUid;
       if (uid == null) throw StateError('no uid to publish an answer for');
       return _db
           .collection('users')
           .doc(uid)
-          .set(answerFields(sdp, writtenAt), SetOptions(merge: true));
+          .set(answerFields(sdp, writtenAt, offerTs), SetOptions(merge: true));
     },
     open: (channel) => _dialChannel(channel),
     onChanged: notifyListeners,
