@@ -26,6 +26,34 @@ test("segmenter: tool start promotes streamed text into a visible segment", () =
   });
 });
 
+test("segmenter: tool start promotes both text and thinking into a visible segment", () => {
+  const seg = new StreamSegmenter();
+  seg.onThinkingDelta("Reasoning about file...");
+  seg.onTextDelta("Checking file:");
+  const snap = seg.onToolStart("call-1");
+  assert.deepEqual(snap, {
+    text: "",
+    segments: [{ text: "Checking file:", thinking: "Reasoning about file...", afterToolId: "call-1" }],
+  });
+  // Both text and thinking buffers are cleared for the next step, while segment survives
+  assert.equal(seg.snapshot().thinking, undefined);
+  seg.onTextDelta("Result looks good");
+  assert.deepEqual(seg.snapshot(), {
+    text: "Result looks good",
+    segments: [{ text: "Checking file:", thinking: "Reasoning about file...", afterToolId: "call-1" }],
+  });
+});
+
+test("segmenter: tool start promotes thinking even when speech is empty", () => {
+  const seg = new StreamSegmenter();
+  seg.onThinkingDelta("Only thinking before calling bash");
+  const snap = seg.onToolStart("call-2");
+  assert.deepEqual(snap, {
+    text: "",
+    segments: [{ text: "", thinking: "Only thinking before calling bash", afterToolId: "call-2" }],
+  });
+});
+
 test("segmenter: reset clears both text and segments at turn end", () => {
   const seg = new StreamSegmenter();
   seg.onTextDelta("text before tool");

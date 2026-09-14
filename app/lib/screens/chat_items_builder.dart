@@ -163,9 +163,13 @@ List<Widget> buildChatItems({
       );
     } else {
       final thinking = msg['thinking'] as String?;
+      final entryId = msg['id'] as String?;
       if (showThinking && thinking != null && thinking.trim().isNotEmpty) {
         flushTools();
-        items.add(ThinkingCard(thinking: thinking));
+        items.add(ThinkingCard(
+          key: ValueKey('thinking-${entryId ?? timestamp ?? thinking.hashCode}'),
+          thinking: thinking,
+        ));
       }
       if (tools != null) {
         for (final t in tools) {
@@ -222,7 +226,15 @@ List<Widget> buildChatItems({
     liveTools: liveTools,
     historyToolIds: historyToolIds,
   )) {
-    if (step.isSpeech) {
+    if (step.isThinking) {
+      if (showThinking) {
+        flushTools();
+        items.add(ThinkingCard(
+          key: ValueKey('thinking-seg-${step.anchorToolId ?? step.thinking.hashCode}'),
+          thinking: step.thinking!,
+        ));
+      }
+    } else if (step.isSpeech) {
       flushTools();
       items.add(MessageBubble(
         text: step.speech!,
@@ -241,7 +253,11 @@ List<Widget> buildChatItems({
       streamingThinking != null &&
       streamingThinking.trim().isNotEmpty &&
       isWorking) {
-    items.add(ThinkingCard(thinking: streamingThinking, isStreaming: true));
+    items.add(ThinkingCard(
+      key: ValueKey('thinking-live-$sessionId'),
+      thinking: streamingThinking,
+      isStreaming: true,
+    ));
   }
   if (streaming != null && isWorking) {
     items.add(StreamingBubble(text: streaming));

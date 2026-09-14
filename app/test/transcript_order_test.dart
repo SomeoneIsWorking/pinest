@@ -6,7 +6,12 @@ Map<String, dynamic> tool(String callId) => {'callId': callId, 'name': 'bash'};
 
 List<String> describe(List<TranscriptStep> steps) => [
       for (final step in steps)
-        step.isSpeech ? 'speech:${step.speech}' : 'tool:${toolCallIdOf(step.tool!)}',
+        if (step.isThinking)
+          'thinking:${step.thinking}'
+        else if (step.isSpeech)
+          'speech:${step.speech}'
+        else
+          'tool:${toolCallIdOf(step.tool!)}',
     ];
 
 void main() {
@@ -67,5 +72,35 @@ void main() {
       historyToolIds: const {},
     );
     expect(describe(steps), ['speech:orphan']);
+  });
+
+  test('thinking lands before speech and before the call it names', () {
+    final steps = orderStreamAndTools(
+      segments: const [
+        StreamSegment(
+          text: 'checking a',
+          thinking: 'why do a',
+          afterToolId: 'a',
+        ),
+      ],
+      liveTools: [tool('a')],
+      historyToolIds: const {},
+    );
+    expect(describe(steps), ['thinking:why do a', 'speech:checking a', 'tool:a']);
+  });
+
+  test('segment with only thinking lands before the call', () {
+    final steps = orderStreamAndTools(
+      segments: const [
+        StreamSegment(
+          text: '',
+          thinking: 'pure thought',
+          afterToolId: 'x',
+        ),
+      ],
+      liveTools: [tool('x')],
+      historyToolIds: const {},
+    );
+    expect(describe(steps), ['thinking:pure thought', 'tool:x']);
   });
 }

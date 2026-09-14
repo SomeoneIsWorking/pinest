@@ -249,24 +249,28 @@ class SessionStore {
     } else {
       cache.streamingText.remove(sid);
     }
-    final thinking = msg['thinking'] as String? ?? '';
-    if (thinking.isNotEmpty) {
-      cache.streamingThinking[sid] = thinking;
-    } else {
-      cache.streamingThinking.remove(sid);
-    }
-    final segments = <StreamSegment>[];
-    for (final raw in (msg['segments'] as List? ?? const [])) {
-      if (raw is String) {
-        segments.add(StreamSegment(text: raw, afterToolId: ''));
-      } else if (raw is Map) {
-        segments.add(StreamSegment.fromJson(Map<String, dynamic>.from(raw)));
+    if (msg.containsKey('thinking')) {
+      final thinking = msg['thinking'] as String? ?? '';
+      if (thinking.isNotEmpty) {
+        cache.streamingThinking[sid] = thinking;
+      } else {
+        cache.streamingThinking.remove(sid);
       }
     }
-    if (segments.isNotEmpty) {
-      cache.streamingSegments[sid] = segments;
-    } else {
-      cache.streamingSegments.remove(sid);
+    if (msg.containsKey('segments')) {
+      final segments = <StreamSegment>[];
+      for (final raw in (msg['segments'] as List? ?? const [])) {
+        if (raw is String) {
+          segments.add(StreamSegment(text: raw, afterToolId: ''));
+        } else if (raw is Map) {
+          segments.add(StreamSegment.fromJson(Map<String, dynamic>.from(raw)));
+        }
+      }
+      if (segments.isNotEmpty) {
+        cache.streamingSegments[sid] = segments;
+      } else {
+        cache.streamingSegments.remove(sid);
+      }
     }
   }
 

@@ -62,9 +62,6 @@ export function bridgeToLoopback(channel: RTCDataChannel, port: number): Loopbac
   socket.on("error", (error: Error) => {
     debug(`[pinest] p2p bridge socket error: ${error.message}`);
   });
-  socket.on("error", (error: Error) => {
-    debug(`[pinest] p2p bridge socket error: ${error.message}`);
-  });
   void open;
 
   return {

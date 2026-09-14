@@ -156,7 +156,7 @@ export type ServerMessage =
       /** The transcript was rewritten (compact/clear), so the client must
        * discard every previously loaded page before applying this one. */
       reset?: boolean }
-  | { type: "stream"; sessionId: string; text: string; status: string; segments?: Array<{ text: string; afterToolId: string }>; thinking?: string }
+  | { type: "stream"; sessionId: string; text: string; status: string; segments?: Array<{ text: string; thinking?: string; afterToolId: string }>; thinking?: string }
   | { type: "tool"; sessionId: string; tool: ToolEvent }
   | { type: "models"; sessionId?: string; models: ModelInfo[] }
   | { type: "paths"; cmdId?: string; paths: string[] }

@@ -10,6 +10,7 @@
  */
 export interface StreamSegment {
   text: string;
+  thinking?: string;
   /**
    * Identity of the tool call this speech immediately preceded.
    *
@@ -52,14 +53,25 @@ export class StreamSegmenter {
   }
 
   /**
-   * The assistant paused to execute a tool. Promotes the streamed text into
-   * a segment (if any) and returns the snapshot to broadcast; returns null
-   * when nothing was streaming so callers can skip the broadcast.
+   * The assistant paused to execute a tool. Promotes the streamed text and
+   * thinking into a segment (if either has content) and returns the snapshot
+   * to broadcast; returns null when nothing was streaming so callers can skip
+   * the broadcast.
    */
   onToolStart(toolCallId?: string): StreamSnapshot | null {
-    if (this.text.trim().length === 0) return null;
-    this.segments = [...this.segments, { text: this.text, afterToolId: toolCallId ?? "" }];
+    if (this.text.trim().length === 0 && this.thinking.trim().length === 0) {
+      return null;
+    }
+    this.segments = [
+      ...this.segments,
+      {
+        text: this.text,
+        ...(this.thinking ? { thinking: this.thinking } : {}),
+        afterToolId: toolCallId ?? "",
+      },
+    ];
     this.text = "";
+    this.thinking = "";
     return this.snapshot();
   }
 

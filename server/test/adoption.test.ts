@@ -58,7 +58,7 @@ test("the streamed text and its tool anchor survive as DATA", () => {
   session.segmenter.onTextDelta("after the tool");
   assert.deepEqual(session.segmenter.onToolStart('call-b')?.segments, [
     { text: "Streamed ", afterToolId: "call-a" },
-    { text: "half a sentenceafter the tool", afterToolId: "call-b" },
+    { text: "half a sentenceafter the tool", thinking: "why", afterToolId: "call-b" },
   ]);
 });
 

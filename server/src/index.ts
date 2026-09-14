@@ -821,11 +821,9 @@ function bridge(pi: ExtensionAPI): void {
     if (ctx) _ctx = ctx;
     _turnStarted = false;
     if (_currentTurnId) _currentTurnId = null;
-    segmenter.reset();
     _status = "idle";
     debug(`[remote-code] host status: working -> idle (agent_end)`);
     _pending.clear();
-    broadcast({ type: "stream", sessionId: _sessionId, text: "", segments: [], status: "idle" });
     if (Array.isArray(event?.messages)) {
       const last = event.messages[event.messages.length - 1];
       if (last?.role === "assistant" && (last.stopReason === "error" || last.errorMessage)) {
@@ -841,8 +839,19 @@ function bridge(pi: ExtensionAPI): void {
       pendingImagesByText: {},
     });
     hostContext.maybeAutoCompact();
-    // Send updated history so the completed message sticks
-    querySessionHistory(_ctx).then((h) => broadcast({ type: "history", sessionId: _sessionId, ...pageHistory(h) }));
+    // Query and broadcast updated history FIRST so the completed message sticks,
+    // then clear the streaming state so there is no gap/blink between stream and history.
+    querySessionHistory(_ctx)
+      .then((h) => {
+        broadcast({ type: "history", sessionId: _sessionId, ...pageHistory(h) });
+        segmenter.reset();
+        broadcast({ type: "stream", sessionId: _sessionId, text: "", segments: [], status: "idle" });
+      })
+      .catch((err) => {
+        debug(`[remote-code] failed to fetch history on agent_end: ${(err as Error).message}`);
+        segmenter.reset();
+        broadcast({ type: "stream", sessionId: _sessionId, text: "", segments: [], status: "idle" });
+      });
   });
 
   pi.on("session_compact", (event: any) => { void hostContext.onCompacted(event); });
