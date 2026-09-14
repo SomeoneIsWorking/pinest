@@ -246,12 +246,65 @@ def verify(origin: str, key: str, send: Callable[[Probe], tuple[int, str]], labe
     return findings
 
 
+def idle_survival(port: int, token: str, seconds: float) -> str | None:
+    """Hold a connection open the way the app does, and see if it stays open.
+
+    The app sends a ping framed as a command every 20 seconds and closes its own
+    connection after a minute of silence. The machine used to drop that framed
+    ping on the floor, so a healthy, idle app disconnected itself once a minute -
+    which is what a phone reads as "connected, then immediately lost".
+    """
+    socket_client = reload_host.WebSocket(port, 5.0)
+    try:
+        socket_client.send_text(json.dumps({"type": "auth", "token": token}))
+        authed = False
+        deadline = time.time() + seconds
+        next_ping = 0.0
+        while time.time() < deadline:
+            if socket_client.close_code is not None:
+                return f"the machine closed a healthy idle connection ({reload_host.format_close(socket_client)})"
+            if not authed:
+                frame = reload_host.recv_json(socket_client, 3.0)
+                if frame is None:
+                    continue
+                authed = frame.get("type") == "authed"
+                continue
+            if time.time() >= next_ping:
+                socket_client.send_text(json.dumps(command_frame({"type": "ping"})))
+                next_ping = time.time() + 20
+                # A busy machine pushes state frames whenever it changes, so the
+                # pong is looked for among them rather than insisted upon first.
+                seen: list[str] = []
+                pong_deadline = time.time() + 5
+                while time.time() < pong_deadline:
+                    reply = reload_host.recv_json(socket_client, 1.0)
+                    if reply is None:
+                        continue
+                    if reply.get("type") == "pong":
+                        break
+                    seen.append(str(reply.get("type")))
+                else:
+                    detail = ", ".join(sorted(set(seen))) or "nothing"
+                    return f"a framed ping was not answered with a pong (saw {detail})"
+                continue
+            reload_host.recv_json(socket_client, 1.0)
+        return None
+    finally:
+        socket_client.close()
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--local-only",
         action="store_true",
         help="skip the published tunnel and check only the machine's own loopback",
+    )
+    parser.add_argument(
+        "--idle-seconds",
+        type=float,
+        default=0.0,
+        help="hold an authenticated connection open this long, pinging as the app does",
     )
     return parser.parse_args(argv)
 
@@ -264,6 +317,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"cannot verify: {error}", file=sys.stderr)
         return 2
 
+    token, _uid = reload_host.owner_id_token(reload_host.DEFAULT_API_KEY)
     key = state.get("httpKey")
     if not isinstance(key, str) or not key:
         print("cannot verify: the state frame carried no access key", file=sys.stderr)
@@ -289,6 +343,14 @@ def main(argv: list[str] | None = None) -> int:
             findings.append(f"tunnel: {tunnel}: unreachable ({error})")
     else:
         print("tunnel: none published, so the app has no remote origin to use")
+
+    if args.idle_seconds > 0:
+        problem = idle_survival(port, token, args.idle_seconds)
+        if problem is None:
+            print(f"  ok   loopback: an authenticated connection survives {args.idle_seconds:.0f}s of idling")
+        else:
+            findings.append(f"loopback: idle survival: {problem}")
+            print(f"  FAIL loopback: idle survival: {problem}")
 
     if findings:
         print("\nunmet expectations:", file=sys.stderr)
