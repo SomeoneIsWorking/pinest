@@ -130,10 +130,9 @@ cloudflared per reload). Providers now report the process the moment it spawns,
 and a teardown cancels the attempt, kills it, and refuses a result that arrives
 afterwards.
 
-### S11b — Authenticated internet connection (original note)
-
-Hosted discovery, Google authentication, and the browser transport are implemented. Gap: one real
-browser sign-in through the hosted RestImpl path remains unverified.
+Hosted discovery, Google authentication, and the browser transport are
+implemented. Gap: one real browser sign-in through the hosted RestImpl path
+remains unverified.
 
 ### S12 — Android APK delivery
 
