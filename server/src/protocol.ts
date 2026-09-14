@@ -212,3 +212,26 @@ export type ClientCommand =
   | { type: "reload" }
   | { type: "goal_set"; text: string }
   | { type: "goal_clear" };
+
+/**
+ * A client command frame: the shape one command travels in, on every transport.
+ *
+ * This is the ACCEPTED shape, so it names a concrete command: a received frame
+ * is untrusted JSON and becomes this only by going through `commandFromFrame`,
+ * which is the one conversion every transport shares. Asserting the shape
+ * without validating it - a predicate that casts an unchecked payload into a
+ * command - is how a posted message once reached the router as
+ * `unsupported command type "command"`.
+ */
+export interface ClientCommandFrame {
+  type: "command";
+  cmd: ClientCommand;
+}
+
+/** The single sink a transport hands a validated command to. */
+export type CommandSink = (command: ClientCommand) => void | Promise<void>;
+
+/** Narrowing helper, so "is this a record" is answered in one place. */
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}

@@ -1,9 +1,10 @@
 import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer } from "node:http";
-import { parseClientCommand } from "./command-validation.ts";
+import { commandFromFrame } from "./command-validation.ts";
 import debug from "./log.ts";
 import { lookupImage } from "./logic.ts";
+import type { ClientCommand, CommandSink } from "./protocol.ts";
 
 /**
  * The HTTP side of the control channel: everything a client SENDS or PULLS as
@@ -37,8 +38,9 @@ export type HttpHistoryRunner = (
 export interface HttpApiOptions {
   /** Secret handed to the app in its state frame; required on every request. */
   accessKey: string;
-  /** The same command sink the WebSocket dispatches through. */
-  dispatch: (command: unknown) => Promise<void> | void;
+  /** The same command sink, with the same type, the WebSocket dispatches
+   * through: one command contract for both transports. */
+  dispatch: CommandSink;
   /** Runs a history request and returns the reply payload.
    *
    * History is a client request with a response, so it belongs here rather than
@@ -116,30 +118,59 @@ function serveImage(url: URL, response: ServerResponse): void {
   response.end(bytes);
 }
 
-/** The message route: validated and delivered, answered with a status code. */
-async function serveMessage(
+/**
+ * The command a request body carries, or null once the request is refused.
+ *
+ * A posted body IS a command frame, the same one a socket sends, so both
+ * transports read it through the same conversion. A body that cannot become a
+ * command is answered with a 400 naming the reason rather than being handed on
+ * for the router to reject later.
+ */
+async function readCommand(
   request: IncomingMessage,
   response: ServerResponse,
   options: HttpApiOptions,
-): Promise<void> {
+): Promise<ClientCommand | null> {
   const raw = await readBody(request, options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES);
   if (raw === null) {
-    sendJson(response, 413, { error: "message larger than this server accepts" });
-    return;
+    sendJson(response, 413, { error: "request larger than this server accepts" });
+    return null;
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
     sendJson(response, 400, { error: "body must be JSON" });
+    return null;
+  }
+  try {
+    return commandFromFrame(parsed);
+  } catch (error) {
+    sendJson(response, 400, { error: (error as Error).message });
+    return null;
+  }
+}
+
+/** The message route: validated and delivered, answered with a status code. */
+async function serveMessage(
+  request: IncomingMessage,
+  response: ServerResponse,
+  options: HttpApiOptions,
+): Promise<void> {
+  const command = await readCommand(request, response, options);
+  if (command === null) {
     return;
   }
-  if (typeof parsed !== "object" || parsed === null) {
-    sendJson(response, 400, { error: "body must be a JSON object" });
+  // One kind of command per route, checked by literal so the compiler keeps the
+  // concrete type from here on.
+  if (command.type !== "user_message") {
+    sendJson(response, 400, { error: `this route takes a user_message command, not ${command.type}` });
     return;
   }
-  const body = parsed as Record<string, unknown>;
-  const command = { type: "command", cmd: { ...body, type: "user_message" } };
+  if (!command.sessionId) {
+    sendJson(response, 400, { error: "sessionId is required over HTTP" });
+    return;
+  }
   try {
     await options.dispatch(command);
   } catch (error) {
@@ -151,44 +182,27 @@ async function serveMessage(
   sendJson(response, 202, { status: "accepted" });
 }
 
+/** The history route: the same command a socket sends, answered in the reply. */
 async function serveHistory(
   request: IncomingMessage,
   response: ServerResponse,
   options: HttpApiOptions,
 ): Promise<void> {
-  const raw = await readBody(request, options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES);
-  if (raw === null) {
-    sendJson(response, 413, { error: "request larger than this server accepts" });
+  const command = await readCommand(request, response, options);
+  if (command === null) {
     return;
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    sendJson(response, 400, { error: "body must be JSON" });
+  if (command.type !== "get_history") {
+    sendJson(response, 400, { error: `this route takes a get_history command, not ${command.type}` });
     return;
   }
-  // The socket's own validator decides what a history request may be, so the
-  // HTTP route cannot accept a shape the socket would have refused.
-  let command;
-  try {
-    // The validator takes the inner command, the same shape the socket's
-    // dispatcher receives - not the {type:"command",cmd} envelope around it.
-    const validated = parseClientCommand({ ...(parsed as object), type: "get_history" });
-    command = validated as { sessionId: string; limit?: number; cursor?: number };
-  } catch (error) {
-    sendJson(response, 400, { error: (error as Error).message });
-    return;
-  }
-  // On the socket, a missing session id means "the host session" because the
-  // socket belongs to someone. An HTTP route has no such implication: the
-  // caller names the session it wants history for.
-  if (!command.sessionId) {
+  const sessionId = command.sessionId;
+  if (!sessionId) {
     sendJson(response, 400, { error: "sessionId is required over HTTP" });
     return;
   }
   try {
-    const result = await options.history(command);
+    const result = await options.history({ ...command, sessionId });
     if (!result.ok) {
       sendJson(response, result.status, { error: result.error });
       return;

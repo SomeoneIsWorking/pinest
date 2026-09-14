@@ -122,7 +122,13 @@ void main() {
     expect(sawUrl, Uri.parse('https://host.example/message'));
     expect(sawHeaders!['content-type'], 'application/json');
     expect(sawHeaders!['x-pinest-key'], 'k');
-    expect(json.decode(sawBody!), {'type': 'user_message', 'text': 'hi'});
+    // The frame is the wire shape, and it is the same one the socket sends and
+    // the machine's validator accepts - a bare command here is what made every
+    // posted message fail.
+    expect(json.decode(sawBody!), {
+      'type': 'command',
+      'cmd': {'type': 'user_message', 'text': 'hi'},
+    });
     expect(sink.refused, isEmpty);
     expect(sink.offline, isEmpty);
   });
@@ -195,7 +201,10 @@ void main() {
     final result = await service.fetchHistory(sessionId: 'abcdef12', cursor: 3);
 
     expect(sawUrl, Uri.parse('https://host.example/history'));
-    expect(json.decode(sawBody!), {'sessionId': 'abcdef12', 'cursor': 3});
+    expect(json.decode(sawBody!), {
+      'type': 'command',
+      'cmd': {'type': 'get_history', 'sessionId': 'abcdef12', 'cursor': 3},
+    });
     expect(result.error, isNull);
     expect(result.frame!['type'], 'history');
     expect((result.frame!['history'] as List).single['text'], 'hi');
@@ -214,7 +223,10 @@ void main() {
       }),
     );
     await service.fetchHistory(sessionId: 'a');
-    expect(json.decode(sawBody!), {'sessionId': 'a'});
+    expect(json.decode(sawBody!), {
+      'type': 'command',
+      'cmd': {'type': 'get_history', 'sessionId': 'a'},
+    });
   });
 
   test('a failed history request reports why instead of reading as empty', () async {

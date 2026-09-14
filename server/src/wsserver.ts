@@ -13,7 +13,9 @@ import type { HttpHistoryRunner } from "./http-api.ts";
 import { createAccessKey, createHttpApi } from "./http-api.ts";
 import debug from "./log.ts";
 import { startTunnel as startProviderTunnel, type SpawnedAttempt, type StartTunnelResult } from "./tunnel.ts";
-import type { ServerMessage, ClientCommand } from "./protocol.ts";
+import { commandFromFrame } from "./command-validation.ts";
+import { isRecord } from "./protocol.ts";
+import type { ServerMessage, ClientCommand, CommandSink } from "./protocol.ts";
 
 export interface VerifiedToken {
   uid: string;
@@ -22,7 +24,6 @@ export interface VerifiedToken {
 }
 
 type VerifyFn = (token: string) => Promise<VerifiedToken | null>;
-type CommandHandler = (cmd: ClientCommand) => void;
 
 interface AuthedSocket extends WebSocket {
   authed: boolean;
@@ -128,7 +129,7 @@ export class WSServer {
   tunnelUrl: string | null = null;
   /** authenticated clients */
   clients: Set<AuthedSocket> = new Set();
-  private handlers: { command?: CommandHandler } = {};
+  private handlers: { command?: CommandSink } = {};
   /** Answers a history request for the HTTP route. Injected by the composition
    * root because it must reuse the socket's own dispatch path. */
   private historyRunner?: HttpHistoryRunner;
@@ -161,7 +162,7 @@ export class WSServer {
     this.maxOutboundStallMs = maxOutboundStallMs;
   }
 
-  on(event: "command", handler: CommandHandler): void {
+  on(event: "command", handler: CommandSink): void {
     if (event === "command") this.handlers.command = handler;
   }
 
@@ -191,7 +192,7 @@ export class WSServer {
       const server = createServer(
         createHttpApi({
           accessKey: this.httpKey,
-          dispatch: (command) => this.handlers.command?.(command as ClientCommand),
+          dispatch: (command) => this.handlers.command?.(command),
           history: (command) =>
             this.historyRunner
               ? this.historyRunner(command)
@@ -315,13 +316,20 @@ export class WSServer {
     }
 
     if (message.type === "command") {
-      if (!isRecord(message.cmd) || typeof message.cmd.type !== "string") {
-        this.closeSocket(ws, 1008, "invalid command envelope");
+      // A validated command reaches the sink, never the frame around it, and
+      // by the same conversion the HTTP routes use. A frame that cannot become
+      // a command is refused by name rather than passed along for the router to
+      // reject later.
+      let command: ClientCommand;
+      try {
+        command = commandFromFrame(message);
+      } catch (error) {
+        this.closeSocket(ws, 1008, `invalid command: ${(error as Error).message}`);
         return;
       }
       if (!ws.authed) return;
       try {
-        this.handlers.command?.(message.cmd as ClientCommand);
+        this.handlers.command?.(command);
       } catch (error) {
         debug("[remote-code] WS command handler failed:", (error as Error).message);
       }
@@ -683,6 +691,3 @@ export class WSServer {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}

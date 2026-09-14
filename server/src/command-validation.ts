@@ -242,6 +242,31 @@ function images(command: Record<string, unknown>): UserImage[] | undefined {
   });
 }
 
+/**
+ * The command a received frame carries.
+ *
+ * ONE conversion for every transport - the socket and both HTTP routes call
+ * this - so no transport can invent its own way to build a command, and a
+ * command cannot be shaped one way on one transport and another way on the
+ * other. `frame` is untrusted JSON, so it is the only value here that is not
+ * already a concrete command.
+ *
+ * Throws a CommandValidationError naming what was wrong: the socket reports it
+ * as a 1008 close and HTTP as a 400.
+ */
+export function commandFromFrame(frame: unknown): ClientCommand {
+  if (!isPlainObject(frame)) {
+    fail('expected a command frame: {"type":"command","cmd":{...}}');
+  }
+  if (frame.type !== "command") {
+    fail(`expected a command frame, got type ${JSON.stringify(frame.type)}`);
+  }
+  if (!isPlainObject(frame.cmd)) {
+    fail("command frame has no cmd object");
+  }
+  return parseClientCommand(frame.cmd);
+}
+
 /** Parse the untrusted WebSocket payload into the one command shape the router accepts. */
 export function parseClientCommand(input: unknown): ClientCommand {
   const command = commandObject(input);

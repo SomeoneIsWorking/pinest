@@ -12,6 +12,17 @@ import 'dart:convert';
 
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+/// The frame every command travels in, on every transport.
+///
+/// One builder, because the socket, both HTTP routes and the heartbeat all send
+/// the same frame: a command cannot be shaped one way on one transport and
+/// another way on the other, which is how a posted message once arrived at the
+/// machine as `unsupported command type "command"`.
+Map<String, dynamic> commandFrame(Map<String, dynamic> command) => {
+      'type': 'command',
+      'cmd': command,
+    };
+
 abstract class ControlChannel {
   /// The endpoint this channel dials, when it dials one. A peer-to-peer channel
   /// has no address: it was negotiated, not dialed.
@@ -103,12 +114,7 @@ class WebSocketConnection implements ControlChannel {
       _channel!.sink.add(jsonEncode({'type': 'auth', 'token': idToken}));
       _heartbeat = Timer.periodic(kChannelHeartbeatInterval, (_) {
         if (!_open) return;
-        _channel?.sink.add(
-          jsonEncode({
-            'type': 'command',
-            'cmd': {'type': 'ping'},
-          }),
-        );
+        _channel?.sink.add(jsonEncode(commandFrame({'type': 'ping'})));
         if (DateTime.now().difference(_lastInbound) > kChannelSilenceTimeout) {
           _open = false;
           close();

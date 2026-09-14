@@ -597,9 +597,9 @@ async function startDirectTransport(): Promise<void> {
   }
 }
 
-async function handleCommand(input: unknown): Promise<void> {
+async function handleCommand(command: ClientCommand): Promise<void> {
   try {
-    await dispatchClientCommand(input, {
+    await dispatchClientCommand(command, {
       hostSessionId: _sessionId,
       isLiveSpawned: (id) => !!_supervisor?.sessions.has(id),
       isRegistered: (id) => !!_registry?.get(id),
@@ -655,7 +655,7 @@ async function handleCommand(input: unknown): Promise<void> {
     // Attribute the failure to its session when the command had one: without
     // it the client cannot tell that ITS message was refused, and a refused
     // send sat at "sending…" forever.
-    const sessionId = (input as { sessionId?: string } | null)?.sessionId;
+    const sessionId = "sessionId" in command ? command.sessionId : undefined;
     broadcast({
       type: "error",
       message: String((e as Error).message || e),
