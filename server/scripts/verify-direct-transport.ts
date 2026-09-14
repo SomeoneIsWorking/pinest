@@ -127,17 +127,22 @@ async function writeAnswer(
   uid: string,
   token: string,
   sdp: string,
-  ts: number,
+  namedOffer: number,
   timeoutMs: number,
 ): Promise<void> {
-  const mask = ["p2pAnswer", "p2pAnswerTs"].map((f) => `updateMask.fieldPaths=${f}`).join("&");
+  // The named offer is what the machine matches on, and the deployed rules
+  // refuse an answer without it: an unattributable answer would have to be
+  // placed by comparing the two peers' clocks.
+  const mask = ["p2pAnswer", "p2pAnswerTs", "p2pAnswerOfferTs"]
+    .map((f) => `updateMask.fieldPaths=${f}`).join("&");
   const response = await fetchBounded(`${docUrl(uid)}?${mask}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     body: JSON.stringify({
       fields: {
         p2pAnswer: { stringValue: sdp },
-        p2pAnswerTs: { integerValue: String(ts) },
+        p2pAnswerTs: { integerValue: String(Date.now()) },
+        p2pAnswerOfferTs: { integerValue: String(namedOffer) },
       },
     }),
   }, timeoutMs);
@@ -230,8 +235,8 @@ async function main(): Promise<void> {
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
   await gather(pc, timeoutMs);
-  await writeAnswer(uid, idToken, pc.localDescription!.sdp!, Date.now(), timeoutMs);
-  console.log("answer: published to the discovery document");
+  await writeAnswer(uid, idToken, pc.localDescription!.sdp!, offerTs, timeoutMs);
+  console.log(`answer: published, naming the offer (${offerTs}) it describes`);
 
   const channel = await Promise.race([channelPromise, timeout(timeoutMs, "the DataChannel")]);
   if (channel.readyState !== "open") {
