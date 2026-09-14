@@ -23,6 +23,7 @@
  * is checked against node_modules/werift/lib/webrtc/src/*.d.ts, not guessed. */
 
 import { RTCDataChannel, RTCPeerConnection, RTCSessionDescription } from "werift";
+import type { LoopbackChannels } from "./p2p-bridge.ts";
 
 export interface P2PExchangeOptions {
   /** Publish this exchange's offer, with the timestamp that identifies it. */
@@ -37,16 +38,22 @@ export interface P2PExchange {
   /** Gather this exchange's candidates and publish its offer. */
   offer(ts: number): Promise<string>;
   acceptAnswer(sdp: string): Promise<void>;
-  /** The DataChannel once it is genuinely OPEN — for this exchange only.
+  /** Both channels once they are genuinely OPEN — for this exchange only.
    *
-   * Not when the channel is created: `createDataChannel` returns a channel in
+   * Not when a channel is created: `createDataChannel` returns a channel in
    * "connecting" immediately, and resolving there reported a peer as
    * connected before ICE, DTLS or SCTP had done anything, so a transport would
    * believe it was serving someone when nobody was there. A channel that closes
    * before it opens rejects instead. */
-  channel: Promise<RTCDataChannel>;
+  channels: Promise<LoopbackChannels>;
   close(): void;
 }
+
+/** The channels this host offers, each named for the direction its data
+ * travels. Two of them, not one: an ordered DataChannel makes a large push sit
+ * in front of the user's next command, and those are different jobs. */
+export const PUSH_CHANNEL_LABEL = "pinest-push";
+export const ACTIONS_CHANNEL_LABEL = "pinest-actions";
 
 /** Several independent STUN views of the same socket: a carrier that filters
  * one provider still yields a reflexive candidate from another, and each
@@ -77,34 +84,41 @@ export function startP2PExchange(options: P2PExchangeOptions): P2PExchange {
     iceServers: (options.stunServers ?? DEFAULT_STUN).map((urls) => ({ urls })),
   });
 
-  let resolveChannel: (channel: RTCDataChannel) => void = () => {};
-  let rejectChannel: (error: Error) => void = () => {};
-  const channel = new Promise<RTCDataChannel>((resolve, reject) => {
-    resolveChannel = resolve;
-    rejectChannel = reject;
+  const opened = new Map<string, RTCDataChannel>();
+  let resolveChannels: (channels: LoopbackChannels) => void = () => {};
+  let rejectChannels: (error: Error) => void = () => {};
+  const channels = new Promise<LoopbackChannels>((resolve, reject) => {
+    resolveChannels = resolve;
+    rejectChannels = reject;
   });
 
-  /** Only the FIRST channel of this exchange is adopted, and it resolves this
-   * promise when it is actually open rather than when it is created: an
-   * exchange that reports a channel before ICE has run is reporting a peer that
-   * is not there. */
-  let adopted = false;
+  /** Resolve once BOTH channels of this exchange are open. A channel that
+   * closes before opening rejects: an exchange that reports channels before ICE
+   * has run is reporting a peer that is not there. */
   const adoptChannel = (dataChannel: RTCDataChannel): void => {
-    if (adopted) return;
-    adopted = true;
+    const label = dataChannel.label;
+    if (opened.has(label)) return;
+    const ready = (): void => {
+      opened.set(label, dataChannel);
+      const push = opened.get(PUSH_CHANNEL_LABEL);
+      const actions = opened.get(ACTIONS_CHANNEL_LABEL);
+      if (push && actions) {
+        resolveChannels({ push, actions });
+      }
+    };
     if (dataChannel.readyState === "open") {
-      resolveChannel(dataChannel);
+      ready();
       return;
     }
     dataChannel.stateChange.subscribe((state) => {
       if (state === "open") {
-        resolveChannel(dataChannel);
+        ready();
       } else if (state === "closed" || state === "closing") {
-        rejectChannel(new Error(`the data channel ${state} before it opened`));
+        rejectChannels(new Error(`the ${label} channel ${state} before it opened`));
       }
     });
   };
-  // The offerer's own channel never passes through ondatachannel - that event
+  // The offerer's own channels never pass through ondatachannel - that event
   // fires for channels created by the remote side only.
   pc.ondatachannel = (event) => adoptChannel(event.channel);
 
@@ -149,10 +163,11 @@ export function startP2PExchange(options: P2PExchangeOptions): P2PExchange {
   };
 
   return {
-    channel,
+    channels,
     acceptAnswer,
     offer: async (ts: number) => {
-      adoptChannel(pc.createDataChannel("pinest"));
+      adoptChannel(pc.createDataChannel(PUSH_CHANNEL_LABEL));
+      adoptChannel(pc.createDataChannel(ACTIONS_CHANNEL_LABEL));
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       await gatherComplete;

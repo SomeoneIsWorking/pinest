@@ -18,7 +18,7 @@ import type { P2PExchange } from "../src/p2p.ts";
 interface FakeExchange extends P2PExchange {
   closed: boolean;
   answers: string[];
-  /** Resolve the channel the driver is waiting on. */
+  /** Resolve the channels the driver is waiting on. */
   connect(): void;
   fail(error: Error): void;
 }
@@ -42,12 +42,15 @@ function harness() {
     const peer: FakeExchange = {
       closed: false,
       answers: [],
-      channel: channel as FakeExchange["channel"],
+      channels: channel as FakeExchange["channels"],
       // The real exchange resolves its channel only once the channel is OPEN
       // (server/src/p2p.ts), never at creation - so this fake cannot be
       // "connected" before the test says so, and the refresh policy is driven
       // by a liveness signal rather than by a construction. 
-      connect: () => resolveChannel({ send: () => {}, close: () => {} }),
+      connect: () => resolveChannel({
+        push: { send: () => {}, close: () => {} },
+        actions: { send: () => {}, close: () => {} },
+      }),
       fail: (error) => rejectChannel(error),
       // The real exchange hands its description to `publish`, which is what
       // records it here.

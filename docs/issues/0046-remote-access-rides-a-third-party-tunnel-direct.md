@@ -57,3 +57,6 @@ unproven, rather than letting a local success stand in for it.
 Remaining (milestone 4): the punch-failure rate on a real peer pair from another network — the
 operator's own device. Falsifier unchanged: if ICE from this CGNAT to a phone's CGNAT fails without
 TURN more than rarely, a self-hosted TURN server becomes a named follow-up.
+
+### Note (2026-09-14)
+The direct transport worked in the field and then killed the host: the app opened a DataChannel through the real carrier-grade NAT and the machine's first 408 KB state push exceeded SCTP's message limit, crashing the agent process. Fixed by framing (16 KiB binary frames, reassembled at both ends) and by splitting the transport into two directional channels, pinest-push and pinest-actions, so a large push cannot block the user's next command. See #56. Milestone 1-3 now exercised by a real peer; milestone 4 (punch-failure rate from another network) is unchanged.

@@ -13,6 +13,7 @@ import 'dart:js_interop';
 
 import 'package:web/web.dart' as web;
 
+import '../logic/direct_framing.dart';
 import 'control_channel.dart';
 
 /// Stateless STUN servers, used only to learn this peer's reflexive address.
@@ -35,6 +36,12 @@ bool get directTransportAvailable => true;
 const Duration kIceGatherTimeout = Duration(seconds: 20);
 const Duration kChannelOpenTimeout = Duration(seconds: 30);
 
+/// The channel the machine pushes on, and the one this app sends on. Two, not
+/// one: a DataChannel is ordered, so a large push would sit in front of the
+/// user's next command if both shared it.
+const String kPushChannelLabel = 'pinest-push';
+const String kActionsChannelLabel = 'pinest-actions';
+
 /// Answer an offer and return the channel it produces.
 ///
 /// [publishAnswer] writes the local description back to the signaling channel
@@ -48,22 +55,31 @@ Future<ControlChannel> connectDataChannel({
   final pc = web.RTCPeerConnection(
     web.RTCConfiguration(iceServers: _iceServers(iceServers)),
   );
-  final opened = Completer<web.RTCDataChannel>();
+  final opened = <String, web.RTCDataChannel>{};
+  final ready = Completer<void>();
+
+  void adopt(web.RTCDataChannel channel) {
+    if (opened.containsKey(channel.label)) {
+      return;
+    }
+    void settle() {
+      opened[channel.label] = channel;
+      if (!ready.isCompleted &&
+          opened.containsKey(kPushChannelLabel) &&
+          opened.containsKey(kActionsChannelLabel)) {
+        ready.complete();
+      }
+    }
+
+    if (channel.readyState == 'open') {
+      settle();
+      return;
+    }
+    channel.onopen = ((web.Event _) => settle()).toJS;
+  }
 
   pc.ondatachannel = ((web.RTCDataChannelEvent event) {
-    final channel = event.channel;
-    if (opened.isCompleted) {
-      return;
-    }
-    if (channel.readyState == 'open') {
-      opened.complete(channel);
-      return;
-    }
-    channel.onopen = ((web.Event _) {
-      if (!opened.isCompleted) {
-        opened.complete(channel);
-      }
-    }).toJS;
+    adopt(event.channel);
   }).toJS;
 
   try {
@@ -93,14 +109,21 @@ Future<ControlChannel> connectDataChannel({
     rethrow;
   }
 
-  final channel = await opened.future.timeout(
+  await ready.future.timeout(
     kChannelOpenTimeout,
     onTimeout: () {
       pc.close();
-      throw TimeoutException('the direct channel never opened');
+      throw TimeoutException(
+        'the direct channels never both opened '
+        '(saw ${opened.keys.join(', ')})',
+      );
     },
   );
-  return DataChannelConnection(channel, pc);
+  return DataChannelConnection(
+    push: opened[kPushChannelLabel]!,
+    actions: opened[kActionsChannelLabel]!,
+    pc: pc,
+  );
 }
 
 Future<void> _gatherCandidates(web.RTCPeerConnection pc) {
@@ -135,32 +158,57 @@ JSArray<web.RTCIceServer> _iceServers(List<String> urls) {
 }
 
 class DataChannelConnection implements ControlChannel {
-  DataChannelConnection(this._channel, this._pc) {
-    _channel.onmessage = ((web.MessageEvent event) {
+  DataChannelConnection({
+    required web.RTCDataChannel push,
+    required web.RTCDataChannel actions,
+    required web.RTCPeerConnection pc,
+  })  : _push = push,
+        _actions = actions,
+        _pc = pc {
+    _push.binaryType = 'arraybuffer';
+    _push.onmessage = ((web.MessageEvent event) {
       final data = event.data;
-      if (!data.isA<JSString>()) {
+      if (!data.isA<JSArrayBuffer>()) {
+        _onError?.call('a push arrived that is not a binary frame');
         return;
       }
       try {
-        _onMessage?.call(
-          jsonDecode((data as JSString).toDart) as Map<String, dynamic>,
+        final payload = _reader.accept(
+          (data as JSArrayBuffer).toDart.asUint8List(),
         );
-      } catch (_) {
-        // A frame that is not our JSON is ignored, as on the socket.
+        if (payload == null) {
+          return;
+        }
+        _onMessage?.call(jsonDecode(payload) as Map<String, dynamic>);
+      } catch (e) {
+        // A frame that is not our protocol is reported, never spliced into the
+        // current payload.
+        _onError?.call('bad direct frame: $e');
       }
     }).toJS;
-    _channel.onclose = ((web.Event _) {
+    _push.onclose = ((web.Event _) {
       if (!_closedByUs) {
         _onClose?.call();
       }
     }).toJS;
-    _channel.onerror = ((web.Event _) {
+    _push.onerror = ((web.Event _) {
+      _onError?.call('direct channel error');
+    }).toJS;
+    _actions.onclose = ((web.Event _) {
+      if (!_closedByUs) {
+        _onClose?.call();
+      }
+    }).toJS;
+    _actions.onerror = ((web.Event _) {
       _onError?.call('direct channel error');
     }).toJS;
   }
 
-  final web.RTCDataChannel _channel;
+  final web.RTCDataChannel _push;
+  final web.RTCDataChannel _actions;
   final web.RTCPeerConnection _pc;
+  final FrameReader _reader = FrameReader();
+  final FrameWriter _writer = FrameWriter();
   void Function(Map<String, dynamic>)? _onMessage;
   void Function(String)? _onError;
   void Function()? _onClose;
@@ -170,7 +218,8 @@ class DataChannelConnection implements ControlChannel {
   Uri? get endpoint => null;
 
   @override
-  bool get isOpen => _channel.readyState == 'open';
+  bool get isOpen =>
+      _push.readyState == 'open' && _actions.readyState == 'open';
 
   @override
   Future<void> connect({
@@ -183,20 +232,33 @@ class DataChannelConnection implements ControlChannel {
     _onError = onError;
     _onClose = onClose;
     final idToken = await token();
-    _channel.send(jsonEncode({'type': 'auth', 'token': idToken}).toJS);
+    _sendJson({'type': 'auth', 'token': idToken});
   }
 
   @override
-  void send(Map<String, dynamic> msg) {
-    if (_channel.readyState == 'open') {
-      _channel.send(jsonEncode(msg).toJS);
+  void send(Map<String, dynamic> msg) => _sendJson(msg);
+
+  /// One JSON frame, split into as many DataChannel messages as it needs: SCTP
+  /// refuses a message over the peer's advertised maximum, and the machine's
+  /// bridge died on the first 408 KB push that ignored this.
+  void _sendJson(Map<String, dynamic> msg) {
+    if (_actions.readyState != 'open') {
+      return;
+    }
+    try {
+      for (final frame in _writer.frames(jsonEncode(msg))) {
+        _actions.send(frame.toJS);
+      }
+    } catch (e) {
+      _onError?.call('could not send over the direct channel: $e');
     }
   }
 
   @override
   void close() {
     _closedByUs = true;
-    _channel.close();
+    _push.close();
+    _actions.close();
     _pc.close();
   }
 }

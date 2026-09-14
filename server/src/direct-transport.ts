@@ -128,25 +128,25 @@ export async function offerDirectTransport(
     live = current;
     exchanges += 1;
 
-    void peer.channel
-      .then((channel) => {
+    void peer.channels
+      .then((channels) => {
         if (closed || live !== current) {
           // This exchange was replaced while its channel was still opening;
           // the driver owns the current one.
           return;
         }
         current.channelOpen = true;
-        log("direct transport: channel open, bridging to the loopback server");
-        bridgeToLoopback(channel, port, {
+        log("direct transport: both channels open, bridging to the loopback server");
+        bridgeToLoopback(channels, port, {
           onClosed: () => {
             current.channelOpen = false;
-            log("direct transport: channel closed");
+            log("direct transport: channel closed; the next stale offer replaces it");
           },
         });
       })
       .catch((error: Error) => {
         if (closed || live !== current) {
-          // A replaced exchange's channel never opens, by design: the driver
+          // A replaced exchange's channels never open, by design: the driver
           // withdrew it. That is not a failure and must not be reported as one.
           return;
         }
