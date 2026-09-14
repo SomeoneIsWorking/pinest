@@ -255,3 +255,27 @@ test("a delivered answer stops the fast poll entirely", async () => {
   assert.ok(reads - afterAnswer <= 3, `kept reading after the answer (${reads - afterAnswer} reads)`);
   signaling.stop();
 });
+
+test("a refused read is kept as the reason, and cleared when reading works again", async () => {
+  // The failure that cost hours: the machine could not READ the discovery
+  // document (an exhausted quota), so it never saw the app's answer while the
+  // app could not see the machine. Nothing anywhere said so.
+  let failing = true;
+  const signaling = createP2PSignaling({
+    writeOffer: async () => {},
+    readDiscovery: async () => {
+      if (failing) throw new Error("Quota exceeded.");
+      return { answer: null, report: null };
+    },
+    pollMs: 5,
+    idlePollMs: 5,
+  });
+  await signaling.publishOffer(SDP, OFFER_TS);
+  await settle();
+  assert.equal(signaling.readError(), "Quota exceeded.");
+
+  failing = false;
+  await settle();
+  assert.equal(signaling.readError(), null, "a recovered read clears the reason");
+  signaling.stop();
+});
