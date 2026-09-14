@@ -77,9 +77,21 @@ deployed rules, completed ICE/DTLS/SCTP, and a frame crossed the DataChannel
 into a loopback WebSocket server and back. This is the same shipping
 composition the host runs (`scratch/p2p-live-probe.mjs`).
 
-Gap: the browser client has no `RTCPeerConnection` answer path yet, so the app
-still reaches the host over the tunnel; `p2p` is off by default in a fresh
-install. A punch that fails is reported as a failure to reach the machine
+The browser client answers that offer: it reads the offer from discovery,
+produces a real answer with `RTCPeerConnection`, publishes the answer back,
+and runs the existing protocol over the resulting DataChannel - commands,
+images, and pushes alike, since a direct channel has no HTTP origin and routing
+actions through a tunnel would put a third party back in the data path. Three
+browser tests exercise the shipping interop in real Chromium
+(`flutter test --platform chrome test/direct_channel_web_test.dart`): the answer
+is published and the channel carries the auth handshake, a command, and an
+inbound frame; a peer that never opens a channel fails as a timeout rather than
+hanging; a description that is not an offer is refused.
+
+Gap: the direct transport is browser-only (a Dart VM has no ICE stack here), the
+tunnel stays in use until a direct channel is actually open, and no real
+phone/browser has connected to the live host end to end yet. `p2p` is off by
+default in a fresh install. A punch that fails is reported as a failure to reach the machine
 directly - it never silently falls back to a tunnel.
 
 ### S10 — Context and compaction controls
