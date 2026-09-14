@@ -9,8 +9,8 @@ import { resolvePathInput, deriveSessionName, statSyncSafe } from "./logic.ts";
 import { DEFAULT_MODEL } from "./product-defaults.ts";
 import { reauthenticateRemoteOwner } from "./owner-runtime.ts";
 import { pendingReloadState, queueReload, setIsWorkingProbe } from "./reload-manager.ts";
-import { currentGoal, setGoal } from "./config.ts";
-import { describeGoal, goalDirective } from "./session-goal.ts";
+import { clearSessionGoal, describeGoal, goalAppMessage, setSessionGoal } from "./session-goal.ts";
+import type { GoalSink, SessionGoal } from "./session-goal.ts";
 import { Type } from "typebox";
 import { registerSessionMessaging } from "./session-messaging.ts";
 import debug from "./log.ts";
@@ -20,6 +20,10 @@ export interface HostCommandDeps {
   sessions: Map<string, any>;
   supervisor: any;
   ws: any;
+  /** The objective the HOST session works toward (its own, not the machine's). */
+  goal: () => SessionGoal | null;
+  /** Where the host session's objective is stored and published. */
+  goalSink: () => GoalSink;
   say: (ctx: ExtensionCommandContext | undefined, text: string) => void;
   captureUi: (ctx: ExtensionCommandContext) => void;
   broadcastState: () => void;
@@ -300,28 +304,45 @@ export function registerHostCommands(pi: ExtensionAPI, deps: () => HostCommandDe
     },
   });
 
-  // ── /goal — state the objective to work toward ────────────────────────────
+  // ── /goal — state THIS session's objective to work toward ────────────────
   pi.registerCommand("goal", {
     description: "PiNest: state the objective to work toward (or show the current one)",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
-      const { say, captureUi, broadcastState } = deps();
+      const { say, captureUi, broadcastState, sessionId, goal, goalSink } = deps();
       captureUi(ctx);
       const objective = (args ?? "").trim();
       if (objective.length === 0) {
-        say(ctx, describeGoal(currentGoal()));
+        say(ctx, describeGoal(goal()));
         return;
       }
-      const goal = setGoal(objective);
-      say(ctx, `[pinest] goal set: ${goal.text}`);
-      broadcastState();
-      // The objective must reach the agent, not just the config file: sent as a
-      // follow-up so it is delivered when the current turn settles, and starts
-      // one when the session is idle.
+      // One owner of what setting a goal means: the value is stored on this
+      // session's row and published on its snapshot, then handed to the agent.
+      const next = setSessionGoal(sessionId, objective, goalSink());
       try {
-        pi.sendUserMessage(goalDirective(goal), { deliverAs: "followUp" });
+        // A custom message, so pi's record and the app both show it as an
+        // injected instruction rather than as the user's own words.
+        pi.sendMessage(goalAppMessage(next), { deliverAs: "followUp", triggerTurn: true });
+        say(ctx, `[pinest] goal set: ${next.text}`);
       } catch (e) {
-        say(ctx, `[pinest] could not hand the goal to the agent: ${(e as Error)?.message || e}`);
+        say(ctx, `[pinest] goal set, but the agent was not told: ${(e as Error)?.message || e}`);
       }
+      broadcastState();
+    },
+  });
+
+  // ── /goal-clear — stop working toward this session's objective ───────────
+  pi.registerCommand("goal-clear", {
+    description: "PiNest: clear the objective this session works toward",
+    handler: async (_args: string, ctx: ExtensionCommandContext) => {
+      const { say, captureUi, broadcastState, sessionId, goal, goalSink } = deps();
+      captureUi(ctx);
+      if (!goal()) {
+        say(ctx, describeGoal(null));
+        return;
+      }
+      clearSessionGoal(sessionId, goalSink());
+      say(ctx, "[pinest] goal cleared");
+      broadcastState();
     },
   });
 
@@ -405,6 +426,10 @@ export function registerHostCommands(pi: ExtensionAPI, deps: () => HostCommandDe
     const d = deps();
     return {
       hostSessionId: () => d.sessionId,
+      senderName: () => {
+        const snap = d.sessions.get(d.sessionId) as { name?: string } | undefined;
+        return snap?.name && snap.name.length > 0 ? snap.name : d.sessionId;
+      },
       sessions: () => {
         const rows = new Map<string, { id: string; name?: string; running?: boolean }>();
         for (const [id, snap] of d.sessions) {
@@ -412,21 +437,28 @@ export function registerHostCommands(pi: ExtensionAPI, deps: () => HostCommandDe
         }
         return rows;
       },
-      // Delivering through the supervisor means a message from an agent and a
-      // message from the app take exactly the same path, including the
-      // streaming/idle handling and the queue mirror.
-      deliverToSpawned: async (id, text, deliverAs) => {
-        const handled = await d.supervisor?.handleSessionCommand({
-          type: "user_message",
-          sessionId: id,
-          text,
+      // A message between agents is INJECTED, not typed: it travels as pi's
+      // custom message so the receiving session's record and the app both show
+      // where it came from instead of passing it off as the user's own words.
+      deliverToSpawned: async (id, message, deliverAs) => {
+        const handled = d.supervisor?.deliverInjectedMessage(
+          id,
+          message,
           deliverAs,
-          id: randomUUID(),
-        });
+          (reason: string) => d.say(undefined, `[pinest] ${reason}`),
+        );
         if (!handled) throw new Error(`session ${id} is no longer running`);
       },
-      deliverToHost: (text, deliverAs) => {
-        pi.sendUserMessage(text, { deliverAs });
+      deliverToHost: (message, deliverAs) => {
+        pi.sendMessage(
+          {
+            customType: message.customType,
+            content: [{ type: "text", text: message.text }],
+            display: true,
+            details: message.details,
+          },
+          { deliverAs, triggerTurn: true },
+        );
       },
       notify: (message) => d.say(undefined, message),
     };

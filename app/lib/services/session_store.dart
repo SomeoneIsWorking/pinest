@@ -28,7 +28,6 @@ class SessionStore {
   final Map<String, List<SessionTreeNode>> trees = {};
   final Map<String, String?> leafIds = {};
 
-  SessionGoal? goal;
   String? activeSessionId;
   String? homePath;
   String hostname = 'machine';
@@ -43,7 +42,6 @@ class SessionStore {
     trees.clear();
     leafIds.clear();
     cache.clear();
-    goal = null;
     activeSessionId = null;
     homePath = null;
     hostname = 'machine';
@@ -97,6 +95,20 @@ class SessionStore {
     return s.pendingMessages.contains(text) || s.pendingSteering.contains(text);
   }
 
+  /// The objective a session works toward. Live snapshot first (it is what the
+  /// server publishes on change), then the durable row, then nothing — so a
+  /// resumed or not-running session still shows the goal it was left with.
+  SessionGoal? goalFor(String? id) {
+    if (id == null) return null;
+    for (final s in sessions) {
+      if (s.id == id) return s.goal;
+    }
+    for (final row in registry) {
+      if (row.id == id) return row.goal;
+    }
+    return null;
+  }
+
   List<BackgroundJob> jobsFor(String? sessionId) {
     if (sessionId != null) {
       final sessionJobs = sessions.where((s) => s.id == sessionId).firstOrNull?.jobs;
@@ -111,7 +123,6 @@ class SessionStore {
     required OutgoingQueue outgoing,
     required void Function(Session session) onSessionFinished,
   }) {
-    goal = SessionGoal.fromJson(msg['goal']);
     online = msg['online'] ?? false;
     hostname = msg['hostname'] ?? 'machine';
     activeSessionId = msg['activeSessionId'] as String?;

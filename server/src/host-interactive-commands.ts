@@ -5,6 +5,8 @@ import type { HostContextController } from "./host-context.ts";
 import { lookupImage, pageHistory, resolvePathInput, statSyncSafe } from "./logic.ts";
 import { HostPendingQueue, clearSessionQueue, piQueueSession, syncSessionQueue } from "./pending-queue.ts";
 import type { ClientCommand, ModelInfo, ServerMessage, UserImage } from "./protocol.ts";
+import type { GoalSink, SessionGoal } from "./session-goal.ts";
+import { clearSessionGoal, goalAppMessage, setSessionGoal } from "./session-goal.ts";
 import type { StatePublisher } from "./state-publisher.ts";
 import type { StreamSegmenter } from "./stream.ts";
 import type { MessageSubmitter } from "./submit.ts";
@@ -27,6 +29,8 @@ export interface HostInteractiveCommandDeps {
   queueReload: (pi: ExtensionAPI | null, ctx: ExtensionContext | null) => { ok: boolean; message: string };
   queryModels: (ctx: unknown) => Promise<ModelInfo[]>;
   querySessionHistory: (ctx: unknown) => Promise<any[]>;
+  /** Where this session's objective is stored and published. */
+  goalSink: () => GoalSink;
 }
 
 export function currentHostThinkingLevel(
@@ -224,8 +228,7 @@ export function createHostInteractiveCommandHandler(
         break;
       }
       case "session_tree_navigate":
-      case "session_rewind": {
-        try {
+      case "session_rewind": {        try {
           await deps.hostContext.navigateTree(cmd.entryId, {
             summarize: cmd.type === "session_tree_navigate" ? cmd.summarize : false,
             isRewind: cmd.type === "session_rewind",
@@ -245,6 +248,37 @@ export function createHostInteractiveCommandHandler(
         deps.broadcast({ type: "paths", cmdId: cmd.id, paths });
         break;
       }
+      case "goal_set": {
+        const goal = setSessionGoal(sessionId, cmd.text, deps.goalSink());
+        // The objective must reach the AGENT, not just stored state. A delivery
+        // failure is reported without pretending the goal was not set: the
+        // banner and the notice both say what happened.
+        const undelivered = deliverGoalToHostSession(pi, goal);
+        deps.broadcast(undelivered
+          ? { type: "error", sessionId, message: `[pinest] goal set: ${goal.text} — but the agent was not told: ${undelivered}` }
+          : { type: "notice", sessionId, message: `[pinest] goal set: ${goal.text}` });
+        break;
+      }
+      case "goal_clear": {
+        clearSessionGoal(sessionId, deps.goalSink());
+        deps.broadcast({ type: "notice", sessionId, message: "[pinest] goal cleared" });
+        break;
+      }
     }
   };
+}
+
+/**
+ * Hand the objective to this session's agent as a CUSTOM message — never as one
+ * the user typed. Sent as a follow-up so it lands when the current turn settles,
+ * and starts one when the session is idle. Returns the failure reason, or null
+ * when the agent has it.
+ */
+function deliverGoalToHostSession(pi: ExtensionAPI | null, goal: SessionGoal): string | null {
+  try {
+    pi?.sendMessage?.(goalAppMessage(goal), { deliverAs: "followUp", triggerTurn: true });
+    return null;
+  } catch (e) {
+    return (e as Error).message;
+  }
 }

@@ -385,13 +385,13 @@ class _MockAgentService extends ChangeNotifier implements AgentService {
   Future<void> restoreOutgoing() async {}
 
   @override
-  SessionGoal? get goal => null;
+  SessionGoal? goalFor(String? sessionId) => null;
 
   @override
-  void clearGoal() {}
+  void clearGoal(String sessionId) {}
 
   @override
-  void setGoal(String objective) {}
+  void setGoal(String sessionId, String objective) {}
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);

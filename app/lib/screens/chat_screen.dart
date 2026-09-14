@@ -486,9 +486,9 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
           ),
-        if (svc.goal != null)
+        if (svc.goalFor(widget.sessionId) != null)
           GoalBanner(
-            goal: svc.goal!,
+            goal: svc.goalFor(widget.sessionId)!,
             onEdit: () => _editGoal(svc),
             onClear: () => _clearGoal(svc),
           ),
@@ -530,10 +530,11 @@ class _ChatScreenState extends State<ChatScreen> {
   /// live tool calls. The list and the "nothing here yet" hint must agree on
   /// this, otherwise a working agent shows a transcript and "send a message"
   /// at the same time.
-  /// Edit the standing objective. Reuses the composer's own `/goal` path so
-  /// the app never grows a second way to set one.
+  /// Edit the standing objective for THIS tab's session. Reuses the
+  /// composer's own `/goal` path so the app never grows a second way to set one.
   Future<void> _editGoal(AgentService svc) async {
-    final controller = TextEditingController(text: svc.goal?.text ?? '');
+    final controller =
+        TextEditingController(text: svc.goalFor(widget.sessionId)?.text ?? '');
     final edited = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -559,7 +560,9 @@ class _ChatScreenState extends State<ChatScreen> {
         ],
       ),
     );
-    if (edited != null && edited.isNotEmpty) svc.setGoal(edited);
+    if (edited != null && edited.isNotEmpty) {
+      svc.setGoal(widget.sessionId, edited);
+    }
   }
 
   /// Clear the objective, after saying what that means.
@@ -584,7 +587,7 @@ class _ChatScreenState extends State<ChatScreen> {
         ],
       ),
     );
-    if (confirmed ?? false) svc.clearGoal();
+    if (confirmed ?? false) svc.clearGoal(widget.sessionId);
   }
 
   List<Widget> _chatItems(

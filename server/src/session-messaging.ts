@@ -11,6 +11,25 @@ import { Type } from "typebox";
 
 export type DeliverAs = "steer" | "followUp";
 
+/**
+ * An instruction injected into a session by the harness rather than typed by the
+ * user. It travels as pi's custom message: recorded and rendered as injected,
+ * never as something the human said.
+ */
+export interface InjectedMessage {
+  customType: string;
+  text: string;
+  details?: unknown;
+}
+
+/** The custom type a message from another session travels as. */
+export const MESSAGE_CUSTOM_TYPE = "pinest-message";
+
+/** The injected message the app renders as "message from <session>". */
+export function peerMessage(text: string, from: string, fromId: string): InjectedMessage {
+  return { customType: MESSAGE_CUSTOM_TYPE, text, details: { from, fromId } };
+}
+
 export interface MessagingSession {
   id: string;
   name?: string;
@@ -21,10 +40,12 @@ export interface MessagingSession {
 export interface MessagingDeps {
   /** The session this instance hosts; it receives through `deliverToHost`. */
   hostSessionId: () => string;
+  /** How this session is named to the receiver — the sender the user sees. */
+  senderName: () => string;
   /** Every session the app can see, including the host. */
   sessions: () => Map<string, MessagingSession>;
-  deliverToSpawned: (id: string, text: string, deliverAs: DeliverAs) => Promise<void>;
-  deliverToHost: (text: string, deliverAs: DeliverAs) => void;
+  deliverToSpawned: (id: string, message: InjectedMessage, deliverAs: DeliverAs) => Promise<void>;
+  deliverToHost: (message: InjectedMessage, deliverAs: DeliverAs) => void;
   /** Told to the host UI so the human can see a message left their session. */
   notify?: (message: string) => void;
 }
@@ -103,11 +124,13 @@ export async function messageSession(
   if (target.running === false) {
     return { ok: false, reason: `${label(target)} is not running — resume it first` };
   }
+  const from = deps.senderName();
+  const injected = peerMessage(body, from, deps.hostSessionId());
   const host = target.id === deps.hostSessionId();
   if (host) {
-    deps.deliverToHost(body, deliverAs);
+    deps.deliverToHost(injected, deliverAs);
   } else {
-    await deps.deliverToSpawned(target.id, body, deliverAs);
+    await deps.deliverToSpawned(target.id, injected, deliverAs);
   }
   deps.notify?.(`[pinest] message sent to ${label(target)}${host ? " (this session)" : ""}`);
   return { ok: true, id: target.id, name: label(target), host };
@@ -122,12 +145,14 @@ export function registerSessionMessaging(pi: any, deps: () => MessagingDeps): vo
     name: "message_session",
     label: "Message Session",
     description:
-      "Send a message to another agent session as if the user had typed it there, "
-      + "which starts or continues that session's work. Use it to hand off context, "
-      + "answer another session's question, correct a wrong direction, or tell that "
-      + "agent to continue. Name the target by its session title (a unique prefix is "
-      + "enough) or its exact id; use list_sessions to see them. `deliverAs: \"steer\"` "
-      + "interrupts the current step, `followUp` (the default) queues after the turn.",
+      "Send a message to another agent session, which starts or continues that "
+      + "session's work. It is delivered as an instruction injected by PiNest — the "
+      + "receiving session acts on it, and both the agent and the app can see it came "
+      + "from you rather than from the human. Use it to hand off context, answer "
+      + "another session's question, correct a wrong direction, or tell that agent to "
+      + "continue. Name the target by its session title (a unique prefix is enough) or "
+      + "its exact id; use list_sessions to see them. `deliverAs: \"steer\"` interrupts "
+      + "the current step, `followUp` (the default) queues after the turn.",
     parameters: Type.Object({
       session: Type.String({ description: "Target session title (prefix ok) or exact id" }),
       text: Type.String({ description: "Message to deliver to that session" }),

@@ -22,8 +22,6 @@ export interface Config {
   /** Largest image, in bytes, that may enter a session's context. */
   maxImageBytes?: number;
   activeSessionId?: string;
-  /** The objective the agent is currently working toward, if one was set. */
-  goal?: SessionGoal;
   /** Offer a direct WebRTC transport (no tunnel in the data path) alongside the
    * tunnel. Opt-in: the offer only appears in the discovery doc when enabled. */
   p2p?: boolean;
@@ -61,37 +59,24 @@ export function setImageBytesLimit(maxBytes: number): string {
     + "are scaled down before reaching the model";
 }
 
-/** An objective set with `/goal`, remembered across restarts. */
-export interface SessionGoal {
-  text: string;
-  /** When it was set, so a stale goal is visible as stale. */
-  setAt: number;
-}
-
-/** The objective being worked toward, or null when none is set. */
-export function currentGoal(): SessionGoal | null {
-  const goal = loadConfig().goal;
-  if (!goal || typeof goal.text !== "string" || goal.text.trim().length === 0) return null;
-  return { text: goal.text, setAt: typeof goal.setAt === "number" ? goal.setAt : 0 };
-}
-
-/** Set the objective; a single one at a time, newest wins. */
-export function setGoal(text: string): SessionGoal {
-  const goal: SessionGoal = { text: text.trim(), setAt: Date.now() };
-  saveConfig({ goal });
-  return goal;
-}
-
-/** Forget the objective. */
-export function clearGoal(): void {
-  saveConfig({ goal: undefined });
-}
-
+/**
+ * Removed: a goal is per-session state now (`session-goal.ts`), so the config
+ * file no longer holds one. `loadConfig` retires a legacy value once.
+ */
 export function loadConfig(): Config {
   const cfg: Config = { ...DEFAULTS };
   if (existsSync(CONFIG_PATH)) {
     try {
-      Object.assign(cfg, JSON.parse(readFileSync(CONFIG_PATH, "utf-8")));
+      const parsed = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+      Object.assign(cfg, parsed);
+      if (parsed && typeof parsed === "object" && "goal" in parsed) {
+        // A goal used to be one host-wide value here. It belongs to the session
+        // it was set for now, and a legacy value names no session, so it is
+        // retired rather than guessed at: leaving the key would keep a second
+        // source of truth for a fact that moved.
+        delete cfg.goal;
+        saveConfig({ goal: undefined });
+      }
     } catch { /* corrupt file — fall back to defaults */ }
   }
   return cfg;

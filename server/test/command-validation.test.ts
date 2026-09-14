@@ -39,8 +39,8 @@ test("every ClientCommand discriminant has a validated route shape", () => {
     { type: "list_models", sessionId: "child-1" },
     { type: "get_history", sessionId: "child-1", limit: 50, cursor: 0 },
     { type: "queue_clear", sessionId: "child-1" },
-    { type: "goal_set", text: "ship the widescreen fix" },
-    { type: "goal_clear" },
+    { type: "goal_set", sessionId: "child-1", text: "ship the widescreen fix" },
+    { type: "goal_clear", sessionId: "child-1" },
     { type: "queue_delete", sessionId: "child-1", index: 0 },
     { type: "session_tree_get", sessionId: "child-1", id: "tree-1" },
     { type: "session_tree_navigate", sessionId: "child-1", entryId: "entry-1", summarize: false, id: "tree-2" },
@@ -290,6 +290,39 @@ test("dispatcher sends only exact host/live targets and rejects stale or unknown
     /unknown session/,
   );
   assert.deepEqual(events, ["host:cancel", "spawned:live:cancel"]);
+});
+
+test("a goal reaches the session it names, never the host", async () => {
+  const events: string[] = [];
+  const deps = dispatcherDeps({
+    host: (command) => { events.push(`host:${command.type}:${(command as any).text ?? ""}`); },
+    spawned: (command) => {
+      events.push(`spawned:${command.sessionId}:${command.type}:${(command as any).text ?? ""}`);
+    },
+  });
+
+  // The reported defect: the app's `/goal` action sent no target, so the
+  // objective was set on and handed to the HOST session — the one tab the user
+  // was NOT looking at — and the banner then showed it on every tab.
+  await assert.rejects(
+    () => dispatchClientCommand({ type: "goal_set", text: "get the game working fine" }, deps),
+    /sessionId must be a string/,
+  );
+  await assert.rejects(
+    () => dispatchClientCommand({ type: "goal_clear" }, deps),
+    /sessionId must be a string/,
+  );
+  assert.deepEqual(events, [], "an untargeted goal touches no session at all");
+
+  await dispatchClientCommand(
+    { type: "goal_set", sessionId: "live", text: "get the game working fine" },
+    deps,
+  );
+  await dispatchClientCommand({ type: "goal_clear", sessionId: "host" }, deps);
+  assert.deepEqual(events, [
+    "spawned:live:goal_set:get the game working fine",
+    "host:goal_clear:",
+  ]);
 });
 
 test("dispatcher reserves a spawning ID across awaits and releases it afterward", async () => {

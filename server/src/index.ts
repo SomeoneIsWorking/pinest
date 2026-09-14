@@ -45,7 +45,9 @@ import { deriveSessionName, extractToolResult, listPaths, resolvePathInput, page
 import { createDefaultBackgroundManager, registerBashIntegration, toJobSummary, type BackgroundProcessManager } from "./bash-tool.ts";
 import { registerBackgroundTools, handleJobCommand } from "./background-tools.ts";
 import { StreamSegmenter } from "./stream.ts";
-import { clearGoal, currentGoal, loadConfig, saveConfig } from "./config.ts";
+import { loadConfig, saveConfig } from "./config.ts";
+import { normalizeGoal } from "./session-goal.ts";
+import type { GoalSink } from "./session-goal.ts";
 import { registerHostCommands, showSessionsFlow, type HostCommandDeps } from "./host-commands.ts";
 import { PinestCustomEditor } from "./editor.ts";
 import { FooterManager } from "./footer.ts";
@@ -159,7 +161,6 @@ const _publisher = new StatePublisher({
   },
   tunnelUrl: () => _ws?.tunnelUrl ?? null,
   tunnelProvider: () => _ws?.tunnel?.provider ?? null,
-  goal: () => currentGoal(),
   localUrl: () => (_ws ? `ws://127.0.0.1:${_ws.port}` : null),
   refreshUsage: () => { _supervisor?.refreshUsage?.(false); },
   send: (msg) => broadcast(msg),
@@ -502,6 +503,8 @@ async function bootstrap(): Promise<void> {
     modelName: initModel?.name,
     thinkingLevel: initThinking,
     contextUsage: initCtx,
+    // The objective this session was working toward before the restart.
+    goal: normalizeGoal(_registry?.get(_sessionId)?.goal),
   });
   // The host session is durably registered too (stable id + pi session path).
   _registry?.upsert({
@@ -661,26 +664,6 @@ async function dispatchCommand(command: ClientCommand): Promise<void> {
         const r = queueReload(_pi, _ctx);
         if (!r.ok) broadcast({ type: "error", message: `[remote-code] ${r.message}` });
       },
-      goalClear: () => {
-        clearGoal();
-        broadcastState();
-      },
-      goalSet: (cmd) => {
-        // Ask pi to run ITS registered command rather than restating what the
-        // objective means here: one wording, one behaviour, terminal and app.
-        try {
-          (_pi as { sendUserMessage?: (t: string, o?: unknown) => void })
-            .sendUserMessage?.(`/goal ${cmd.text}`, {
-              deliverAs: "followUp",
-              expandPromptTemplates: true,
-            });
-        } catch (e) {
-          broadcast({
-            type: "error",
-            message: `[remote-code] could not set the goal: ${(e as Error).message}`,
-          });
-        }
-      },
     });
 }
 
@@ -700,6 +683,17 @@ const hostContext = new HostContextController({
   broadcast,
 });
 
+/**
+ * The one place a session goal is stored and published. A goal belongs to the
+ * session it was set for, so both the app's command path and the terminal's
+ * `/goal` write the same two places — the registry row and the live snapshot —
+ * through this single sink, never one without the other.
+ */
+const hostGoalSink: () => GoalSink = () => ({
+  persist: (id, goal) => { _registry?.upsert({ id, goal }); },
+  publish: (id, goal) => { _publisher.upsert(id, { goal }); },
+});
+
 const handleInteractiveCommand = createHostInteractiveCommandHandler({
   pi: () => _pi,
   context: () => _ctx,
@@ -717,6 +711,9 @@ const handleInteractiveCommand = createHostInteractiveCommandHandler({
   queueReload,
   queryModels,
   querySessionHistory,
+  // The host session's own objective: it lives on the host's registry row and
+  // its live snapshot, exactly like a spawned session's does.
+  goalSink: hostGoalSink,
 });
 
 // ── Bridge Pi events → WebSocket ────────────────────────────────────────────
@@ -992,6 +989,8 @@ const remoteCode = (pi: ExtensionAPI): void => {
     sessions: _publisher.asMap(),
     supervisor: _supervisor,
     ws: _ws,
+    goal: () => normalizeGoal(_registry?.get(_sessionId)?.goal),
+    goalSink: hostGoalSink,
     say,
     captureUi,
     broadcastState,

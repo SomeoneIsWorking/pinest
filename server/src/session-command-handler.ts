@@ -4,6 +4,8 @@ import { lookupImage, pageHistory } from "./logic.ts";
 import type { ModelInfo, SessionRow, UserImage } from "./protocol.ts";
 import type { LiveSession, SupervisorCallbacks } from "./supervisor.ts";
 import { resolveThinkingLevel } from "./thinking.ts";
+import type { GoalSink } from "./session-goal.ts";
+import { clearSessionGoal, goalAppMessage, setSessionGoal } from "./session-goal.ts";
 
 export interface SessionCommandHandlerContext {
   callbacks: SupervisorCallbacks;
@@ -16,6 +18,8 @@ export interface SessionCommandHandlerContext {
   models: (s: LiveSession) => Promise<ModelInfo[]>;
   getHistory: (s: LiveSession) => Promise<any[]>;
   syncQueue: (id: string, s: LiveSession) => void;
+  /** Where a session's objective is stored and published. */
+  goalSink: () => GoalSink;
   setSpawningFlag?: (spawning: boolean) => void;
 }
 
@@ -216,6 +220,53 @@ export async function dispatchSessionCommand(
         delete s.pendingImagesByText[cmd.text];
       }
       ctx.syncQueue(cmd.sessionId, s);
+      break;
+    }
+    case "goal_set": {
+      const id = cmd.sessionId as string;
+      const goal = setSessionGoal(id, cmd.text, ctx.goalSink());
+      // A CUSTOM message, not a user message: the objective is injected by the
+      // harness, and the app must not draw it as something the human typed. It
+      // reaches the agent of THIS session — the tab the user was looking at — as
+      // a follow-up, so it lands when the current turn settles.
+      const send = (s.session as any).sendCustomMessage;
+      if (typeof send !== "function") {
+        throw new Error("this session cannot receive a goal (no sendCustomMessage on the agent session)");
+      }
+      // NOT awaited: with the session idle this call runs the goal's whole turn,
+      // so awaiting it would hold the command's response for as long as the work
+      // takes. The message is queued before that promise settles, and a failure
+      // to deliver is reported rather than swallowed.
+      try {
+        void Promise.resolve(
+          send.call(s.session, goalAppMessage(goal), {
+            deliverAs: "followUp",
+            triggerTurn: true,
+          }),
+        ).catch((e: unknown) => {
+          ctx.callbacks.broadcast({
+            type: "error",
+            sessionId: id,
+            message: `[pinest] goal set: ${goal.text} — but the agent was not told: ${(e as Error).message}`,
+          });
+        });
+      } catch (e) {
+        throw new Error(`could not hand the goal to the agent: ${(e as Error).message}`);
+      }
+      ctx.callbacks.broadcast({
+        type: "notice",
+        sessionId: id,
+        message: `[pinest] goal set: ${goal.text}`,
+      });
+      break;
+    }
+    case "goal_clear": {
+      clearSessionGoal(cmd.sessionId as string, ctx.goalSink());
+      ctx.callbacks.broadcast({
+        type: "notice",
+        sessionId: cmd.sessionId as string,
+        message: "[pinest] goal cleared",
+      });
       break;
     }
     case "session_tree_get": {

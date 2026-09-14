@@ -511,8 +511,14 @@ Future<bool> runSlashCommand(
         showAppToast(context, 'Usage: /goal <objective>', isError: true);
         return true;
       }
-      svc.setGoal(objective);
-      showAppToast(context, 'Goal set — the agent is working toward it');
+      // The goal belongs to the session this command was typed in, never to the
+      // host — so a missing session is refused instead of mis-targeted.
+      if (s == null) {
+        showAppToast(context, 'No active session for /goal', isError: true);
+        return true;
+      }
+      svc.setGoal(s.id, objective);
+      showAppToast(context, 'Goal set for ${s.name} — the agent is working toward it');
       return true;
     default:
       showAppToast(context, 'Unknown command: $name', isError: true);
