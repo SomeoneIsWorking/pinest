@@ -44,6 +44,7 @@ class DirectLink {
   final int Function() _now;
 
   bool _active = false;
+  bool _attemptInFlight = false;
   int? _answeredOfferTs;
   String? _failure;
 
@@ -53,11 +54,23 @@ class DirectLink {
   /// Why the last attempt failed, if one did.
   String? get failure => _failure;
 
-  /// Forget the answered offer, e.g. when the channel died: the machine
-  /// republishes on its next generation and that offer has to be answerable.
+  /// The channel this link claimed is gone.
+  ///
+  /// The answered offer is KEPT on purpose. The machine applies one answer per
+  /// offer and ignores a repeat by name, so answering the same offer again
+  /// could never produce a channel - only a newer offer, which the machine
+  /// publishes on its next generation, can. Clearing it here would make the app
+  /// re-fight an exchange it has already lost.
+  void channelLost() {
+    _active = false;
+  }
+
+  /// Forget everything, for a different account or machine.
   void reset() {
     _active = false;
+    _attemptInFlight = false;
     _answeredOfferTs = null;
+    _failure = null;
   }
 
   /// Answer [discovery]'s offer when it carries a fresh one.
@@ -67,6 +80,14 @@ class DirectLink {
   /// already had and say why.
   Future<bool> tryConnect(Map<String, dynamic>? discovery) async {
     if (!_available()) {
+      return false;
+    }
+    // Discovery updates every few seconds while an exchange can take tens of
+    // seconds to settle, so without this the app starts a second, competing
+    // exchange with the same machine. False means "not direct right now": the
+    // caller keeps the tunnel it already has, and a later attempt can still
+    // succeed.
+    if (_attemptInFlight) {
       return false;
     }
     final offer = offerToAnswer(
@@ -80,6 +101,7 @@ class DirectLink {
     // Record the identity BEFORE attempting: a second attempt at the same offer
     // would start a competing exchange with the same peer.
     _answeredOfferTs = offer.ts;
+    _attemptInFlight = true;
     try {
       final channel = await _connect(
         offerSdp: offer.sdp,
@@ -100,6 +122,8 @@ class DirectLink {
       _failure = '$e';
       _onChanged();
       return false;
+    } finally {
+      _attemptInFlight = false;
     }
   }
 }
