@@ -31,6 +31,7 @@ import { classifyCompactFailure } from "./compaction-outcome.ts";
 import { createMessageSubmitter, type MessageSubmitter } from "./submit.ts";
 import { resolveThinkingLevel } from "./thinking.ts";
 import { dispatchSessionCommand } from "./session-command-handler.ts";
+import { normalizeGoal } from "./session-goal.ts";
 import type { SessionRegistry } from "./registry.ts";
 import { SessionModelService } from "./session-models.ts";
 import type { SessionSnapshot, SessionRow, UserImage } from "./protocol.ts";
@@ -338,6 +339,9 @@ export class Supervisor {
     this.callbacks.upsertSession(id, {
       name, cwd, model: s.model, modelName: s.modelName,
       status: "idle", isInteractive: false, createdAt: Date.now(),
+      // The objective this session already works toward, so resuming or
+      // respawning it shows the goal on its own tab again.
+      goal: normalizeGoal(this.registry?.get(id)?.goal),
     });
     this.persistRow(id, { status: "idle", model: s.model, modelName: s.modelName });
     this.wire(id, s);
@@ -390,6 +394,7 @@ export class Supervisor {
     this.callbacks.upsertSession(id, {
       name, cwd, model: s.model, modelName: s.modelName,
       status: "idle", isInteractive: false, resumed: true,
+      goal: normalizeGoal(this.registry?.get(id)?.goal),
     });
     this.persistRow(id, { status: "idle", model: s.model, modelName: s.modelName });
     this.wire(id, s);
@@ -417,6 +422,38 @@ export class Supervisor {
     this.callbacks.upsertSession(sessionId, { name });
   }
 
+  /**
+   * Inject a harness message into a session as pi's CUSTOM message, so neither
+   * pi's record nor the app's transcript shows it as something the user typed.
+   * Returns false when the session is not running.
+   *
+   * Deliberately NOT awaited: with the target idle, this call runs the message's
+   * whole turn, and a sender must not wait for the receiver's work. A delivery
+   * failure is reported through `onError` instead of disappearing.
+   */
+  deliverInjectedMessage(
+    sessionId: string,
+    message: { customType: string; text: string; details?: unknown },
+    deliverAs: "steer" | "followUp",
+    onError: (reason: string) => void,
+  ): boolean {
+    const s = this.sessions.get(sessionId);
+    if (!s) return false;
+    const send = (s.session as any).sendCustomMessage;
+    if (typeof send !== "function") {
+      throw new Error(`session ${sessionId} cannot receive an injected message`);
+    }
+    void Promise.resolve(send.call(s.session, {
+      customType: message.customType,
+      content: [{ type: "text", text: message.text }],
+      display: true,
+      details: message.details,
+    }, { deliverAs, triggerTurn: true })).catch((e: unknown) => {
+      onError(`session ${sessionId} could not be reached: ${(e as Error).message}`);
+    });
+    return true;
+  }
+
   async handleSessionCommand(cmd: any): Promise<boolean> {
     const s = this.sessions.get(cmd.sessionId);
     if (!s) return false;
@@ -432,6 +469,10 @@ export class Supervisor {
         models: (sess) => this.models(sess),
         getHistory: (sess) => this.getHistory(sess),
         syncQueue: (id, sess) => this.syncQueue(id, sess),
+        goalSink: () => ({
+          persist: (id, goal) => this.persistRow(id, { goal }),
+          publish: (id, goal) => this.callbacks.upsertSession(id, { goal }),
+        }),
         setSpawningFlag: (spawning) => {
           Supervisor.activeSpawning = spawning;
         },

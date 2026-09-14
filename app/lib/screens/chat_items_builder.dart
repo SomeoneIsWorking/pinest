@@ -6,6 +6,7 @@ import '../models/stream_segment.dart';
 import '../models/tool_call_view.dart';
 import '../services/agent_service.dart';
 import '../services/user_preferences.dart';
+import 'injected_message_card.dart';
 import 'message_bubbles.dart';
 import 'message_options_sheet.dart';
 import 'task_notification_card.dart';
@@ -126,6 +127,27 @@ List<Widget> buildChatItems({
     } else if (msg['customType'] == 'compaction') {
       flushTools();
       items.add(SystemBubble(text: 'Conversation compacted', timestamp: timestamp));
+    } else if (msg['customType'] == 'pinest-goal') {
+      // Injected by the harness, never typed by the user: the directive used to
+      // arrive as a user message and was drawn in the user's own voice.
+      flushTools();
+      items.add(InjectedMessageCard(
+        label: 'PiNest · goal',
+        icon: Icons.flag_outlined,
+        text: text,
+        timestamp: timestamp,
+      ));
+    } else if (msg['customType'] == 'pinest-message') {
+      flushTools();
+      final from = (msg['details'] as Map?)?['from']?.toString();
+      items.add(InjectedMessageCard(
+        label: from == null || from.isEmpty
+            ? 'PiNest · message from another session'
+            : 'PiNest · message from $from',
+        icon: Icons.forum_outlined,
+        text: text,
+        timestamp: timestamp,
+      ));
     } else if (role == 'system') {
       flushTools();
       items.add(SystemBubble(text: text, timestamp: timestamp));

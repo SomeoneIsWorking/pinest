@@ -21,7 +21,6 @@ void main() {
           'hostname': 'my-host',
           'activeSessionId': 's1',
           'homePath': '/test/home',
-          'goal': {'text': 'do work'},
           'sessions': [
             {
               'id': 's1',
@@ -31,6 +30,7 @@ void main() {
               'streamingText': 'Hello...',
               'streamingThinking': 'Thinking...',
               'pendingMessages': ['queued 1'],
+              'goal': {'text': 'do work'},
             },
           ],
           'registry': [
@@ -45,6 +45,8 @@ void main() {
               'name': 'Session 2 (inactive)',
               'cwd': '/test2',
               'isHost': false,
+              // A not-running session keeps the objective it was left with.
+              'goal': {'text': 'resume the port'},
             },
           ],
         },
@@ -56,7 +58,11 @@ void main() {
       expect(store.hostname, 'my-host');
       expect(store.activeSessionId, 's1');
       expect(store.homePath, '/test/home');
-      expect(store.goal?.text, 'do work');
+      // Each session carries its OWN objective: no session-wide or host-wide
+      // goal exists, so a tab can never show another tab's goal.
+      expect(store.goalFor('s1')?.text, 'do work');
+      expect(store.goalFor('s2')?.text, 'resume the port');
+      expect(store.goalFor('unknown'), isNull);
       expect(store.sessions.length, 1);
       expect(store.sessions.first.id, 's1');
       expect(store.registry.length, 2);

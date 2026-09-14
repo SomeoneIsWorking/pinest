@@ -45,6 +45,8 @@ const SESSION_COMMAND_TYPES = new Set<ClientCommand["type"]>([
   "session_tree_get",
   "session_tree_navigate",
   "session_rewind",
+  "goal_set",
+  "goal_clear",
   "get_image",
 ]);
 
@@ -488,16 +490,28 @@ export function parseClientCommand(input: unknown): ClientCommand {
         id: commandId(command),
       };
     case "goal_set": {
-      rejectUnknownFields(command, ["type", "text"]);
+      // The target is REQUIRED, not defaulted to the host: a goal silently
+      // landing on the host session is the defect this shape prevents, and a
+      // refusal that names the missing field is visible where a wrong tab is not.
+      rejectUnknownFields(command, ["type", "sessionId", "text", "id"]);
       const rawText = command.text;
       if (typeof rawText !== "string" || rawText.trim().length === 0) {
         fail("command.text must be a non-empty objective");
       }
-      return { type: "goal_set", text: rawText.trim() };
+      return {
+        type: "goal_set",
+        sessionId: requiredString(command, "sessionId", { maxCharacters: 128, trim: true }),
+        text: rawText.trim(),
+        id: commandId(command),
+      };
     }
     case "goal_clear":
-      rejectUnknownFields(command, ["type"]);
-      return { type: "goal_clear" };
+      rejectUnknownFields(command, ["type", "sessionId", "id"]);
+      return {
+        type: "goal_clear",
+        sessionId: requiredString(command, "sessionId", { maxCharacters: 128, trim: true }),
+        id: commandId(command),
+      };
     case "reload":
       rejectUnknownFields(command, ["type"]);
       return { type: "reload" };
@@ -520,7 +534,9 @@ export type SessionCommand = Extract<ClientCommand, {
     | "queue_delete"
     | "session_tree_get"
     | "session_tree_navigate"
-    | "session_rewind";
+    | "session_rewind"
+    | "goal_set"
+    | "goal_clear";
 }>;
 
 export function isSessionCommand(command: ClientCommand): command is SessionCommand {
@@ -658,8 +674,6 @@ export interface ClientCommandDispatcherDeps {
   jobKill?: (command: Extract<ClientCommand, { type: "job_kill" }>) => void | Promise<void>;
   jobLogs?: (command: Extract<ClientCommand, { type: "job_logs" }>) => void | Promise<void>;
   reload: () => void | Promise<void>;
-  goalSet: (command: { text: string }) => void | Promise<void>;
-  goalClear: () => void | Promise<void>;
 }
 
 /** Validate, authorize the target, reserve new IDs, and dispatch exactly once. */
@@ -714,8 +728,6 @@ export async function dispatchClientCommand(
     case "job_kill": return void await deps.jobKill?.(command);
     case "job_logs": return void await deps.jobLogs?.(command);
     case "reload": return void await deps.reload();
-    case "goal_set": return void await deps.goalSet(command);
-    case "goal_clear": return void await deps.goalClear();
     case "list_paths": return void await deps.host(command);
     case "ping": return;
   }

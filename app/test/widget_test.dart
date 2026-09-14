@@ -8,6 +8,7 @@ import 'package:pinest_app/models/chat_item.dart';
 import 'package:pinest_app/models/session.dart';
 import 'package:pinest_app/models/tool_call_view.dart';
 import 'package:pinest_app/screens/chat_screen.dart';
+import 'package:pinest_app/screens/goal_banner.dart';
 import 'package:pinest_app/screens/thinking_card.dart';
 import 'package:pinest_app/screens/task_notification_card.dart';
 import 'package:pinest_app/screens/tool_call_card.dart';
@@ -264,6 +265,40 @@ void main() {
     expect(opened, 1, reason: 'the button must open the sidebar');
   });
 
+  testWidgets('ChatScreen shows only the objective its own session owns', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final preferences = await UserPreferences.load();
+    final svc = _ChatTestAgentService();
+    // The reported defect: a goal stated on one tab appeared on every tab,
+    // because it was stored once for the whole machine instead of per session.
+    svc.testGoals['s2'] = const SessionGoal(text: 'get the game working fine', setAt: 0);
+
+    Widget app(String sessionId) => MultiProvider(
+          providers: [
+            ChangeNotifierProvider<AgentService>.value(value: svc),
+            Provider<UserPreferences>.value(value: preferences),
+          ],
+          child: MaterialApp(
+            home: Scaffold(body: ChatScreen(sessionId: sessionId)),
+          ),
+        );
+
+    await tester.pumpWidget(app('s1'));
+    await tester.pumpAndSettle();
+    expect(
+      find.byType(GoalBanner),
+      findsNothing,
+      reason: 's1 owns no goal, so its tab shows no banner',
+    );
+
+    // s2 is a different live session that does own one.
+    svc.sessions.add(Session(id: 's2', name: 'psx', cwd: '/psx', createdAt: 0));
+    await tester.pumpWidget(app('s2'));
+    await tester.pumpAndSettle();
+    expect(find.byType(GoalBanner), findsOneWidget);
+    expect(find.text('get the game working fine'), findsOneWidget);
+  });
+
   testWidgets('ChatScreen shows scroll to bottom FAB when scrolled up and scrolls on tap', (tester) async {
     SharedPreferences.setMockInitialValues({});
     final preferences = await UserPreferences.load();
@@ -323,6 +358,9 @@ void main() {
 class _ChatTestAgentService extends ChangeNotifier implements AgentService {
   final List<Map<String, dynamic>> testHistory = [];
 
+  /// Objectives by session, so a test can prove one tab never shows another's.
+  final Map<String, SessionGoal> testGoals = {};
+
   @override
   List<Session> get sessions => [
         Session(id: 's1', name: 'test', cwd: '/test', createdAt: 0),
@@ -365,13 +403,13 @@ class _ChatTestAgentService extends ChangeNotifier implements AgentService {
   void listModels(Session s) {}
 
   @override
-  SessionGoal? get goal => null;
+  SessionGoal? goalFor(String? sessionId) => testGoals[sessionId];
 
   @override
-  void clearGoal() {}
+  void clearGoal(String sessionId) {}
 
   @override
-  void setGoal(String objective) {}
+  void setGoal(String sessionId, String objective) {}
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);

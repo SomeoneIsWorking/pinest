@@ -267,6 +267,7 @@ export function messagesToHistory(messages: unknown): HistoryItem[] {
         ...(id ? { id } : {}),
         role,
         ...(customType ? { customType } : {}),
+        ...(isCustom && (m as any).details !== undefined ? { details: (m as any).details } : {}),
         text,
         ...(thinking ? { thinking } : {}),
         tools,
@@ -309,6 +310,9 @@ function entriesToSessionMessages(entries: any[]): any[] {
         customType: entry.customType,
         content: entry.content,
         id: entry.id,
+        // Who injected it (a peer session, the goal): the app labels the card
+        // with it instead of guessing from the text.
+        ...(entry.details !== undefined ? { details: entry.details } : {}),
         ...(validTs !== undefined ? { timestamp: validTs } : {}),
       });
     } else if (entry.type === "compaction") {
