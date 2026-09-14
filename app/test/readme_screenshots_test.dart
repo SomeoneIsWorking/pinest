@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pinest_app/models/session_goal.dart';
 import 'package:pinest_app/main.dart';
 import 'package:pinest_app/models/chat_item.dart';
 import 'package:pinest_app/models/session.dart';
@@ -186,6 +187,15 @@ class _MockAuthService extends ChangeNotifier implements AuthService {
   Future<void> signOut() async {}
 
   @override
+  @override
+  SessionGoal? get goal => null;
+
+  @override
+  void clearGoal() {}
+
+  @override
+  void setGoal(String objective) {}
+
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
@@ -384,5 +394,14 @@ class _MockAgentService extends ChangeNotifier implements AgentService {
   Future<void> restoreOutgoing() async {}
 
   @override
+  @override
+  SessionGoal? get goal => null;
+
+  @override
+  void clearGoal() {}
+
+  @override
+  void setGoal(String objective) {}
+
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

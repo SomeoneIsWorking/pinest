@@ -1,6 +1,7 @@
 // Smoke test: the app's Session model is a plain snapshot.
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pinest_app/models/session_goal.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:pinest_app/models/background_job.dart';
 import 'package:pinest_app/models/chat_item.dart';
@@ -364,5 +365,14 @@ class _ChatTestAgentService extends ChangeNotifier implements AgentService {
   void listModels(Session s) {}
 
   @override
+  @override
+  SessionGoal? get goal => null;
+
+  @override
+  void clearGoal() {}
+
+  @override
+  void setGoal(String objective) {}
+
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

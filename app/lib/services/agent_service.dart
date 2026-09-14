@@ -12,6 +12,7 @@ import 'outgoing_queue.dart';
 import 'session_cache.dart';
 import 'user_preferences.dart';
 import '../models/session.dart';
+import '../models/session_goal.dart';
 export '../models/session.dart' show PendingImage;
 import '../models/chat_item.dart';
 import '../models/stream_segment.dart';
@@ -444,6 +445,7 @@ class AgentService extends ChangeNotifier {
         break;
       case 'state':
         _httpKey = (msg['httpKey'] as String?) ?? _httpKey;
+        _goal = SessionGoal.fromJson(msg['goal']);
         _online = msg['online'] ?? false;
         _hostname = msg['hostname'] ?? 'machine';
         _activeSessionId = msg['activeSessionId'] as String?;
@@ -979,9 +981,16 @@ class AgentService extends ChangeNotifier {
     }
   }
 
+  /// The objective the agent is working toward, from the server's own state.
+  SessionGoal? get goal => _goal;
+  SessionGoal? _goal;
+
   /// State the objective to work toward. pi runs its own `/goal` command, so
   /// the terminal and the app share one wording and one behaviour.
   void setGoal(String objective) => _send({'type': 'goal_set', 'text': objective});
+
+  /// Stop working toward the objective.
+  void clearGoal() => _send({'type': 'goal_clear'});
 
   void cancel(Session s) => _send({'type': 'cancel', 'sessionId': s.id});
   void setModel(Session s, String provider, String modelId) => _send({
