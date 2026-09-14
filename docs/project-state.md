@@ -82,8 +82,11 @@ produces a real answer with `RTCPeerConnection`, publishes the answer back,
 and runs the existing protocol over the resulting DataChannel - commands,
 images, and pushes alike, since a direct channel has no HTTP origin and routing
 actions through a tunnel would put a third party back in the data path. Three
-browser tests exercise the shipping interop in real Chromium
-(`flutter test --platform chrome test/direct_channel_web_test.dart`): the answer
+browser tests exercise the shipping interop in real Chromium, run by
+`python3 tools/verify_web_client.py` (which finds a browser, names the one it
+used, and refuses by name with the platform's install command when none is
+installed) and by `flutter test --platform chrome
+test/direct_channel_web_test.dart` directly: the answer
 is published and the channel carries the auth handshake, a command, and an
 inbound frame; a peer that never opens a channel fails as a timeout rather than
 hanging; a description that is not an offer is refused.
