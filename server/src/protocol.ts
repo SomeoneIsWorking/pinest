@@ -167,7 +167,7 @@ export type ServerMessage =
        * starts must not ALSO be announced as the session finishing work. */
       kind?: "background-task";
     }
-  | { type: "state"; online: boolean; hostname: string; homePath?: string; activeSessionId?: string | null; sessions: SessionSnapshot[]; registry: SessionRow[]; tunnelUrl?: string | null; tunnelProvider?: string | null; httpKey?: string; localUrl?: string | null }
+  | { type: "state"; online: boolean; hostname: string; homePath?: string; activeSessionId?: string | null; sessions: SessionSnapshot[]; registry: SessionRow[]; tunnelUrl?: string | null; tunnelProvider?: string | null; httpKey?: string; localUrl?: string | null; p2p?: DirectTransportWireStatus | null }
   | { type: "session_list"; sessions: SessionRow[] }
   | { type: "session_deleted"; sessionId: string; deleted: boolean }
   | { type: "jobs_list"; sessionId?: string; jobs: BackgroundJobSummary[] }
@@ -190,6 +190,16 @@ export type ServerMessage =
   | { type: "image_missing"; imageId: string; reason: string }
   | { type: "path_check"; cmdId?: string; exists: boolean; isDirectory: boolean }
   | { type: "folder_created"; cmdId?: string; path?: string; error?: string };
+
+/** The direct (no-tunnel) transport as the app sees it: whether the machine is
+ * offering, how old its offer is, and whether anyone is connected through it. */
+export interface DirectTransportWireStatus {
+  offerTs: number | null;
+  offerAgeMs: number | null;
+  channelOpen: boolean;
+  exchanges: number;
+  lastError: string | null;
+}
 
 /** An image attached by the client to a user_message (paste/upload). */
 export interface UserImage {

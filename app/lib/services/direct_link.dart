@@ -60,9 +60,10 @@ class DirectLink {
   ///
   /// The answered offer is KEPT on purpose. The machine applies one answer per
   /// offer and ignores a repeat by name, so answering the same offer again
-  /// could never produce a channel - only a newer offer, which the machine
-  /// publishes on its next generation, can. Clearing it here would make the app
-  /// re-fight an exchange it has already lost.
+  /// could never produce a channel. Only a NEWER offer can, and the machine now
+  /// withdraws and republishes a stale one on its own cadence
+  /// (`OFFER_LIFETIME_MS` in server/src/direct-transport.ts), so one always
+  /// arrives. Clearing this here would make the app re-fight a lost exchange.
   void channelLost() {
     _active = false;
   }
