@@ -205,7 +205,7 @@ export async function endpointAnswers(
 ): Promise<boolean> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const sleep = deps.sleepMs ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const deadline = Date.now() + (deps.deadlineMs ?? 45_000);
+  const deadline = Date.now() + (deps.deadlineMs ?? 330_000);
   while (Date.now() < deadline) {
     try {
       const res = await fetchImpl(`${url}/image/tunnel-probe`, { signal: AbortSignal.timeout(5_000) });
@@ -285,11 +285,13 @@ const cloudflaredProvider: TunnelProvider = {
       const killProc = makeProcKill(proc);
       timer = setTimeout(
         // The budget covers URL capture (a few seconds) plus the reachability
-        // verification, which waits out DNS propagation. Killing the process is
-        // part of failing: a timeout that only rejects leaves the tunnel
-        // running with nobody owning it.
-        () => { killProc(); done(reject)(new Error("cloudflared produced no reachable endpoint within 90s") as unknown as void); },
-        90_000);
+        // verification, which must outwait a poisoned resolver cache: a name
+        // that was looked up too early can stay NXDOMAIN locally for the
+        // record's negative TTL (~300s). Killing the process is part of
+        // failing: a timeout that only rejects leaves the tunnel running with
+        // nobody owning it.
+        () => { killProc(); done(reject)(new Error("cloudflared produced no reachable endpoint within 360s") as unknown as void); },
+        360_000);
       // MUST handle 'error' — a missing binary emits an unhandled 'error'
       // event on the child, crashing the process (the original bug).
       proc.on("error", done((err) => reject(new Error(`cloudflared spawn failed: ${err.message}`))));
@@ -501,9 +503,13 @@ export interface StartTunnelResult extends TunnelHandle {
 }
 
 /**
- * Start a tunnel, honoring a preferred provider and falling back through the
- * rest (by registry order) until one works. Never throws.
- * Returns { provider, url, stop }, with provider=null on total failure.
+ * Start a tunnel, honoring the preferred provider. An explicit preference is
+ * exactly that - the user chose a provider, and a failure must not be answered
+ * by silently switching to another one (measured: a configured cloudflared
+ * failing verification was answered by ngrok, the provider the user had
+ * explicitly moved off of). With no preference, providers are tried in registry
+ * order until one works. Never throws.
+ * Returns { provider, url, stop }, with provider=null on failure.
  */
 export async function startTunnel(opts: {
   port: number;
@@ -523,9 +529,9 @@ export async function startTunnel(opts: {
   const find = (name: string | undefined): TunnelProvider | null =>
     (name ? registry.find((p) => p.name === name) : null) ?? null;
   const pref = find(preferred);
-  const order = pref
-    ? [pref, ...registry.filter((p) => p !== pref && p.name !== "off")]
-    : [...registry.filter((p) => p.name !== "off")];
+  // An explicit choice is the whole list: the configured provider's failure is
+  // surfaced, not papered over with whichever provider happens to come next.
+  const order = pref ? [pref] : [...registry.filter((p) => p.name !== "off")];
 
   for (const p of order) {
     if (p.name === "off") continue;
@@ -541,6 +547,6 @@ export async function startTunnel(opts: {
       debug(`[remote-code] ${p.name} failed: ${(e as Error).message}`);
     }
   }
-  debug("[remote-code] all tunnel providers failed — running local-only");
+  debug("[remote-code] no tunnel provider succeeded — running local-only");
   return { provider: null, url: null, stop: () => {} };
 }

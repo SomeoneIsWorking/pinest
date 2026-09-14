@@ -391,6 +391,12 @@ class AgentService extends ChangeNotifier {
   /// Put an unconfirmed send back on the wire, for the user who would rather
   /// retry it than lose it.
   void resendOutgoing(Session s, OutgoingMessage message) {
+    // The recorded failure describes the attempt it came from - a message that
+    // failed against one endpoint keeps naming it forever otherwise, so a
+    // re-send against the current origin still reads as "not delivered" until
+    // something overwrites it.
+    message.failure = null;
+    unawaited(_outgoing.persist());
     _outbox.add(message.command);
     if (_connected) {
       _flushOutbox();
