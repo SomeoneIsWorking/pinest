@@ -95,6 +95,50 @@ class ServerHttp {
     }
   }
 
+  /// Ask for a session's history. The reply IS the history frame the socket
+  /// would have pushed, so the caller applies it through one parser.
+  ///
+  /// Returns the frame, or null with the reason in [error]: a history request
+  /// that fails must be reportable, not indistinguishable from "no messages".
+  Future<({Map<String, dynamic>? frame, String? error})> fetchHistory({
+    required String sessionId,
+    int? cursor,
+  }) async {
+    final base = _base;
+    final key = _accessKey();
+    if (base == null || key == null) {
+      return (frame: null, error: "not connected yet");
+    }
+    try {
+      final response = await (_client?.post(
+            base.replace(path: '/history'),
+            headers: {'content-type': 'application/json', 'x-pinest-key': key},
+            body: json.encode({
+              'sessionId': sessionId,
+              'cursor': ?cursor,
+            }),
+          ) ??
+          http.post(
+            base.replace(path: '/history'),
+            headers: {'content-type': 'application/json', 'x-pinest-key': key},
+            body: json.encode({
+              'sessionId': sessionId,
+              'cursor': ?cursor,
+            }),
+          ));
+      if (response.statusCode != 200) {
+        return (frame: null, error: reasonFor(response));
+      }
+      final decoded = json.decode(response.body);
+      if (decoded is! Map) {
+        return (frame: null, error: 'HTTP 200 with an unusable body');
+      }
+      return (frame: Map<String, dynamic>.from(decoded), error: null);
+    } catch (e) {
+      return (frame: null, error: 'could not reach the server: $e');
+    }
+  }
+
   /// Deliver a message. `202` means accepted for delivery; anything else is a
   /// refusal with a reason, and an unreachable server is reported as such
   /// rather than left "sending" forever.

@@ -1,0 +1,138 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:pinest_app/services/control_channel.dart';
+import 'package:pinest_app/services/direct_link.dart';
+
+const _offer = 'v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n'
+    'm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n';
+
+/// A channel that records what it carried, so "connected" means connected.
+class _FakeChannel implements ControlChannel {
+  _FakeChannel(this.url);
+  final String url;
+
+  @override
+  Uri? get endpoint => null;
+  @override
+  bool get isOpen => true;
+  @override
+  Future<void> connect({
+    required Future<String> Function() token,
+    required void Function(Map<String, dynamic>) onMessage,
+    required void Function(String) onError,
+    required void Function() onClose,
+  }) async {}
+  @override
+  void send(Map<String, dynamic> msg) {}
+  @override
+  void close() {}
+}
+
+({DirectLink link, List<String> published, List<String> connections, List<String> changes,
+    List<String> attempts})
+    build({
+  bool available = true,
+  bool connects = true,
+  int now = 1000,
+}) {
+  final published = <String>[];
+  final connections = <String>[];
+  final changes = <String>[];
+  final attempts = <String>[];
+  final link = DirectLink(
+    available: () => available,
+    now: () => now,
+    iceServers: const ['stun:example'],
+    connect: ({required offerSdp, required publishAnswer, required iceServers}) async {
+      attempts.add(offerSdp);
+      if (!connects) {
+        throw StateError('ICE never completed');
+      }
+      await publishAnswer('answer-for:$offerSdp');
+      return _FakeChannel(offerSdp);
+    },
+    publishAnswer: (sdp, writtenAt) async => published.add('$sdp@$writtenAt'),
+    open: (channel) async => connections.add(channel.endpoint?.toString() ?? 'direct'),
+    onChanged: () => changes.add('changed'),
+  );
+  return (
+    link: link,
+    published: published,
+    connections: connections,
+    changes: changes,
+    attempts: attempts,
+  );
+}
+
+void main() {
+  test('a fresh offer is answered, published, and opened', () async {
+    final h = build();
+    final used = await h.link.tryConnect({'p2pOffer': _offer, 'p2pOfferTs': 900});
+    expect(used, isTrue);
+    expect(h.link.active, isTrue);
+    expect(h.link.failure, isNull);
+    expect(h.published, ['answer-for:$_offer@1000'],
+        reason: 'the answer is published with its time');
+    expect(h.connections, hasLength(1), reason: 'the channel became the live one');
+    expect(h.changes, isNotEmpty);
+  });
+
+  test('the same offer is answered once, not on every document update', () async {
+    final h = build();
+    final doc = {'p2pOffer': _offer, 'p2pOfferTs': 900};
+    expect(await h.link.tryConnect(doc), isTrue);
+    expect(await h.link.tryConnect(doc), isFalse);
+    expect(h.published, hasLength(1),
+        reason: 'a repeat of the same offer starts no second exchange');
+    expect(h.connections, hasLength(1));
+
+    // A genuinely new offer (the machine re-offered) is answered.
+    expect(await h.link.tryConnect({'p2pOffer': _offer, 'p2pOfferTs': 2000}), isTrue);
+    expect(h.connections, hasLength(2));
+  });
+
+  test('a failed punch records why and leaves the tunnel in use', () async {
+    final h = build(connects: false);
+    final used = await h.link.tryConnect({'p2pOffer': _offer, 'p2pOfferTs': 900});
+    expect(used, isFalse);
+    expect(h.link.active, isFalse);
+    expect(h.link.failure, contains('ICE never completed'));
+    expect(h.connections, isEmpty, reason: 'a failed attempt never becomes the live channel');
+  });
+
+  test('a failed offer is not retried on every update, but a new one is', () async {
+    final h = build(connects: false);
+    final doc = {'p2pOffer': _offer, 'p2pOfferTs': 900};
+    await h.link.tryConnect(doc);
+    await h.link.tryConnect(doc);
+    expect(h.attempts, hasLength(1),
+        reason: 'the failed attempt is not repeated for the same offer');
+    expect(await h.link.tryConnect({'p2pOffer': _offer, 'p2pOfferTs': 1000}), isFalse);
+    expect(h.attempts, hasLength(2), reason: 'a new offer is a new attempt');
+  });
+
+  test('reset makes the machine republish answerable again', () async {
+    final h = build();
+    final doc = {'p2pOffer': _offer, 'p2pOfferTs': 900};
+    await h.link.tryConnect(doc);
+    h.link.reset();
+    expect(h.link.active, isFalse);
+    expect(await h.link.tryConnect(doc), isTrue,
+        reason: 'after reset the same offer is answered again');
+  });
+
+  test('a platform without the transport touches nothing', () async {
+    final h = build(available: false);
+    expect(await h.link.tryConnect({'p2pOffer': _offer, 'p2pOfferTs': 900}), isFalse);
+    expect(h.published, isEmpty);
+    expect(h.link.failure, isNull, reason: 'unavailable is not a failure to report');
+  });
+
+  test('a document without a usable offer is not a failure', () async {
+    final h = build();
+    expect(await h.link.tryConnect(null), isFalse);
+    expect(await h.link.tryConnect({}), isFalse);
+    expect(await h.link.tryConnect({'p2pOffer': 'garbage', 'p2pOfferTs': 900}), isFalse);
+    expect(h.published, isEmpty);
+    expect(h.link.failure, isNull);
+  });
+}
