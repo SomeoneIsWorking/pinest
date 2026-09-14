@@ -107,6 +107,7 @@ class AgentService extends ChangeNotifier {
 
   /// Why the machine cannot read this app's answer, in its own words.
   String? _signalingError;
+  String? _signalingMode;
 
   /// What the machine says it read back about THIS browser, from the `client`
   /// field of the state it sends. The machine's half of a diagnosis is in
@@ -199,6 +200,11 @@ class AgentService extends ChangeNotifier {
   /// machine that cannot read never receives an answer - and both looked like
   /// "offline" from here.
   String? get machineSignalingError => _signalingError;
+
+  /// How the machine learns this app's answer — "push" when it watches the
+  /// document, "poll" when it reads it on a timer. A fallback nobody can see is
+  /// how a metered path gets exhausted twice, so it is part of the status.
+  String? get machineSignalingMode => _signalingMode;
 
   Future<void> _writeClientReport(Map<String, dynamic> payload) async {
     final uid = _boundUid;
@@ -579,6 +585,7 @@ class AgentService extends ChangeNotifier {
         _machineSeesClient = (msg['client'] as Map?)?['summary'] as String?;
         _presenceError = (msg['presenceError'] as String?)?.trim();
         _signalingError = (msg['signalingError'] as String?)?.trim();
+        _signalingMode = (msg['signalingMode'] as String?)?.trim();
         _localEndpoint = secureLoopbackUri(msg['localUrl']);
         _tunnelUrl = msg['tunnelUrl'] as String?;
         _tunnelProvider = msg['tunnelProvider'] as String?;

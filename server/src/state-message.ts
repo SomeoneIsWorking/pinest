@@ -27,6 +27,7 @@ export interface StateSnapshot {
   presenceError: string | null;
   /** Why this machine cannot read the app's answer, when that is failing. */
   signalingError: string | null;
+  signalingMode: string | null;
 }
 
 export function buildStateMessage(snapshot: StateSnapshot): ServerMessage {
@@ -48,6 +49,7 @@ export function buildStateMessage(snapshot: StateSnapshot): ServerMessage {
     client: snapshot.client,
     presenceError: snapshot.presenceError,
     signalingError: snapshot.signalingError,
+    signalingMode: snapshot.signalingMode,
   };
 }
 

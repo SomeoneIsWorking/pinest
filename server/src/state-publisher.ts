@@ -30,6 +30,7 @@ export interface StatePublisherDeps {
   presenceError: () => string | null;
   /** Why this machine cannot read the app's answer, when reading is failing. */
   signalingError: () => string | null;
+  signalingMode: () => string | null;
   /** Cheap synchronous usage overlay, applied before each state message. */
   refreshUsage: () => void;
   send: (message: ServerMessage) => void;
@@ -104,6 +105,7 @@ export class StatePublisher {
       client: this.deps.client(),
       presenceError: this.deps.presenceError(),
       signalingError: this.deps.signalingError(),
+      signalingMode: this.deps.signalingMode(),
     });
   }
 

@@ -13,7 +13,8 @@
  */
 
 import debug from "./log.ts";
-import type { ClientReport } from "./client-report.ts";
+import { CLIENT_REPORT_FIELD, parseClientReport, type ClientReport } from "./client-report.ts";
+import type { DiscoveryWatch } from "./discovery-watch.ts";
 
 /** An answer as it was written: a description plus the offer it describes.
  *
@@ -22,6 +23,11 @@ import type { ClientReport } from "./client-report.ts";
  * a perfectly good answer gets refused: the answer arrives with an earlier
  * timestamp than the offer it answers, and the punch fails with nothing said.
  * Identity cannot skew. */
+/** The fields the app writes its answer into. Named here because this module
+ * owns the answer half of the document contract. */
+export const ANSWER_FIELD = "p2pAnswer";
+export const ANSWER_OFFER_FIELD = "p2pAnswerOfferTs";
+
 export interface SignalingAnswer {
   sdp: string;
   /** The offer this answer describes, or null when the writer named none - an
@@ -30,30 +36,16 @@ export interface SignalingAnswer {
   offerTs: number | null;
 }
 
-/** What one read of the discovery document yields.
- *
- * ONE read, because the document is metered: the machine reads it on a timer and
- * every extra read is paid for out of a daily allowance. Measured live, an
- * exhausted Firestore quota is what a silently failing punch looks like from
- * both ends at once. */
-export interface DiscoveryRead {
-  answer: SignalingAnswer | null;
-  report: { report: ClientReport } | { problem: string } | null;
-}
-
 export interface P2PSignalingDeps {
   /** Merge the offer into the owner's discovery doc. */
   writeOffer(sdp: string, ts: number): Promise<void>;
-  /** Read the app's answer and its own report in ONE document read. */
-  readDiscovery(): Promise<DiscoveryRead>;
-  /** How often to read while a punch is in flight (an offer is published and
-   * unanswered). Slow while idle: the document is metered. */
-  pollMs?: number;
-  /** How often to read once the punch has had its chance. */
-  idlePollMs?: number;
-  /** How long an offer is worth polling fast for (an exchange's own lifetime,
-   * plus the time an answer takes to travel). */
-  hotWindowMs?: number;
+  /**
+   * Watch the discovery document: PUSH when a listener can be opened, and a
+   * paced poll only where none can. This is the whole cost decision - a read
+   * every two seconds is 43,200 a day and most of a free project's allowance -
+   * so the watch owns it rather than this module owning a timer.
+   */
+  watch: DiscoveryWatch;
 }
 
 export interface P2PSignaling {
@@ -63,8 +55,8 @@ export interface P2PSignaling {
   publishOffer(sdp: string, ts: number): Promise<void>;
   /** Called at most once per exchange, with an answer that names THIS offer. */
   onAnswer(handler: (sdp: string) => void): void;
-  /** Called on every poll with what the app last said about itself, or with the
-   * reason its report could not be read. */
+  /** Called with what the app last said about itself, on every delivery, or
+   * with the reason its report could not be read. */
   onReport(handler: (seen: { report: ClientReport } | { problem: string } | null) => void): void;
   /** Why this machine cannot READ the discovery document, if it cannot.
    *
@@ -73,12 +65,13 @@ export interface P2PSignaling {
    * presence. Measured live, that was an exhausted Firestore quota, and it was
    * completely invisible. */
   readError(): string | null;
+  /** How this machine learns about changes: "push" or "poll".
+   *
+   * A fallback nobody can see is how a metered path gets exhausted twice, so
+   * which mechanism is in play is part of the status, not a log line. */
+  watchMode(): "push" | "poll";
   stop(): void;
 }
-
-const DEFAULT_POLL_MS = 2_000;
-const DEFAULT_IDLE_POLL_MS = 15_000;
-const DEFAULT_HOT_WINDOW_MS = 90_000;
 
 /** A description this peer can be asked to apply. */
 export function looksLikeSdp(value: unknown): value is string {
@@ -93,31 +86,40 @@ export function createP2PSignaling(deps: P2PSignalingDeps): P2PSignaling {
   const reportHandlers: ((seen: { report: ClientReport } | { problem: string } | null) => void)[] = [];
   let liveOfferTs = 0;
   let delivered = false;
-  /** The last nameless-or-mismatched answer reported, so a poll every two
-   * seconds does not repeat the same complaint forever. */
+  /** The last nameless-or-mismatched answer reported, so a document that keeps
+   * saying the same wrong thing does not repeat the complaint forever. */
   let reported: number | null | undefined;
   let reportedGarbage = false;
-  let timer: NodeJS.Timeout | undefined;
+  let watching = false;
   let lastReadError: string | null = null;
 
-  const poll = async (): Promise<void> => {
-    let read: DiscoveryRead;
-    try {
-      read = await deps.readDiscovery();
-      if (lastReadError !== null) {
-        lastReadError = null;
-      }
-    } catch (error) {
-      // A failed read is kept, not just logged: it is the difference between
-      // "the app is not answering" and "this machine cannot look", and only one
-      // of those is a problem the operator can act on.
-      lastReadError = (error as Error).message;
-      debug(`[pinest] p2p signaling: discovery read failed: ${lastReadError}`);
+  /** Begin delivering discovery updates. One watch, however many offers are
+   * published through it: the watch is the document's delivery, not an
+   * exchange's. */
+  const start = (): void => {
+    if (watching) {
       return;
     }
-    for (const handler of reportHandlers) handler(read.report);
-    const answer = read.answer;
-    if (!answer) return;
+    watching = true;
+    deps.watch.start(onDiscovery);
+  };
+
+  /** One delivery from the watch: the document as it now stands. */
+  const onDiscovery = (read: { data: Record<string, unknown> | null }): void => {
+    lastReadError = deps.watch.error();
+    const data = read.data;
+    // Both halves of the document are interpreted where they are owned: the
+    // report by the module that defines it, the answer here.
+    for (const handler of reportHandlers) {
+      handler(parseClientReport(data?.[CLIENT_REPORT_FIELD]));
+    }
+    const sdp = data?.[ANSWER_FIELD];
+    if (typeof sdp !== "string") return;
+    const named = data?.[ANSWER_OFFER_FIELD];
+    const answer: SignalingAnswer = {
+      sdp,
+      offerTs: typeof named === "number" ? named : null,
+    };
     if (!looksLikeSdp(answer.sdp)) {
       // Feed a malformed description to the peer and it stalls much later with
       // no explanation. Report it once per exchange rather than every poll.
@@ -138,42 +140,11 @@ export function createP2PSignaling(deps: P2PSignalingDeps): P2PSignaling {
       }
       return;
     }
-    // One answer per exchange: a repeated poll of what is already in the doc is
-    // not a new answer, and applying it twice is refused by the peer anyway.
+    // One answer per exchange: the same answer redelivered by the watch is not
+    // a new answer, and applying it twice is refused by the peer anyway.
     if (delivered) return;
     delivered = true;
     for (const handler of handlers) handler(answer.sdp);
-  };
-
-  const hotPollMs = deps.pollMs ?? DEFAULT_POLL_MS;
-  const idlePollMs = deps.idlePollMs ?? DEFAULT_IDLE_POLL_MS;
-  const hotWindowMs = deps.hotWindowMs ?? DEFAULT_HOT_WINDOW_MS;
-
-  /** The wait before the next read.
-   *
-   * An offer that has just been published may be answered any second, and that
-   * answer is what makes a direct connection possible - so that window is read
-   * every couple of seconds. Once the punch has had its chance there is nothing
-   * to learn from reading faster, and the document is metered: measured, two
-   * reads every two seconds is 86,400 reads a day against an allowance of
-   * 50,000, which blinds the machine and the app with quota errors. */
-  const nextDelay = (): number => {
-    if (delivered || !liveOfferTs) return idlePollMs;
-    return Date.now() - liveOfferTs < hotWindowMs ? hotPollMs : idlePollMs;
-  };
-
-  const schedule = (): void => {
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => {
-      timer = undefined;
-      void poll().finally(schedule);
-    }, nextDelay());
-    timer.unref?.();
-  };
-
-  const start = (): void => {
-    if (timer) return;
-    schedule();
   };
 
   return {
@@ -193,10 +164,14 @@ export function createP2PSignaling(deps: P2PSignalingDeps): P2PSignaling {
     onReport: (handler) => {
       reportHandlers.push(handler);
     },
-    readError: () => lastReadError,
+    // The watch's own complaint is authoritative: a listener that died with
+    // nothing arriving would otherwise leave `lastReadError` stale at null, and
+    // "no reason" is exactly the silence this exists to remove.
+    readError: () => deps.watch.error() ?? lastReadError,
+    watchMode: () => deps.watch.mode,
     stop: () => {
-      if (timer) clearTimeout(timer);
-      timer = undefined;
+      deps.watch.stop();
+      watching = false;
       handlers.length = 0;
       reportHandlers.length = 0;
     },
