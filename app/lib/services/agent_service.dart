@@ -7,6 +7,7 @@ import 'notification_bridge.dart';
 import 'image_store.dart';
 import 'outgoing_queue.dart';
 import 'direct_channel.dart';
+import 'direct_link.dart';
 import 'control_channel.dart';
 import '../logic/direct_offer.dart';
 import 'server_http.dart';
@@ -235,7 +236,7 @@ class AgentService extends ChangeNotifier {
             // is tried first when the machine offers one. A failure is not
             // silent: it is recorded and the tunnel endpoint is used, and a
             // machine with no tunnel at all is still reachable this way.
-            if (await _tryDirect(data)) return;
+            if (await _direct.tryConnect(data)) return;
             if (endpoint == null) {
               _transitionToDisconnected(forgetEndpoint: true, notify: false);
               notifyListeners();
@@ -255,65 +256,20 @@ class AgentService extends ChangeNotifier {
         );
   }
 
-  /// Answer the machine's offer when discovery carries a fresh one.
-  ///
-  /// Returns whether a direct channel is now in use. The answer is published to
-  /// the same document the offer came from, so the machine completes the
-  /// exchange without either side polling anything new.
-  Future<bool> _tryDirect(Map<String, dynamic> discovery) async {
-    if (!directTransportAvailable) return false;
-    final offer = offerToAnswer(
-      discovery,
-      now: DateTime.now().millisecondsSinceEpoch,
-      answeredTs: _answeredOfferTs,
-    );
-    if (offer == null) return false;
-    final uid = _boundUid;
-    if (uid == null) return false;
-    // Keep the existing tunnel channel until the direct one is actually open: a
-    // punch that fails must not cost the connection the app already had.
-    _answeredOfferTs = offer.ts;
-    try {
-      final channel = await connectDataChannel(
-        offerSdp: offer.sdp,
-        iceServers: kDirectIceServers,
-        publishAnswer: (sdp) => _db
-            .collection('users')
-            .doc(uid)
-            .set(answerFields(sdp, DateTime.now().millisecondsSinceEpoch),
-                SetOptions(merge: true)),
-      );
-      if (_boundUid != uid) {
-        channel.close();
-        return false;
-      }
-      _directFailure = null;
-      await _dialChannel(channel, isDirect: true);
-      return true;
-    } catch (e) {
-      // Report it: "the machine is not reachable directly" is information the
-      // user needs, and hiding it would look like an unexplained fallback.
-      _directFailure = '$e';
-      notifyListeners();
-      return false;
-    }
-  }
-
   /// Dial the tunnel URL. Safe to call repeatedly — skips if already
   /// connected or connecting to the same URL.
   Future<void> _dial(Uri endpoint) async {
     if (_ws?.endpoint == endpoint) return;
     _transitionToDisconnected();
-    await _dialChannel(WebSocketConnection(endpoint), isDirect: false);
+    await _dialChannel(WebSocketConnection(endpoint));
   }
 
   /// Open a channel and wire it to this service. The transport is irrelevant
   /// here: both carry the same frames, authenticate the same way, and reconnect
   /// the same way.
-  Future<void> _dialChannel(ControlChannel socket, {required bool isDirect}) async {
+  Future<void> _dialChannel(ControlChannel socket) async {
     _transitionToDisconnected();
     _ws = socket;
-    _direct = isDirect;
     await socket.connect(
       token: _token,
       onMessage: (message) {
@@ -784,18 +740,25 @@ class AgentService extends ChangeNotifier {
   /// until the server reports a different port.
   Uri? _localFailed;
 
-  /// Whether the live channel is a direct (peer-to-peer) one. Actions then go
-  /// over that channel: there is no HTTP origin to send them to, and routing
-  /// them through a tunnel would put a third party back in the data path.
-  bool _direct = false;
-
-  /// The offer timestamp already answered, so a document update that repeats
-  /// the same offer does not start a second exchange.
-  int? _answeredOfferTs;
-
-  /// Why the last direct attempt failed, if one did. Reported, never hidden:
-  /// the user is otherwise looking at a tunnel they did not choose.
-  String? _directFailure;
+  /// The direct (no-tunnel) transport: which offer to answer, and why an
+  /// attempt failed. Actions ride the channel while it is active, because a
+  /// direct link has no HTTP origin and a tunnel would put a third party back
+  /// in the data path.
+  late final DirectLink _direct = DirectLink(
+    connect: connectDataChannel,
+    iceServers: kDirectIceServers,
+    available: () => directTransportAvailable,
+    publishAnswer: (sdp, writtenAt) {
+      final uid = _boundUid;
+      if (uid == null) throw StateError('no uid to publish an answer for');
+      return _db
+          .collection('users')
+          .doc(uid)
+          .set(answerFields(sdp, writtenAt), SetOptions(merge: true));
+    },
+    open: (channel) => _dialChannel(channel),
+    onChanged: notifyListeners,
+  );
 
   /// The HTTP half of this channel: images and actions, over the origin the
   /// socket actually reached.
@@ -827,7 +790,7 @@ class AgentService extends ChangeNotifier {
   /// direct channel they are requested as a command and arrive as a push; over
   /// the tunnel they are an HTTP request to the tunnel origin.
   late final ImageStore images = ImageStore((imageId) {
-    if (_direct) {
+    if (_direct.active) {
       _send({'type': 'get_image', 'imageId': imageId});
       return;
     }
@@ -838,7 +801,7 @@ class AgentService extends ChangeNotifier {
     // Over a direct channel there is no HTTP origin to reach: a third party in
     // the data path is exactly what the direct transport exists to avoid. The
     // frames are the same ones the tunnel carries.
-    if (_direct) {
+    if (_direct.active) {
       _ws?.send({'type': 'command', 'cmd': cmd});
       return;
     }
@@ -853,10 +816,10 @@ class AgentService extends ChangeNotifier {
 
   /// Whether the live channel reaches the machine directly, with no third party
   /// in the data path.
-  bool get directConnection => _direct;
+  bool get directConnection => _direct.active;
 
   /// Why the last direct attempt failed, if it did.
-  String? get directFailure => _directFailure;
+  String? get directFailure => _direct.failure;
 
   /// Mark the tracked send that matches this command as refused, with its reason.
   void _failSend(Map<String, dynamic> cmd, String reason) {
@@ -983,8 +946,33 @@ class AgentService extends ChangeNotifier {
       _send({'type': 'session_compact', 'sessionId': s.id});
   void listModels(Session s) =>
       _send({'type': 'list_models', 'sessionId': s.id});
-  void getHistory(Session s, {int? cursor}) =>
+  /// Ask for a session's history.
+  ///
+  /// History is a read with an answer, so it goes over HTTP and the reply is
+  /// the same frame the socket would have pushed - applied through the same
+  /// parser, so the two transports cannot disagree about what history means. A
+  /// direct channel has no HTTP origin, so there the request rides the channel.
+  void getHistory(Session s, {int? cursor}) {
+    if (_direct.active) {
       _send({'type': 'get_history', 'sessionId': s.id, 'cursor': ?cursor});
+      return;
+    }
+    unawaited(_fetchHistory(s.id, cursor: cursor));
+  }
+
+  Future<void> _fetchHistory(String sessionId, {int? cursor}) async {
+    final result = await _http.fetchHistory(sessionId: sessionId, cursor: cursor);
+    if (result.frame == null) {
+      _notices.add(ServerNotice(
+        'Could not load history for this session: ${result.error}',
+        isError: true,
+        sessionId: sessionId,
+      ));
+      return;
+    }
+    // The reply is a history frame; the socket path is untouched.
+    _onWSMessage(result.frame!);
+  }
 
   /// Drop everything pi still has queued for this session (steers + follow-ups).
   void clearQueue(Session s) =>

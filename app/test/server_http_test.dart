@@ -165,6 +165,91 @@ void main() {
     expect(sink.offline.length, 2);
   });
 
+  test('history is requested over HTTP and answered with the frame', () async {
+    final sink = RecordingSink();
+    Uri? sawUrl;
+    String? sawBody;
+    final service = build(
+      sink,
+      endpoint: Uri.parse('wss://host.example/ws'),
+      key: 'k',
+      client: MockClient((request) async {
+        sawUrl = request.url;
+        sawBody = request.body;
+        return http.Response(
+          json.encode({
+            'type': 'history',
+            'sessionId': 'abcdef12',
+            'history': [
+              {'role': 'user', 'text': 'hi'},
+            ],
+            'mode': 'replace',
+            'cursor': 1,
+            'hasMore': false,
+          }),
+          200,
+        );
+      }),
+    );
+
+    final result = await service.fetchHistory(sessionId: 'abcdef12', cursor: 3);
+
+    expect(sawUrl, Uri.parse('https://host.example/history'));
+    expect(json.decode(sawBody!), {'sessionId': 'abcdef12', 'cursor': 3});
+    expect(result.error, isNull);
+    expect(result.frame!['type'], 'history');
+    expect((result.frame!['history'] as List).single['text'], 'hi');
+  });
+
+  test('a history request without a cursor omits it', () async {
+    final sink = RecordingSink();
+    String? sawBody;
+    final service = build(
+      sink,
+      endpoint: Uri.parse('wss://host.example'),
+      key: 'k',
+      client: MockClient((request) async {
+        sawBody = request.body;
+        return http.Response(json.encode({'type': 'history', 'sessionId': 'a'}), 200);
+      }),
+    );
+    await service.fetchHistory(sessionId: 'a');
+    expect(json.decode(sawBody!), {'sessionId': 'a'});
+  });
+
+  test('a failed history request reports why instead of reading as empty', () async {
+    final sink = RecordingSink();
+    final service = build(
+      sink,
+      endpoint: Uri.parse('wss://host.example'),
+      key: 'k',
+      client: MockClient((_) async => http.Response(json.encode({'error': 'no session x'}), 404)),
+    );
+    final result = await service.fetchHistory(sessionId: 'x');
+    expect(result.frame, isNull);
+    expect(result.error, 'HTTP 404: no session x');
+  });
+
+  test('a history request without a connection says so', () async {
+    final sink = RecordingSink();
+    final result = await build(sink).fetchHistory(sessionId: 'x');
+    expect(result.frame, isNull);
+    expect(result.error, 'not connected yet');
+  });
+
+  test('a body that is not a frame is refused rather than applied', () async {
+    final sink = RecordingSink();
+    final service = build(
+      sink,
+      endpoint: Uri.parse('wss://host.example'),
+      key: 'k',
+      client: MockClient((_) async => http.Response('null', 200)),
+    );
+    final result = await service.fetchHistory(sessionId: 'x');
+    expect(result.frame, isNull);
+    expect(result.error, 'HTTP 200 with an unusable body');
+  });
+
   test('a transport failure is a refusal with the error, not silence', () async {
     final sink = RecordingSink();
     final service = build(
