@@ -36,7 +36,30 @@ cited), `partial`, `blocked`, `missing`. One current focus at the bottom.
 | S19 | A session states it has no context budget, so agents do not invent one and stop | partial | S1, S5 | G1, G4 |
 | S20 | The objective belongs to the session it was set for, and shows only on that tab | verified | S1, S8 | G1, G2 |
 | S21 | Instructions the harness injects are never shown as the user's own words | verified | S6, S9 | G1 |
+| S22 | The host terminal lists its sessions, opens any of them, and prompts it from there | partial | S1, S8, S9 | G1, G2 |
 Atomic work and findings live in `docs/issues/`.
+
+### S22 — Host terminal session views
+
+The host terminal has its own two views, on Pi's own components rather than hand-drawn text: a
+session list built on `SelectList` (sized to the terminal with its own scroll indicator,
+type-to-filter over name/id/directory/model/status, an action menu per row, and a kill that asks
+again), and an overlay that renders another session's transcript with Pi's own message components
+inside a windowed `ScrollView` (PgUp/PgDn/Home/End/Ctrl-U/Ctrl-D, a scrollbar, and the newest output
+following the end), prompts it through Pi's own `CustomEditor`, and returns to the list on the left
+arrow. Sending goes through the ONE owner of a user message (`session-submit.ts`), so the TUI, the
+host session and the app cannot disagree about what "sent" means; a send that cannot be delivered is
+shown rather than swallowed.
+
+Evidence: 18 rendered-line tests for the attach view (including a transcript taller than the overlay
+keeping the prompt on screen and in the newest position, scrolling, back-on-left-arrow, and the
+disposed-view contract), 17 for the list, and 2 end-to-end flow tests (list → open a chosen session →
+prompt it → left arrow back → close). Both key mechanisms were verified to FAIL when broken: dropping
+the chosen session's id, and rendering the transcript unwindowed.
+
+Gap: only the operator can see the real terminal, so this is confirmed by rendered lines and not yet
+by a person using it in a live TUI; a real terminal is also where the wheel, the key delivery, and
+a genuinely narrow window would be qualified.
 
 ### S8 — Remote session lifecycle
 
@@ -205,10 +228,26 @@ reads a day against a free allowance of 50,000, and the machine's presence write
 every 20 seconds is another 4,320 - so the allowance ran out, the machine could
 not read the app's answer, the app could not read the machine's presence, and the
 result was a punch that failed with a 1008 timeout at one end and "Machine online,
-not reachable" at the other (issue #57). One read now yields both halves, the poll
-is fast only while an answer can still arrive, the app's report is floored at one
-write per five seconds with a 30-second heartbeat, and presence is republished
-every 40 seconds instead of every 20.
+not reachable" at the other (issue #57). One read now yields both halves, the app's
+report is floored at one write per five seconds with a 30-second heartbeat, and
+presence is republished every 40 seconds instead of every 20.
+
+The machine's half of that exchange is no longer a poll at all. The app already
+pushed (the web SDK's `snapshots()` delivers per change); the machine read the
+document on a timer only because the Firestore REST API has no listen endpoint.
+It now watches with `firebase-admin`'s `onSnapshot`
+(`server/src/discovery-watch.ts` owns which watch, `server/src/firestore-listen.ts`
+owns the SDK call, and signaling takes a watch instead of a read), so a document
+change is delivered rather than polled for: one read per change, and none while
+nothing changes. Measured live before landing: `npm run verify:push` opened the
+real listener, took the initial snapshot (13 fields), wrote `clientReload`
+through the REST API and received it as delivery #4, with the watch's own read
+path wired to fail loudly so a delivery could not be a poll in disguise
+(`tools/verify_push_signaling.py` also refuses a RUNNING host that reports
+`signalingMode: poll`). A hosted install has no service account to listen with -
+`firebase-admin` will not take the owner's refresh token for Firestore - so the
+paced poll remains there as the declared fallback, and the status names which one
+is in play rather than leaving it to be assumed.
 
 Gap: the direct transport is browser-only (a Dart VM has no ICE stack here), the
 tunnel stays in use until a direct channel is actually open, and travel across a

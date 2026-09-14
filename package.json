@@ -15,7 +15,8 @@
     "test:structure": "python3 -m unittest discover -s tools -p \"test_*.py\" && python3 tools/check_structure.py",
     "typecheck": "tsc --noEmit -p server/tsconfig.json",
     "test:hazards": "python3 ../shared/re-harness/tools/agent_hazards.py --root .",
-    "verify:direct": "node server/scripts/verify-direct-transport.ts"
+    "verify:direct": "node server/scripts/verify-direct-transport.ts",
+    "verify:push": "node server/scripts/check-discovery-watch.ts"
   },
   "dependencies": {
     "@silvia-odwyer/photon-node": "0.3.4",

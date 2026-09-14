@@ -1,223 +1,386 @@
 /**
- * Attach view — an overlay that opens a headless supervisor session inside
- * the running pi so the user can see its transcript and prompt it directly.
+ * Attach view — another session of this machine, rendered the way Pi renders its
+ * own, with a prompt that actually sends.
  *
- * Rendered via ctx.ui.custom(factory, { overlay: true }). The factory builds a
- * Container (header Text + transcript lines + footer Input) following the same
- * pattern as the SDK's examples.
+ * Three things were wrong with the previous version, and each one was invisible
+ * from inside it:
  *
- * Detach (Esc) closes the overlay but leaves the session alive in the
- * supervisor — it returns to headless background operation.
+ *   * It called `session.prompt()` directly with an empty `.catch()`. While the
+ *     session was busy, pi rejects that ("streamingBehavior is required"), so
+ *     typing a command did NOTHING and said nothing. Sending now goes through
+ *     the one owner of "a user message to a session" (`session-submit.ts`), the
+ *     same one the app uses, and a refusal is shown.
+ *   * The transcript was hand-drawn text lines. It is now Pi's own components
+ *     (`session-transcript.ts`), inside a `ScrollView`, so markdown, diffs,
+ *     thinking blocks and tool output look like the session they came from.
+ *   * There was no scrolling and no way back except closing the whole overlay.
+ *     PgUp/PgDn/Home/End/Ctrl-U/Ctrl-D scroll the transcript, and leaving on the
+ *     LEFT ARROW goes back to the sessions list (Esc still detaches).
  *
- * The transcript is rendered manually with Text lines (the SDK's
- * AssistantMessageComponent etc. are not public API). We keep the last N
- * messages to fit the overlay height, rebuilding on each session.subscribe event.
+ * The header always names the session being viewed, so it is never ambiguous
+ * whose turn you are about to send.
  */
-import { Container, Text, Input, matchesKey } from "@earendil-works/pi-tui";
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import { extractText } from "./logic.ts";
+import {
+  Key,
+  ScrollView,
+  Text,
+  matchesKey,
+  truncateToWidth,
+  visibleWidth,
+  type TUI,
+} from "@earendil-works/pi-tui";
+import { CustomEditor, rawKeyHint } from "@earendil-works/pi-coding-agent";
+import type { KeybindingsManager } from "@earendil-works/pi-coding-agent";
 
-const MAX_TRANSCRIPT_LINES = 1000;
+import { SessionTranscript, sourcesForSession } from "./session-transcript.ts";
+import type { TranscriptSession } from "./session-transcript.ts";
 
-interface AttachSnapshot {
-  name?: string;
-  cwd?: string;
-  status?: string;
+export interface AttachSessionEntry {
+  /** The live agent session being viewed. */
+  session: TranscriptSession & {
+    subscribe: (listener: (event: any) => void) => () => void;
+    prompt?: (text: string, options?: unknown) => Promise<void>;
+  };
+  name: string;
+  cwd: string;
+  status: string;
   model?: string | null;
   modelName?: string | null;
+  /** The one way a user message reaches this session. */
+  submit: (text: string) => { delivered: boolean; queued: boolean };
 }
 
-interface AttachTheme {
-  fg?: (color: string, s: string) => string;
-  bold?: (s: string) => string;
-  [key: string]: unknown;
+export interface AttachViewOptions {
+  entry: AttachSessionEntry;
+  theme: any;
+  tui: TUI;
+  keybindings: KeybindingsManager;
+  /** Leave for the sessions list. */
+  onBack: () => void;
+  /** Close the overlay entirely. */
+  onDetach: () => void;
 }
 
-interface AttachTui {
-  requestRender?: () => void;
-  [key: string]: unknown;
+/** One line of the transcript per message, plus the prompt. */
+export function createAttachView(opts: AttachViewOptions): AttachComponent {
+  return new AttachView(opts);
 }
 
-interface AttachComponent {
+export interface AttachComponent {
   render(width: number): string[];
   invalidate(): void;
   handleInput(data: string): void;
-  dispose?(): void;
-  [key: string]: unknown;
+  dispose(): void;
 }
 
-export function createAttachView(opts: {
-  session: AgentSession;
-  snapshot: AttachSnapshot;
-  theme?: AttachTheme;
-  tui?: AttachTui;
-  onDone: () => void;
-}): AttachComponent {
-  const { session, snapshot, onDone } = opts;
-  const t = opts.theme ?? {};
-  const tui = opts.tui;
-  // theme.fg(color, str) / theme.bold(str) per the SDK; safe fallback if color is unknown or throws.
-  const fg = (c: string, s: string): string => {
-    if (typeof t.fg !== "function") return s;
-    try {
-      return t.fg(c, s);
-    } catch {
-      return s;
+class AttachView implements AttachComponent {
+  private readonly transcript: SessionTranscript;
+  private readonly scroll: ScrollView;
+  private readonly editor: CustomEditor;
+  private readonly header: Text;
+  private readonly notice: Text;
+  private readonly unsubscribe: () => void;
+  private status: string;
+  private feedback = "";
+  private disposed = false;
+  private readonly opts: AttachViewOptions;
+
+  constructor(opts: AttachViewOptions) {
+    this.opts = opts;
+    const { entry, tui, keybindings } = opts;
+    this.status = entry.status === "working" ? "working" : "idle";
+
+    this.transcript = new SessionTranscript(
+      sourcesForSession(
+        entry.session,
+        { ui: tui, cwd: entry.cwd, outputPad: 0, expanded: false },
+      ),
+    );
+    this.transcript.rebuild(entry.session.messages ?? []);
+
+    // `follow: "end"` keeps the newest output visible, and the scrollbar is the
+    // indicator that there is more above.
+    this.scroll = new ScrollView(this.transcript.root, {
+      follow: "end",
+      scrollbar: "auto",
+      overscroll: "contain",
+    });
+
+    this.header = new Text("", 0, 0);
+    this.notice = new Text("", 0, 0);
+
+    this.editor = new CustomEditor(tui, editorTheme(opts.theme), keybindings, { paddingX: 0 });
+    this.editor.onSubmit = (text: string) => this.submit(text);
+
+
+    this.unsubscribe = entry.session.subscribe((event: any) => this.onEvent(event));
+    this.updateChrome();
+  }
+
+  private onEvent(event: any): void {
+    if (this.disposed) {
+      return;
     }
-  };
-  const bold = (s: string): string => {
-    if (typeof t.bold !== "function") return s;
-    try {
-      return t.bold(s);
-    } catch {
-      return s;
+    switch (event?.type) {
+      case "message_start":
+        this.transcript.onMessageStart(event.message);
+        break;
+      case "message_update":
+        this.transcript.onMessageUpdate(event.message);
+        break;
+      case "message_end":
+        this.transcript.onMessageEnd(event.message);
+        break;
+      case "tool_execution_start":
+      case "tool_execution_update":
+      case "tool_execution_end":
+        this.transcript.onToolExecution(event);
+        break;
+      case "agent_start":
+        this.status = "working";
+        break;
+      case "agent_end":
+        this.status = "idle";
+        this.transcript.finish();
+        break;
+      default:
+        return;
     }
-  };
+    this.updateChrome();
+    this.opts.tui.requestRender();
+  }
 
-  let disposed = false;
-  let liveStatus = snapshot.status ?? "idle";
-  let pending = ""; // streaming assistant text for live updates
+  private updateChrome(): void {
+    const { entry, theme } = this.opts;
+    // Every colour goes through the guarded helpers: a theme that does not know
+    // a colour name must cost a colour, never the view.
+    const model = entry.modelName ?? entry.model ?? "";
+    const dot = this.status === "working"
+      ? safeFg(theme, "warning", "● working")
+      : safeFg(theme, "muted", "○ idle");
+    const title = safeBold(theme, safeFg(theme, "accent", `● session: ${entry.name}`));
+    const where = safeFg(theme, "muted", truncate(entry.cwd, 40));
+    this.header.setText(
+      `${title}  ${dot}${model ? `  ${safeFg(theme, "muted", model)}` : ""}\n`
+      + `${where}\n`
+      + `${rawKeyHint("←", "sessions")}  ${rawKeyHint("esc", "detach")}  `
+      + `${rawKeyHint("pgup/pgdn", "scroll")}  ${rawKeyHint("enter", "send")}`,
+    );
+    this.notice.setText(this.feedback ? safeFg(theme, "warning", this.feedback) : "");
+  }
 
-  const container = new Container();
+  private submit(text: string): void {
+    const trimmed = text.trim();
+    if (trimmed.length === 0) {
+      return;
+    }
+    let result: { delivered: boolean; queued: boolean };
+    try {
+      result = this.opts.entry.submit(trimmed);
+    } catch (error) {
+      this.feedback = `not sent: ${(error as Error).message}`;
+      this.updateChrome();
+      this.opts.tui.requestRender();
+      return;
+    }
+    if (!result.delivered) {
+      this.feedback = "not sent: this session cannot take a prompt yet (it is still starting up)";
+      this.updateChrome();
+      this.opts.tui.requestRender();
+      return;
+    }
+    this.editor.addToHistory(trimmed);
+    this.editor.setText("");
+    this.feedback = result.queued ? "queued: the session is mid-run" : "";
+    this.status = "working";
+    this.updateChrome();
+    this.opts.tui.requestRender();
+  }
 
-  // ── Footer input ──────────────────────────────────────────────────────
-  const input = new Input();
-  (input as any).onEscape = () => detach();
-  (input as any).onSubmit = (text: string) => {
-    const v = (text || "").trim();
-    if (!v) return;
-    (input as any).setValue("");
-    // Fire-and-forget: don't block the input on the LLM call.
-    liveStatus = "working";
-    rebuild();
-    tui?.requestRender?.();
-    session.prompt(v).catch(() => {});
-  };
+  render(width: number): string[] {
+    // An overlay is rendered by the host as one component at one width, and the
+    // host then SLICES the result to the overlay's height. The layout engine
+    // that normally gives a ScrollView its viewport does not run for an overlay
+    // (measured: the whole transcript was drawn and the bottom was cut off,
+    // taking the prompt with it - which is why typing into a session appeared
+    // impossible). So the window is cut here, with Pi's own ScrollView owning
+    // the scroll position, the clamping and the follow-the-end behaviour, and a
+    // one-column bar drawn beside it.
+    const height = this.viewportHeight(width);
+    const contentWidth = Math.max(10, this.scroll.getContentWidth(width) - 1);
+    const content = this.transcript.root.render(contentWidth);
+    this.scroll.updateLayout(content.length, height, () => {
+      this.opts.tui.requestRender();
+    });
 
-  // ── Live updates from the session ─────────────────────────────────────
-  // Separate subscription from the supervisor's (which drives WebSocket
-  // broadcast). Both coexist; we dispose ours on detach.
-  const unsub = session.subscribe((event: any) => {
-    if (event?.type === "message_update") {
-      const ae = event.assistantMessageEvent;
-      if (ae?.type === "text_delta") {
-        pending += ae.delta;
+    const out: string[] = [];
+    out.push(...this.header.render(width));
+    const from = this.scroll.scrollTop;
+    const window = content.slice(from, from + height);
+    const bar = scrollbar(content.length, height, from);
+    for (let i = 0; i < height; i += 1) {
+      const line = window[i];
+      if (line === undefined) {
+        out.push(bar === null ? "" : ` ${bar[i] ?? " "}`);
+        continue;
       }
-    } else if (event?.type === "agent_end") {
-      liveStatus = "idle";
-      pending = "";
-    } else if (event?.type === "message_start" || event?.type === "message_end") {
-      pending = "";
+      out.push(bar === null ? line : `${padTo(line, contentWidth)} ${bar[i] ?? " "}`);
     }
-    rebuild();
-    tui?.requestRender?.();
-  });
-
-  // ── Build the container children from current state ───────────────────
-  function rebuild(): void {
-    container.clear();
-
-    // Header
-    const statusBadge = liveStatus === "working" ? "⚡ working" : "○ idle";
-    container.addChild(new Text(
-      bold(fg("accent", `● ${snapshot.name ?? "session"}`)) +
-      `  ${statusBadge}  ${snapshot.modelName ?? snapshot.model ?? ""}` +
-      `  ${fg("muted", "Esc / ← to back")}`,
-    ));
-
-    // Transcript
-    const lines = renderTranscript((session as any).messages ?? [], pending, fg);
-    const shown = lines.slice(-MAX_TRANSCRIPT_LINES);
-    for (const line of shown) {
-      container.addChild(new Text(line));
-    }
-
-    // Input prompt
-    container.addChild(new Text(fg("accent", bold("› prompt:"))));
-    container.addChild(input);
+    out.push("");
+    out.push(...this.editor.render(width));
+    out.push(...this.notice.render(width));
+    return out;
   }
 
-  function detach(): void {
-    if (disposed) return;
-    try { unsub?.(); } catch { /* */ }
-    onDone();
+  /** Rows the transcript may use: the terminal's height (or the overlay's
+   * share of it), less the fixed chrome the viewer must always see - the
+   * header, the prompt and the notice line. */
+  private viewportHeight(width: number): number {
+    const rows = this.opts.tui?.terminal?.rows ?? 24;
+    const overlay = Math.max(8, Math.floor(rows * 0.92));
+    const editorLines = this.editor.render(width).length;
+    const chrome = this.header.render(width).length + 1 /* spacer */ + editorLines + 1 /* notice */ + 1;
+    return Math.max(3, overlay - chrome);
   }
 
-  rebuild();
+  invalidate(): void {
+    this.transcript.root.invalidate();
+    this.header.invalidate();
+    this.notice.invalidate();
+    this.editor.invalidate();
+  }
 
+  handleInput(data: string): void {
+    // A disposed overlay must be inert: its session subscription is gone, so
+    // acting on input would leave the flow in a state nothing can repair.
+    if (this.disposed) {
+      return;
+    }
+    // Leaving: left arrow with an empty prompt returns to the sessions list,
+    // Esc closes the overlay. Checked BEFORE the editor sees the key, so the
+    // arrow does not move the cursor instead. A double escape (some terminals
+    // send it as one sequence) also leaves.
+    const empty = this.editor.getText().length === 0;
+    if (matchesKey(data, Key.left) && empty) {
+      this.opts.onBack();
+      return;
+    }
+    if ((matchesKey(data, Key.escape) || data === "\x1b\x1b") && empty) {
+      this.opts.onDetach();
+      return;
+    }
+    // Scrolling, which the editor would otherwise swallow as cursor movement.
+    const scrolled = this.scrollBy(data);
+    if (scrolled !== null) {
+      this.opts.tui.requestRender();
+      return;
+    }
+    this.editor.handleInput(data);
+    this.opts.tui.requestRender();
+  }
+
+  /** Scroll by one key press, or null when the key is not a scroll key. */
+  private scrollBy(data: string): number | null {
+    if (matchesKey(data, Key.pageUp)) {
+      return this.scroll.scrollBy(-10);
+    }
+    if (matchesKey(data, Key.pageDown)) {
+      return this.scroll.scrollBy(10);
+    }
+    if (matchesKey(data, Key.home)) {
+      this.scroll.scrollToStart();
+      return 0;
+    }
+    if (matchesKey(data, Key.end)) {
+      this.scroll.scrollToEnd();
+      return 0;
+    }
+    if (matchesKey(data, Key.ctrl("u"))) {
+      return this.scroll.scrollBy(-10);
+    }
+    if (matchesKey(data, Key.ctrl("d"))) {
+      return this.scroll.scrollBy(10);
+    }
+    return null;
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    try {
+      this.unsubscribe();
+    } catch {
+      /* the session may already be gone */
+    }
+  }
+}
+
+/** The editor's theme, built from the overlay's own theme so the prompt looks
+ * like the rest of Pi rather than like a second design. */
+export function editorTheme(theme: any): { borderColor: (s: string) => string; selectList: any } {
   return {
-    render(width: number) { return container.render(width); },
-    invalidate() { container.invalidate(); },
-    handleInput(data: string) {
-      // Escape detaches regardless of focus.
-      if (data === "\x1b" || data === "\x1b\x1b" || matchesKey(data, "escape")) {
-        detach();
-        return;
-      }
-      // Left arrow on empty input prompt also detaches back (Claude Code style)
-      if (matchesKey(data, "left") && ((input as any).getValue?.() || "").length === 0) {
-        detach();
-        return;
-      }
-      (input as any).handleInput?.(data);
-      tui?.requestRender?.();
-    },
-    dispose() {
-      disposed = true;
-      try { unsub?.(); } catch { /* */ }
+    borderColor: (text: string) => safeFg(theme, "borderMuted", text),
+    selectList: {
+      selectedPrefix: (text: string) => safeFg(theme, "accent", text),
+      selectedText: (text: string) => safeFg(theme, "accent", text),
+      description: (text: string) => safeFg(theme, "muted", text),
+      scrollInfo: (text: string) => safeFg(theme, "muted", text),
+      noMatch: (text: string) => safeFg(theme, "muted", text),
     },
   };
 }
 
-/** Render the message transcript as plain styled lines. */
-function renderTranscript(
-  messages: any[],
-  pending: string,
-  fg: (c: string, s: string) => string,
-): string[] {
-  const out: string[] = [];
-  for (const m of messages ?? []) {
-    if (m.role === "user") {
-      const text = extractText(m.content);
-      out.push(...formatMessage(fg("accent", "you"), text, 500));
-    } else if (m.role === "assistant") {
-      const text = extractText(m.content);
-      if (text) out.push(...formatMessage(fg("success", "assistant"), text, 1200));
-      // tool calls / results are nested; surface briefly if present
-      const toolParts = Array.isArray(m.content)
-        ? m.content.filter((p: any) => p?.type === "tool_use" || p?.type === "tool_result")
-        : [];
-      for (const tp of toolParts.slice(-4)) {
-        const label = tp.type === "tool_use" ? `⚡ ${tp.name ?? "tool"}` : "↳ result";
-        out.push(`  ${fg("muted", truncate(label, 120))}`);
-      }
-    }
+/** A theme lookup that cannot throw. An unknown colour costs the colour, not
+ * the view: measured with a theme that throws on `accent`, the whole overlay
+ * failed to build. */
+export function safeFg(theme: any, color: string, text: string): string {
+  if (typeof theme?.fg !== "function") {
+    return text;
   }
-  if (pending) {
-    out.push(...formatMessage(fg("success", "assistant"), pending, 1200));
+  try {
+    return theme.fg(color, text);
+  } catch {
+    return text;
   }
-  return out.length ? out : [fg("muted", "(no messages yet — type below to prompt this session)")];
 }
 
-function formatMessage(prefix: string, content: string | undefined, maxChars: number): string[] {
-  if (!content) return [];
-  const trimmed = content.trim();
-  if (!trimmed) return [];
-  const truncated = trimmed.length > maxChars ? trimmed.slice(0, maxChars) + "…" : trimmed;
-  const lines = truncated.split("\n");
-  const res: string[] = [];
-  res.push(`${prefix}: ${lines[0]}`);
-  for (let i = 1; i < Math.min(lines.length, 12); i++) {
-    res.push(`  ${lines[i]}`);
+export function safeBold(theme: any, text: string): string {
+  if (typeof theme?.bold !== "function") {
+    return text;
   }
-  if (lines.length > 12) {
-    res.push(`  … (${lines.length - 12} more lines)`);
+  try {
+    return theme.bold(text);
+  } catch {
+    return text;
   }
-  return res;
 }
 
-function truncate(s: string | undefined, n: number): string {
-  if (!s) return "";
-  const collapsed = s.replace(/\n+/g, " ").trim();
-  return collapsed.length > n ? collapsed.slice(0, n) + "…" : collapsed;
+/** Pad a line (which may carry ANSI codes) so the scrollbar beside it is a
+ * straight column rather than a ragged edge. */
+function padTo(line: string, width: number): string {
+  const visible = visibleWidth(line);
+  return visible >= width ? truncateToWidth(line, width) : line + " ".repeat(width - visible);
+}
+
+/** A one-column scrollbar, or null when everything fits.
+ *
+ * Pi's own compositor draws this from the ScrollView's state; an overlay never
+ * reaches that code, so the same information is drawn here - the position and
+ * size of the thumb are the scroll position and the visible share. */
+export function scrollbar(contentHeight: number, viewportHeight: number, scrollTop: number): string[] | null {
+  if (contentHeight <= viewportHeight) {
+    return null;
+  }
+  const track = Math.max(1, viewportHeight);
+  const thumb = Math.max(1, Math.round((track * viewportHeight) / contentHeight));
+  const span = Math.max(1, contentHeight - viewportHeight);
+  const start = Math.round(((track - thumb) * Math.min(Math.max(scrollTop, 0), span)) / span);
+  return Array.from({ length: track }, (_, i) =>
+    i >= start && i < start + thumb ? "█" : "│");
+}
+
+function truncate(text: string, max: number): string {
+  if (visibleWidth(text) <= max) {
+    return text;
+  }
+  return text.slice(0, Math.max(0, max - 1)) + "…";
 }

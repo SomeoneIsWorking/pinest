@@ -39,25 +39,39 @@ export interface HostCommandDeps {
 export async function showAttachOverlay(
   ctx: any,
   entry: any,
-  onDoneCallback?: () => void,
-): Promise<void> {
-  if (!ctx?.ui?.custom) return;
+  deps: () => HostCommandDeps,
+  onBack?: () => void,
+): Promise<{ back: boolean }> {
+  if (!ctx?.ui?.custom) return { back: false };
+  const d = deps();
+  let back = false;
+  const live = d.supervisor?.sessions.get(entry.id) ?? entry;
   await ctx.ui.custom(
-    (tui: any, theme: any, _kb: unknown, done: () => void) =>
+    (tui: any, theme: any, keybindings: any, done: () => void) =>
       createAttachView({
-        session: entry.session,
-        snapshot: {
-          name: entry.name,
-          cwd: entry.cwd,
-          status: entry.status,
-          model: entry.model,
-          modelName: entry.modelName,
+        entry: {
+          session: live.session ?? entry.session,
+          name: entry.name ?? "session",
+          cwd: entry.cwd ?? process.cwd(),
+          status: live.status ?? entry.status ?? "idle",
+          model: live.model ?? entry.model,
+          modelName: live.modelName ?? entry.modelName,
+          // The ONE way a user message reaches a session, shared with the app.
+          submit: (text: string) => {
+            const result = d.supervisor?.submitUserMessage(entry.id, text, undefined, "followUp");
+            return result ?? { delivered: false, queued: false };
+          },
         },
         theme,
         tui,
-        onDone: () => {
+        keybindings,
+        onBack: () => {
+          back = true;
           done();
-          onDoneCallback?.();
+        },
+        onDetach: () => {
+          back = false;
+          done();
         },
       }),
     {
@@ -65,6 +79,7 @@ export async function showAttachOverlay(
       overlayOptions: { width: "96%", maxHeight: "92%", anchor: "center", margin: 0 },
     },
   );
+  return { back };
 }
 
 export async function showSessionsFlow(
@@ -103,11 +118,13 @@ export async function showSessionsFlow(
     let loopBack = false;
 
     await ctx.ui.custom(
-      (tui: any, theme: any, _kb: unknown, done: () => void) =>
+      (tui: any, theme: any, keybindings: any, done: () => void) =>
         createSessionsView({
           sessions: summaries,
           theme,
           tui,
+          keybindings,
+          rows: tui?.terminal?.rows,
           onSelect: (item) => {
             if (item.isHost) {
               done();
@@ -115,7 +132,10 @@ export async function showSessionsFlow(
             }
             const entry = supervisor?.sessions.get(item.id);
             if (entry) {
-              nextStep = { action: "attach", entry };
+              // Carry the id: everything the attach view does to this session
+              // (its transcript and the one way to send it a message) is keyed
+              // by it, and the LiveSession itself does not hold its own key.
+              nextStep = { action: "attach", entry: { id: item.id, ...entry } };
               loopBack = true;
             }
             done();
@@ -133,7 +153,7 @@ export async function showSessionsFlow(
                 broadcastState();
                 const newEntry = supervisor.sessions.get(newId);
                 if (newEntry) {
-                  nextStep = { action: "attach", entry: newEntry };
+                  nextStep = { action: "attach", entry: { id: newId, ...newEntry } };
                   loopBack = true;
                 }
               } catch (e) {
@@ -153,7 +173,12 @@ export async function showSessionsFlow(
     );
 
     if (nextStep && (nextStep as any).action === "attach") {
-      await showAttachOverlay(ctx, (nextStep as any).entry);
+      // Left arrow inside an open session returns HERE, to the list it came
+      // from; only Esc closes the whole flow.
+      const { back } = await showAttachOverlay(ctx, (nextStep as any).entry, deps);
+      // Returning to the list is the arrow; closing the overlay entirely (Esc)
+      // must end the flow rather than re-open the list behind the user's back.
+      loopBack = back;
     }
 
     if (!loopBack) {
@@ -221,7 +246,7 @@ export function registerHostCommands(pi: ExtensionAPI, deps: () => HostCommandDe
             say(ctx, "[pinest] session not found (may have exited)");
             return;
           }
-          await showAttachOverlay(ctx, entry);
+          await showAttachOverlay(ctx, { id: picked.id, ...entry }, deps);
         }
       } catch (e) {
         say(ctx, `[remote-code] sessions error: ${(e as Error)?.message || e}`);

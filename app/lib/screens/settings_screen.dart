@@ -183,6 +183,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   // device that is having the problem rather than only in the
                   // machine's logs.
                   if (svc.machineSeesClient != null) svc.machineSeesClient!,
+                  if (svc.machineSignalingMode != null)
+                    svc.machineSignalingMode == 'push'
+                        ? 'The machine watches for your answer, so an answer is '
+                            'delivered the moment it is written.'
+                        : 'The machine is reading for your answer on a timer '
+                            '(no listener credential on that install), so an '
+                            'answer takes up to the poll interval to arrive.',
                 ].join('\n\n'),
                 style: const TextStyle(fontSize: 11),
               ),

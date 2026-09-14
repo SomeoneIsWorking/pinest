@@ -27,6 +27,7 @@ import { createAutoBackgroundBashTool, type BackgroundProcessManager } from "./b
 import { createBackgroundTools } from "./background-tools.ts";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { StreamSegmenter, type StreamSegmenterState } from "./stream.ts";
+import { submitUserMessage } from "./session-submit.ts";
 import { classifyCompactFailure } from "./compaction-outcome.ts";
 import { createMessageSubmitter, type MessageSubmitter } from "./submit.ts";
 import { resolveThinkingLevel } from "./thinking.ts";
@@ -431,6 +432,29 @@ export class Supervisor {
    * whole turn, and a sender must not wait for the receiver's work. A delivery
    * failure is reported through `onError` instead of disappearing.
    */
+  /** Send a user message to a live session, with the bookkeeping every sender
+   * shares (turn id, working status, the stream that tells clients a run
+   * started, and the image-by-text map the pending queue reads).
+   *
+   * Returns null when this session is not here at all, so the caller can say
+   * which of the two failures it hit. */
+  submitUserMessage(
+    id: string,
+    text: string,
+    images: UserImage[] | undefined,
+    deliverAs: "steer" | "followUp",
+  ): { delivered: boolean; queued: boolean } | null {
+    const s = this.sessions.get(id);
+    if (!s) {
+      return null;
+    }
+    return submitUserMessage(
+      s,
+      { sessionId: id, text, images, deliverAs },
+      { broadcast: this.callbacks.broadcast, upsertSession: this.callbacks.upsertSession },
+    );
+  }
+
   deliverInjectedMessage(
     sessionId: string,
     message: { customType: string; text: string; details?: unknown },
