@@ -83,15 +83,17 @@ void main() {
   });
 
   test('signaling-only writes are the only ones exempt from presence shape', () {
+    // Both pairs: restricting the exemption to the answer refuses the machine's
+    // own offer write (measured live: HTTP 403 on publish).
     expect(
       normalized,
       contains(
-        "affected.hasOnly(['p2pAnswer', 'p2pAnswerTs'])",
+        "affected.hasOnly( ['p2pOffer', 'p2pOfferTs', 'p2pAnswer', 'p2pAnswerTs'])",
       ),
     );
     expect(
       normalized,
-      contains("affected.hasAny(['p2pAnswer', 'p2pAnswerTs'])"),
+      contains("affected.hasAny( ['p2pOffer', 'p2pOfferTs', 'p2pAnswer', 'p2pAnswerTs'])"),
     );
     expect(
       normalized,
