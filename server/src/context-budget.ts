@@ -22,6 +22,12 @@
  * each spawned session — because spawned sessions deliberately do not load
  * pinest itself (the same split `image-budget.ts` uses).
  *
+ * That the returned prompt is the one the model receives is not an assumption:
+ * pi's AgentSession.prompt awaits `emitBeforeAgentStart(...)` and then assigns
+ * `result.systemPrompt` to `agent.state.systemPrompt` (and to
+ * `_systemPromptOverride`) whenever the result defines it. The tests call the
+ * real runner's `emitBeforeAgentStart` for exactly that reason.
+ *
  * It is prevention, not enforcement, and honestly so: it removes the ignorance
  * that permits the confabulation. What it does NOT do is detect the sentence in
  * an agent's output and force a continuation, because a detector cannot tell a
@@ -45,7 +51,7 @@ shorten, defer, or hand work back because of one.
   it is a mistake, not caution.
 - A long conversation, a compaction in the history, or a tool result you could
   not read are normal states of a long task, not reasons to stop.
-- If the work is unfinished, continue it in this session.`;
+- If the work is unfinished and you are not blocked, continue it in this session.`;
 
 /**
  * Append the statement to a turn's system prompt, once.
