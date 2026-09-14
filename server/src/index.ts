@@ -8,8 +8,10 @@ import {
   currentHostThinkingLevel,
 } from "./host-interactive-commands.ts";
 import { sessionHistory as querySessionHistory, listModels as queryModels } from "./pi-context-queries.ts";
-import { createP2PSignaling } from "./p2p-signaling.ts";
-import { CLIENT_REPORT_FIELD, CLIENT_RELOAD_FIELD, describeClientReport, parseClientReport, type ClientReport } from "./client-report.ts";
+import { createP2PSignaling, type P2PSignaling } from "./p2p-signaling.ts";
+import { createDiscoveryWatch } from "./discovery-watch.ts";
+import { createFirestoreWatch } from "./firestore-listen.ts";
+import { CLIENT_RELOAD_FIELD, describeClientReport, type ClientReport } from "./client-report.ts";
 import type { ClientReportView } from "./protocol.ts";
 import debug from "./log.ts";
 /**
@@ -24,7 +26,6 @@ import debug from "./log.ts";
  * is real-time WebSocket messages.
  */
 
-import { existsSync, statSync, mkdirSync } from "node:fs";
 import { join, dirname as dirnamePath } from "node:path";
 import { randomUUID } from "node:crypto";
 import { hostname, homedir } from "node:os";
@@ -163,7 +164,7 @@ let _submitter: MessageSubmitter | null = null;
 let _clientReport: { report: ClientReport } | { problem: string } | null = null;
 
 /** The signaling poll's own handle, for the reason a read failed. */
-let _signaling: { readError(): string | null } | null = null;
+let _signaling: P2PSignaling | null = null;
 
 /** The app's own report, in the shape the wire and the app's Settings screen
  * use. Null until the first poll reads something. */
@@ -216,6 +217,7 @@ const _publisher = new StatePublisher({
   client: () => clientReportView(),
   presenceError: () => _presenceError,
   signalingError: () => _signaling?.readError() ?? null,
+  signalingMode: () => _signaling?.watchMode() ?? null,
   refreshUsage: () => { _supervisor?.refreshUsage?.(false); },
   send: (msg) => broadcast(msg),
 });
@@ -396,6 +398,14 @@ async function teardownRemote(reason: "reload" | "shutdown" = "shutdown"): Promi
     _footer = null;
   }
   stopWatcher();
+  // Everything long-lived this load started has to end with it. The signaling
+  // watch is a live Firestore listener and the direct transport owns an offer
+  // refresh timer and RTC peers: left running, a reload accumulates them and the
+  // process cannot exit at all (a delivery stream keeps it alive).
+  try { _signaling?.stop(); } catch { /* */ }
+  _signaling = null;
+  void _directTransport?.close().catch(() => { /* */ });
+  _directTransport = null;
   if (_heartbeat) { clearInterval(_heartbeat); _heartbeat = null; }
   _bgManager?.dispose();
   _bgManager = null;
@@ -670,24 +680,17 @@ async function startDirectTransport(): Promise<void> {
         if (!_fb || !_ownerUid) throw new Error("no owner record to publish an offer to");
         await _fb.patchUserDoc(_ownerUid, { p2pOffer: sdp, p2pOfferTs: ts });
       },
-      // ONE read of the discovery document per poll: the answer and the app's
-      // own report both live in it, and every extra read is paid for out of a
-      // metered daily allowance.
-      readDiscovery: async () => {
-        if (!_fb || !_ownerUid) {
-          return { answer: null, report: { problem: "this machine has no Firebase identity" } };
-        }
-        const doc = await _fb.readUserDoc(_ownerUid);
-        const report = parseClientReport(doc?.[CLIENT_REPORT_FIELD]);
-        const sdp = doc?.p2pAnswer;
-        if (typeof sdp !== "string") {
-          return { answer: null, report };
-        }
-        // The offer the answer names, not when it was written: the app's clock
-        // is not this machine's clock.
-        const named = doc?.p2pAnswerOfferTs;
-        return { answer: { sdp, offerTs: typeof named === "number" ? named : null }, report };
-      },
+      // The machine learns the answer by WATCHING the document, not by reading
+      // it on a timer: a listener costs one read per change and nothing at all
+      // while nothing happens, where a two-second poll cost 43,200 reads a day
+      // and exhausted this project's daily allowance (issue #57). Where no
+      // credential can open a listener the watch falls back to a paced poll and
+      // says so, so the fallback is visible rather than implied.
+      watch: createDiscoveryWatch({
+        uid: _ownerUid ?? "",
+        read: () => (_fb && _ownerUid ? _fb.readUserDoc(_ownerUid) : Promise.resolve(null)),
+        createPushWatch: createFirestoreWatch,
+      }),
     });
     _signaling = signaling;
     signaling.onReport((seen) => {

@@ -3,6 +3,7 @@ import { createAgentSession, type AgentSession } from "@earendil-works/pi-coding
 import { lookupImage, pageHistory } from "./logic.ts";
 import type { ModelInfo, SessionRow, UserImage } from "./protocol.ts";
 import type { LiveSession, SupervisorCallbacks } from "./supervisor.ts";
+import { submitUserMessage } from "./session-submit.ts";
 import { resolveThinkingLevel } from "./thinking.ts";
 import type { GoalSink } from "./session-goal.ts";
 import { clearSessionGoal, goalAppMessage, setSessionGoal } from "./session-goal.ts";
@@ -48,29 +49,17 @@ export async function dispatchSessionCommand(
         }
         break;
       }
-      s.currentTurnId = cmd.id || randomUUID();
-      if (s.status !== "working") {
-        s.segmenter?.reset();
-        ctx.callbacks.broadcast({
-          type: "stream",
+      submitUserMessage(
+        s,
+        {
           sessionId: cmd.sessionId,
-          text: "",
-          segments: [],
-          status: "working",
-        });
-      }
-      s.status = "working";
-      const images = (cmd.images ?? []) as UserImage[];
-      const text = cmd.text.trim().length === 0 ? "[image]" : cmd.text;
-      if (images.length > 0) {
-        s.pendingImagesByText = { ...(s.pendingImagesByText ?? {}), [text]: images };
-      }
-      ctx.callbacks.upsertSession(cmd.sessionId, {
-        status: "working",
-      });
-      // prompt(streamingBehavior) covers BOTH cases: idle → new turn,
-      // streaming → queued as steer/followUp.
-      s.submitter?.submit(text, images, cmd.deliverAs === "followUp" ? "followUp" : "steer");
+          text: cmd.text,
+          images: (cmd.images ?? []) as UserImage[],
+          deliverAs: cmd.deliverAs,
+          id: cmd.id,
+        },
+        { broadcast: ctx.callbacks.broadcast, upsertSession: ctx.callbacks.upsertSession },
+      );
       break;
     }
     case "cancel": {

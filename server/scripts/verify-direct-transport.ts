@@ -21,47 +21,22 @@
  * Usage:
  *   node server/scripts/verify-direct-transport.ts [--timeout-ms 60000]
  */
-import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { RTCPeerConnection, RTCSessionDescription } from "werift";
+import {
+  docUrl,
+  fetchBounded,
+  ownerIdToken,
+  ownerRefreshToken,
+  timeout,
+  VerificationError,
+} from "./firestore-rest.ts";
 import {
   ACTIONS_CHANNEL_LABEL,
   PUSH_CHANNEL_LABEL,
 } from "../src/p2p.ts";
 import { FrameReader, FrameWriter } from "../src/p2p-framing.ts";
 
-const PROJECT = "pinest-app";
-const AUTH_PATH = join(homedir(), ".pi", "agent", "remote-code", "auth.json");
 
-class VerificationError extends Error {}
-
-/** The Firebase web apiKey: a public value the app embeds, which the repository
- * deliberately does not carry. Resolved under the SAME variable name the server
- * uses (`server/src/auth.ts`), falling back to the same `firebase apps:sdkconfig`
- * route `app/deploy.sh` uses, and refusing by name when neither is available. */
-const WEB_APP_ID = "1:271491621267:web:3822b177db9e36a57b8866";
-
-function webApiKey(): string {
-  const fromEnv = process.env.RC_FIREBASE_API_KEY;
-  if (fromEnv) return fromEnv;
-  try {
-    const sdkConfig = execFileSync(
-      "firebase",
-      ["apps:sdkconfig", "WEB", WEB_APP_ID, "-P", PROJECT],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    );
-    const match = /"apiKey":\s*"([^"]+)"/.exec(sdkConfig);
-    if (match?.[1]) return match[1];
-  } catch {
-    // Falls through to the refusal below, which names both routes.
-  }
-  throw new VerificationError(
-    "no Firebase web apiKey: set RC_FIREBASE_API_KEY, or make the `firebase` CLI "
-    + `available so \`firebase apps:sdkconfig WEB ${WEB_APP_ID} -P ${PROJECT}\` can resolve it`,
-  );
-}
 
 function argValue(name: string, fallback: number): number {
   const index = process.argv.indexOf(name);
@@ -73,42 +48,7 @@ function argValue(name: string, fallback: number): number {
   return value;
 }
 
-/** The host's cached owner credentials, refused by name when absent. */
-function ownerRefreshToken(): string {
-  let parsed: { refreshToken?: unknown };
-  try {
-    parsed = JSON.parse(readFileSync(AUTH_PATH, "utf8"));
-  } catch (error) {
-    throw new VerificationError(
-      `cannot read the host's credentials at ${AUTH_PATH} (${(error as Error).message}); `
-      + "sign in from the app (or run /pinest-auth) before verifying the direct transport",
-    );
-  }
-  const token = parsed.refreshToken;
-  if (typeof token !== "string" || token.length === 0) {
-    throw new VerificationError(`${AUTH_PATH} has no refreshToken; sign in again from the app`);
-  }
-  return token;
-}
 
-async function ownerIdToken(
-  refreshToken: string,
-  timeoutMs: number,
-): Promise<{ idToken: string; uid: string }> {
-  const response = await fetchBounded(`https://securetoken.googleapis.com/v1/token?key=${webApiKey()}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken }),
-  }, timeoutMs);
-  if (!response.ok) {
-    throw new VerificationError(`owner token refresh failed: HTTP ${response.status}`);
-  }
-  const body = await response.json() as { id_token?: string; user_id?: string };
-  if (!body.id_token || !body.user_id) {
-    throw new VerificationError("owner token refresh returned no token");
-  }
-  return { idToken: body.id_token, uid: body.user_id };
-}
 
 /** The signaling fields this check needs, with the offer's identity intact. */
 interface Signaling {
@@ -118,9 +58,6 @@ interface Signaling {
   answerOfferTs: number | null;
 }
 
-function docUrl(uid: string): string {
-  return `https://firestore.googleapis.com/v1/projects/${PROJECT}/databases/(default)/documents/users/${uid}`;
-}
 
 /** Read the live offer, and whether that exchange is already taken. */
 async function readSignaling(uid: string, token: string, timeoutMs: number): Promise<Signaling> {
@@ -205,20 +142,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
-}
-
-function timeout(ms: number, label: string): Promise<never> {
-  return new Promise((_, reject) => {
-    setTimeout(() => reject(new VerificationError(`${label} timed out after ${ms}ms`)), ms);
-  });
-}
-
-/** `fetch` with a deadline: a hung HTTP call must not become a hung check. */
-async function fetchBounded(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
-  return await Promise.race([
-    fetch(url, init),
-    timeout(timeoutMs, `${init.method ?? "GET"} ${new URL(url).host}`),
-  ]);
 }
 
 
