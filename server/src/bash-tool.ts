@@ -528,6 +528,11 @@ export class BackgroundProcessManager {
       timeout?: number;
       signal?: AbortSignal;
       onUpdate?: (update: { content: Array<{ type: "text"; text: string }>; details?: unknown }) => void;
+      /** Whether to report the outcome when it finishes. Recorded on the task
+       * itself: leaving it undefined made the delivery guard - which tests for
+       * an explicit `false` - pass, so a task that asked for silence was
+       * reported anyway. */
+      notifyOnCompletion?: boolean;
     }
   ): Promise<{
     isBackground: boolean;
@@ -584,6 +589,7 @@ export class BackgroundProcessManager {
       outputChunks: [],
       totalBytes: 0,
       child,
+      notifyOnCompletion: options.notifyOnCompletion ?? true,
     };
 
     let isBackground = false;
@@ -807,8 +813,15 @@ export function createAutoBackgroundBashTool(options: {
     parameters: Type.Object({
       command: Type.String({ description: "Shell command to execute" }),
       timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional)" })),
+      notifyOnCompletion: Type.Optional(
+        Type.Boolean({
+          description:
+            "Report the outcome if this command ends up in the background (default true). " +
+            "Set false when you will read the result yourself.",
+        }),
+      ),
     }),
-    async execute(_toolCallId, { command, timeout }, signal, onUpdate, ctx) {
+    async execute(_toolCallId, { command, timeout, notifyOnCompletion }, signal, onUpdate, ctx) {
       const targetCwd = ctx?.cwd || options.cwd || process.cwd();
 
       const result = await bgManager
@@ -816,6 +829,7 @@ export function createAutoBackgroundBashTool(options: {
         .executeCommand(command, {
           cwd: targetCwd,
           timeout,
+          notifyOnCompletion,
           signal,
           onUpdate: onUpdate
             ? (update) => onUpdate({ content: update.content, details: update.details })
