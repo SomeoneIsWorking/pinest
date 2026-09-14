@@ -21,7 +21,7 @@ from cache or throw with instructions; `RC_NO_BROWSER=1` hard-guards
 `openBrowser`; `test/auth.test.ts` asserts no :8731 listener.
 
 Remaining for full hosted operation:
-- Deploy `firestore.rules` (owner create/update on `users/{uid}`, field
+- Deploy `app/firestore.rules` (owner create/update on `users/{uid}`, field
   whitelist) to pinest-app — one-time, user-run:
   `firebase deploy --only firestore:rules --project pinest-app`
 - One real browser sign-in end-to-end (RestImpl path) — AdminFirebase is
