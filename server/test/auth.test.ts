@@ -27,7 +27,9 @@ const {
   assertAdminAppProject,
   createFirebase,
   firebaseWebConfig,
-  presenceToFirestoreFields,
+  presenceFields,
+  toFirestoreValue,
+  fromFirestoreValue,
 } = await import("../src/auth.ts");
 const { ensurePrivateAuthDirectory } = await import("../src/auth-cache.ts");
 const { browserLogin } = await import("../src/browser-login.ts");
@@ -620,7 +622,7 @@ test("publishPresence retries one 401 only", async () => {
 
   await assert.rejects(
     () => fb.publishPresence("u-cached", { url: null, online: true }),
-    /presence publish failed \(401\)/,
+    /discovery doc write failed \(401\)/,
   );
   assert.equal(firestoreCalls, 2);
 });
@@ -643,11 +645,26 @@ for (const [name, user] of [
   });
 }
 
-test("presenceToFirestoreFields: pure conversion", () => {
-  const f = presenceToFirestoreFields({ url: "https://x.loca.lt", online: false });
-  assert.deepEqual(f.url, { stringValue: "https://x.loca.lt" });
-  assert.deepEqual(f.online, { booleanValue: false });
+test("presence fields are plain values, encoded in exactly one place", () => {
+  const f = presenceFields({ url: "https://x.loca.lt", online: false });
+  assert.equal(f.url, "https://x.loca.lt");
+  assert.equal(f.online, false);
   assert.ok(!("ownerEmail" in f), "unset optional fields omitted");
+  assert.deepEqual(toFirestoreValue(f.url), { stringValue: "https://x.loca.lt" });
+});
+
+test("a value Firestore cannot represent is refused, not written as something else", () => {
+  assert.deepEqual(toFirestoreValue(null), { nullValue: null });
+  assert.deepEqual(toFirestoreValue(7), { integerValue: "7" });
+  assert.throws(() => toFirestoreValue({ nested: true }), /unsupported Firestore field value/);
+});
+
+test("reading a doc decodes the same shapes it writes", () => {
+  assert.equal(fromFirestoreValue({ stringValue: "sdp" }), "sdp");
+  assert.equal(fromFirestoreValue({ integerValue: "42" }), 42);
+  assert.equal(fromFirestoreValue({ nullValue: null }), null);
+  assert.equal(fromFirestoreValue({ booleanValue: false }), false);
+  assert.equal(fromFirestoreValue({ mapValue: {} }), undefined);
 });
 
 test("Admin verifyToken checks revocation and returns verified expiry", async () => {
