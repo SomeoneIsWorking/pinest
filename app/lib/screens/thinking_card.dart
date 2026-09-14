@@ -22,6 +22,7 @@ class ThinkingCard extends StatefulWidget {
 
 class _ThinkingCardState extends State<ThinkingCard> {
   late bool _expanded;
+  bool _userToggled = false;
 
   @override
   void initState() {
@@ -32,9 +33,16 @@ class _ThinkingCardState extends State<ThinkingCard> {
   @override
   void didUpdateWidget(covariant ThinkingCard oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (!oldWidget.isStreaming && widget.isStreaming && !_expanded) {
+    if (!oldWidget.isStreaming && widget.isStreaming && !_userToggled) {
       setState(() => _expanded = true);
     }
+  }
+
+  void _toggleExpanded() {
+    setState(() {
+      _userToggled = true;
+      _expanded = !_expanded;
+    });
   }
 
   @override
@@ -61,7 +69,7 @@ class _ThinkingCardState extends State<ThinkingCard> {
           mainAxisSize: MainAxisSize.min,
           children: [
             InkWell(
-              onTap: () => setState(() => _expanded = !_expanded),
+              onTap: _toggleExpanded,
               borderRadius: BorderRadius.circular(4),
               child: Row(
                 mainAxisSize: MainAxisSize.min,

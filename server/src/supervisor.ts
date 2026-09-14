@@ -557,6 +557,9 @@ export class Supervisor {
           s.status = "working";
           this.callbacks.upsertSession(id, { status: "working" });
         }
+        if (event.message?.role === "assistant") {
+          s.segmenter.startMessage();
+        }
       } else if (event.type === "message_end") {
         if (event.message?.role === "assistant" && (event.message.stopReason === "error" || event.message.errorMessage)) {
           this.callbacks.broadcast({
@@ -631,9 +634,7 @@ export class Supervisor {
         } else {
           this.callbacks.notifyHost?.(`PiNest [${s.name || id}]: finished work`, "info");
         }
-        s.segmenter?.reset();
         if (s.currentTurnId) s.currentTurnId = null;
-        this.callbacks.broadcast({ type: "stream", sessionId: id, text: "", segments: [], status: "idle" });
         this.callbacks.upsertSession(id, {
           status: "idle",
           contextUsage: this.usageWithCompactAt(s),
@@ -643,8 +644,19 @@ export class Supervisor {
         });
         this.persistRow(id, { status: "idle" });
         this.maybeAutoCompact(id, s);
-        // Send updated history
-        this.getHistory(s).then((h) => this.callbacks.broadcast({ type: "history", sessionId: id, ...pageHistory(h) }));
+        // Send updated history FIRST so the completed message sticks,
+        // then clear the streaming state so there is no gap/blink between stream and history.
+        this.getHistory(s)
+          .then((h) => {
+            this.callbacks.broadcast({ type: "history", sessionId: id, ...pageHistory(h) });
+            s.segmenter?.reset();
+            this.callbacks.broadcast({ type: "stream", sessionId: id, text: "", segments: [], status: "idle" });
+          })
+          .catch((err) => {
+            debug(`[remote-code] failed to fetch history on supervisor agent_end: ${(err as Error).message}`);
+            s.segmenter?.reset();
+            this.callbacks.broadcast({ type: "stream", sessionId: id, text: "", segments: [], status: "idle" });
+          });
       } else if (event.type === "model_select") {
         const m = event.model;
         if (m) {
