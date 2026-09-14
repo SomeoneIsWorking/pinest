@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/auth_service.dart';
+import '../logic/machine_presence.dart';
 import '../services/agent_service.dart';
 import '../services/apk_release.dart';
 import '../services/deploy_version.dart';
@@ -637,27 +638,45 @@ class _EmptySessions extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final svc = context.watch<AgentService>();
+    // A machine that is publishing is not a machine that is down. Reporting both
+    // as "Supervisor offline" hides the difference that matters: measured live,
+    // the machine was up and reporting every ~20s while the app showed offline
+    // against a tunnel URL that had just been minted and was not resolvable yet.
+    // The empty state is not one condition: a machine that is publishing is not
+    // a machine that is down. The decision (and the wording) lives in one pure
+    // place so every branch can be tested.
+    final presence = describeMachinePresence(
+      connected: svc.anyMachineOnline,
+      machinePublishing: svc.machinePublishing,
+      machineSeenAt: svc.machineSeenAt,
+      reason: svc.connectionReason,
+    );
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Icon(
-            svc.anyMachineOnline ? Icons.add_box : Icons.cloud_off,
+            svc.anyMachineOnline
+                ? Icons.add_box
+                : svc.machinePublishing
+                    ? Icons.cloud_sync
+                    : Icons.cloud_off,
             size: 64,
             color: Colors.grey,
           ),
           const SizedBox(height: 16),
-          Text(svc.anyMachineOnline ? 'No sessions yet' : 'Supervisor offline'),
+          Text(presence.headline),
           const SizedBox(height: 8),
-          if (!svc.anyMachineOnline)
+          if (presence.detail.isNotEmpty)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 32),
               child: Text(
-                // Say WHY. "Supervisor offline" alone cannot be told apart from
-                // a machine that is up but unreachable, and the difference is
-                // the whole diagnosis - so the last reported reason is shown,
-                // and its absence is stated rather than left blank.
-                svc.connectionReason,
+                // Say WHY, and from whose side. "Supervisor offline" alone cannot
+                // be told apart from a machine that is up but unreachable, and
+                // the difference is the whole diagnosis - so the last reported
+                // reason and the machine's own last report are both shown, and
+                // their absence is stated rather than left blank.
+                presence.detail,
                 textAlign: TextAlign.center,
                 style: const TextStyle(color: Colors.grey, fontSize: 12),
               ),
