@@ -12,10 +12,11 @@
  * corruption, and an off-by-one in the border is visible.
  */
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 
 export interface FrameOptions {
-  /** What this overlay is, in the top border. */
   title: string;
+  /** What this overlay is, in the top border. */
   /** The keys, in the bottom border. */
   hint: string;
   /** The content between them. Padded or cropped to the frame's height. */
@@ -37,6 +38,44 @@ export function terminalRows(tui: any): number {
     return fromStdout;
   }
   return 24;
+}
+
+/**
+ * A component's own rectangle inside a drawn frame, recorded when the frame was
+ * built and used to restore a pointer event's origin before the component's
+ * handler sees it. Without it a click on a list's first row is a click on
+ * nothing and every hit is off by the frame's chrome.
+ */
+export interface FrameRegion {
+  /** The frame row that is the region's row zero. */
+  top: number;
+  height: number;
+  width: number;
+}
+
+/** A component that takes normalized mouse events. */
+export interface MouseTarget {
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined;
+}
+
+/** The frame's left chrome: `│ ` before the body. */
+export const FRAME_LEFT = 2;
+/** The frame's top chrome: the title border row. */
+export const FRAME_TOP = 1;
+
+/** Send one pointer event to a component drawn in `region`, in its own terms. */
+export function dispatchInto(
+  target: MouseTarget,
+  event: TuiMouseEvent,
+  region: FrameRegion,
+): TuiMouseEventResult | undefined {
+  return target.handleMouse({
+    ...event,
+    x: event.x - FRAME_LEFT,
+    y: event.y - region.top,
+    width: region.width,
+    height: region.height,
+  });
 }
 
 /** Draw the frame. Returns exactly `height` lines of exactly `width` cells. */

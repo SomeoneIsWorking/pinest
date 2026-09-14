@@ -400,3 +400,101 @@ test("a deep path is shortened from the left, keeping the directory", () => {
   );
   assert.equal(shortenPath("/srv/app", "/users/dev"), "/srv/app");
 });
+
+/** A normalized mouse event as the fullscreen TUI delivers one to the overlay. */
+function mouse(over: Record<string, unknown> = {}): any {
+  return {
+    type: "wheel",
+    button: "none",
+    x: 24,
+    y: 3,
+    screenX: 24,
+    screenY: 3,
+    width: 100,
+    height: 24,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    wheelDelta: 1,
+    ...over,
+  };
+}
+
+test("the wheel moves the cursor, and enter opens what it moved to", () => {
+  // The list starts on row zero, which is this terminal and cannot be opened.
+  // One notch down must land on the first agent session, so the direction is
+  // checkable from the outcome rather than from a number.
+  const h = harness(sessions(3), 24, 100);
+  const result = h.view.handleMouse?.(mouse({ wheelDelta: 1 }));
+  assert.equal(result?.handled, true, "the wheel must be claimed by the list");
+  h.view.handleInput("\r");
+  assert.equal(h.selected(), "s0");
+});
+
+test("a click opens the session under the pointer, not one row off", () => {
+  // Row 0 is the frame's title border, so the list's first row is y=1. A click
+  // on the third list row is the third session, and that only holds if the
+  // border is subtracted.
+  const h = harness(sessions(3), 24, 100);
+  h.view.handleMouse?.(mouse({ type: "press", button: "left", y: 3 }));
+  h.view.handleMouse?.(mouse({ type: "click", button: "left", y: 3 }));
+  assert.equal(h.selected(), "s1");
+});
+
+test("a filter row shifts the list, and the pointer follows", () => {
+  const h = harness(sessions(3), 24, 100);
+  for (const ch of "agent") {
+    h.view.handleInput(ch);
+  }
+  // Now: border, filter row, then agent-0..2. The host row is filtered out, so
+  // y=4 is the third agent rather than a fourth row that no longer exists.
+  h.view.handleMouse?.(mouse({ type: "press", button: "left", y: 4 }));
+  h.view.handleMouse?.(mouse({ type: "click", button: "left", y: 4 }));
+  assert.equal(h.selected(), "s2");
+});
+
+test("a click on the title border is not a click on a session", () => {
+  const h = harness(sessions(3), 24, 100);
+  assert.equal(h.view.handleMouse?.(mouse({ type: "click", button: "left", y: 0 })), undefined);
+  assert.equal(h.selected(), null);
+});
+
+test("a click cannot kill: killing keeps asking", () => {
+  // Ctrl+D asks once and Enter confirms; a pointer press must not become the
+  // confirmation of an answer that was never asked.
+  const h = harness(sessions(3), 24, 100);
+  h.view.handleInput("\x1b[B"); // to the first agent
+  h.view.handleInput("\x04"); // ask
+  assert.equal(h.view.handleMouse?.(mouse({ type: "click", button: "left", y: 3 })), undefined);
+  assert.deepEqual(h.calls.filter((c) => c.startsWith("kill:")), []);
+});
+
+test("the row shows the thinking level, and typing it finds the session", () => {
+  const list: SessionSummary[] = [
+    ...sessions(2),
+    {
+      id: "deep",
+      name: "thinker",
+      cwd: "/srv/checkout/thinker",
+      status: "idle",
+      isHost: false,
+      modelName: "glm-5.3-flash",
+      thinking: "max",
+    },
+  ];
+  const h = harness(list, 24, 100);
+  assert.match(h.lines().join("\n"), /thinking:max/);
+
+  for (const ch of "max") {
+    h.view.handleInput(ch);
+  }
+  h.view.handleInput("\r");
+  assert.equal(h.selected(), "deep", "the level is part of what a row can be found by");
+});
+
+test("ctrl-n defers the directory to the host instead of assuming this one", () => {
+  const h = harness(sessions(2), 24, 100);
+  h.view.handleInput("\x0e"); // ctrl+n
+  assert.deepEqual(h.calls, ["new"]);
+  assert.equal(h.selected(), null, "and it opens nothing until the host answers");
+});
