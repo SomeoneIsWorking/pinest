@@ -9,6 +9,8 @@ import { resolvePathInput, deriveSessionName } from "./logic.ts";
 import { DEFAULT_MODEL } from "./product-defaults.ts";
 import { reauthenticateRemoteOwner } from "./owner-runtime.ts";
 import { pendingReloadState, queueReload, setIsWorkingProbe } from "./reload-manager.ts";
+import { currentGoal, setGoal } from "./config.ts";
+import { describeGoal, goalDirective } from "./session-goal.ts";
 import { Type } from "typebox";
 import { registerSessionMessaging } from "./session-messaging.ts";
 import debug from "./log.ts";
@@ -298,6 +300,31 @@ export function registerHostCommands(pi: ExtensionAPI, deps: () => HostCommandDe
         const msg = `[pinest] reload failed: ${(e as Error)?.message || e}`;
         debug(`[remote-code] ${msg}`);
         say(ctx, msg);
+      }
+    },
+  });
+
+  // ── /goal — state the objective to work toward ────────────────────────────
+  pi.registerCommand("goal", {
+    description: "PiNest: state the objective to work toward (or show the current one)",
+    handler: async (args: string, ctx: ExtensionCommandContext) => {
+      const { say, captureUi, broadcastState } = deps();
+      captureUi(ctx);
+      const objective = (args ?? "").trim();
+      if (objective.length === 0) {
+        say(ctx, describeGoal(currentGoal()));
+        return;
+      }
+      const goal = setGoal(objective);
+      say(ctx, `[pinest] goal set: ${goal.text}`);
+      broadcastState();
+      // The objective must reach the agent, not just the config file: sent as a
+      // follow-up so it is delivered when the current turn settles, and starts
+      // one when the session is idle.
+      try {
+        pi.sendUserMessage(goalDirective(goal), { deliverAs: "followUp" });
+      } catch (e) {
+        say(ctx, `[pinest] could not hand the goal to the agent: ${(e as Error)?.message || e}`);
       }
     },
   });

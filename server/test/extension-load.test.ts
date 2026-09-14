@@ -29,7 +29,7 @@ process.env.RC_AUTH_PATH = makeTempDir("rc-extload-auth-") + "/auth.json";
 process.env.RC_SERVICE_ACCOUNT_PATH = process.env.RC_AUTH_PATH + ".no-such-sa";
 process.env.RC_NO_BROWSER = "1";
 
-const EXPECTED_COMMANDS = ["pinest-auth", "pinest-spawn", "pinest-sessions", "pinest-provider", "pinest-reload"];
+const EXPECTED_COMMANDS = ["goal", "pinest-auth", "pinest-spawn", "pinest-sessions", "pinest-provider", "pinest-reload"];
 
 /** A minimal stub of the Pi ExtensionAPI that records what the extension does. */
 function stubPi(overrides = {}) {

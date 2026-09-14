@@ -505,6 +505,15 @@ Future<bool> runSlashCommand(
       svc.setCompactThreshold(tokens);
       showAppToast(context, 'Auto-compact set to ${formatTokenCount(tokens)} tokens');
       return true;
+    case '/goal':
+      final objective = parts.skip(1).join(' ').trim();
+      if (objective.isEmpty) {
+        showAppToast(context, 'Usage: /goal <objective>', isError: true);
+        return true;
+      }
+      svc.setGoal(objective);
+      showAppToast(context, 'Goal set — the agent is working toward it');
+      return true;
     default:
       showAppToast(context, 'Unknown command: $name', isError: true);
       return true;

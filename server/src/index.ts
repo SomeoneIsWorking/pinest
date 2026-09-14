@@ -522,6 +522,22 @@ async function handleCommand(input: unknown): Promise<void> {
         const r = queueReload(_pi, _ctx);
         if (!r.ok) broadcast({ type: "error", message: `[remote-code] ${r.message}` });
       },
+      goalSet: (cmd) => {
+        // Ask pi to run ITS registered command rather than restating what the
+        // objective means here: one wording, one behaviour, terminal and app.
+        try {
+          (_pi as { sendUserMessage?: (t: string, o?: unknown) => void })
+            .sendUserMessage?.(`/goal ${cmd.text}`, {
+              deliverAs: "followUp",
+              expandPromptTemplates: true,
+            });
+        } catch (e) {
+          broadcast({
+            type: "error",
+            message: `[remote-code] could not set the goal: ${(e as Error).message}`,
+          });
+        }
+      },
     });
   } catch (e) {
     debug("[remote-code] command error:", (e as Error).message);

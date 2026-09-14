@@ -462,6 +462,14 @@ export function parseClientCommand(input: unknown): ClientCommand {
         tail: optionalBoolean(command, "tail"),
         id: commandId(command),
       };
+    case "goal_set": {
+      rejectUnknownFields(command, ["type", "text"]);
+      const rawText = command.text;
+      if (typeof rawText !== "string" || rawText.trim().length === 0) {
+        fail("command.text must be a non-empty objective");
+      }
+      return { type: "goal_set", text: rawText.trim() };
+    }
     case "reload":
       rejectUnknownFields(command, ["type"]);
       return { type: "reload" };
@@ -622,6 +630,7 @@ export interface ClientCommandDispatcherDeps {
   jobKill?: (command: Extract<ClientCommand, { type: "job_kill" }>) => void | Promise<void>;
   jobLogs?: (command: Extract<ClientCommand, { type: "job_logs" }>) => void | Promise<void>;
   reload: () => void | Promise<void>;
+  goalSet: (command: { text: string }) => void | Promise<void>;
 }
 
 /** Validate, authorize the target, reserve new IDs, and dispatch exactly once. */
@@ -676,6 +685,7 @@ export async function dispatchClientCommand(
     case "job_kill": return void await deps.jobKill?.(command);
     case "job_logs": return void await deps.jobLogs?.(command);
     case "reload": return void await deps.reload();
+    case "goal_set": return void await deps.goalSet(command);
     case "list_paths": return void await deps.host(command);
     case "ping": return;
   }
