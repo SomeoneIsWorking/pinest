@@ -1,13 +1,14 @@
 import 'dart:async';
-import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
 import 'auth_service.dart';
 import 'correlated_request_broker.dart';
 import 'notification_bridge.dart';
 import 'image_store.dart';
 import 'outgoing_queue.dart';
+import 'direct_channel.dart';
+import 'control_channel.dart';
+import '../logic/direct_offer.dart';
 import 'server_http.dart';
 import 'session_cache.dart';
 import 'user_preferences.dart';
@@ -33,7 +34,7 @@ class AgentService extends ChangeNotifier {
   AuthService? _auth;
   String? _boundUid;
   StreamSubscription? _urlSub;
-  WebSocketConnection? _ws;
+  ControlChannel? _ws;
 
   bool _online = false;
   String _hostname = '';
@@ -139,7 +140,7 @@ class AgentService extends ChangeNotifier {
   /// Only unexpected socket loss opts into [reconnect]; auth and discovery
   /// teardown must never leave a timer that can revive the old connection.
   void _transitionToDisconnected({
-    WebSocketConnection? source,
+    ControlChannel? source,
     bool reconnect = false,
     bool stopDiscovery = false,
     bool forgetEndpoint = false,
@@ -216,18 +217,30 @@ class AgentService extends ChangeNotifier {
             final fresh = age >= -30000 && age < 60000;
             final endpoint = secureDiscoveryWebSocketUri(data['url']);
 
-            if (!fresh || data['url'] == null) {
+            if (!fresh) {
               _transitionToDisconnected(forgetEndpoint: true);
               return;
             }
-            if (endpoint == null) {
+            // A published URL that is not a safe WSS endpoint is refused
+            // outright: nothing may receive the Firebase token instead.
+            if (data['url'] != null && endpoint == null) {
               _transitionToDisconnected(forgetEndpoint: true, notify: false);
               _error = 'Rejected insecure discovery URL';
               notifyListeners();
               return;
             }
+            if (endpoint != null) _lastEndpoint = endpoint;
 
-            _lastEndpoint = endpoint;
+            // A direct connection needs no third party in the data path, so it
+            // is tried first when the machine offers one. A failure is not
+            // silent: it is recorded and the tunnel endpoint is used, and a
+            // machine with no tunnel at all is still reachable this way.
+            if (await _tryDirect(data)) return;
+            if (endpoint == null) {
+              _transitionToDisconnected(forgetEndpoint: true, notify: false);
+              notifyListeners();
+              return;
+            }
             final picked = pickEndpoint(
               local: _localEndpoint,
               remote: endpoint,
@@ -242,13 +255,65 @@ class AgentService extends ChangeNotifier {
         );
   }
 
+  /// Answer the machine's offer when discovery carries a fresh one.
+  ///
+  /// Returns whether a direct channel is now in use. The answer is published to
+  /// the same document the offer came from, so the machine completes the
+  /// exchange without either side polling anything new.
+  Future<bool> _tryDirect(Map<String, dynamic> discovery) async {
+    if (!directTransportAvailable) return false;
+    final offer = offerToAnswer(
+      discovery,
+      now: DateTime.now().millisecondsSinceEpoch,
+      answeredTs: _answeredOfferTs,
+    );
+    if (offer == null) return false;
+    final uid = _boundUid;
+    if (uid == null) return false;
+    // Keep the existing tunnel channel until the direct one is actually open: a
+    // punch that fails must not cost the connection the app already had.
+    _answeredOfferTs = offer.ts;
+    try {
+      final channel = await connectDataChannel(
+        offerSdp: offer.sdp,
+        iceServers: kDirectIceServers,
+        publishAnswer: (sdp) => _db
+            .collection('users')
+            .doc(uid)
+            .set(answerFields(sdp, DateTime.now().millisecondsSinceEpoch),
+                SetOptions(merge: true)),
+      );
+      if (_boundUid != uid) {
+        channel.close();
+        return false;
+      }
+      _directFailure = null;
+      await _dialChannel(channel, isDirect: true);
+      return true;
+    } catch (e) {
+      // Report it: "the machine is not reachable directly" is information the
+      // user needs, and hiding it would look like an unexplained fallback.
+      _directFailure = '$e';
+      notifyListeners();
+      return false;
+    }
+  }
+
   /// Dial the tunnel URL. Safe to call repeatedly — skips if already
   /// connected or connecting to the same URL.
   Future<void> _dial(Uri endpoint) async {
     if (_ws?.endpoint == endpoint) return;
     _transitionToDisconnected();
-    final socket = WebSocketConnection(endpoint);
+    await _dialChannel(WebSocketConnection(endpoint), isDirect: false);
+  }
+
+  /// Open a channel and wire it to this service. The transport is irrelevant
+  /// here: both carry the same frames, authenticate the same way, and reconnect
+  /// the same way.
+  Future<void> _dialChannel(ControlChannel socket, {required bool isDirect}) async {
+    _transitionToDisconnected();
     _ws = socket;
+    _direct = isDirect;
     await socket.connect(
       token: _token,
       onMessage: (message) {
@@ -258,7 +323,10 @@ class AgentService extends ChangeNotifier {
         if (!identical(_ws, socket)) return;
         // A loopback that refuses is a real answer about THIS generation: the
         // browser is not on the host's machine, so stop preferring it.
-        if (identical(endpoint, _localEndpoint)) _localFailed = _localEndpoint;
+        final endpoint = socket.endpoint;
+        if (endpoint != null && identical(endpoint, _localEndpoint)) {
+          _localFailed = _localEndpoint;
+        }
         _error = e;
         _transitionToDisconnected(source: socket, reconnect: true);
       },
@@ -716,6 +784,19 @@ class AgentService extends ChangeNotifier {
   /// until the server reports a different port.
   Uri? _localFailed;
 
+  /// Whether the live channel is a direct (peer-to-peer) one. Actions then go
+  /// over that channel: there is no HTTP origin to send them to, and routing
+  /// them through a tunnel would put a third party back in the data path.
+  bool _direct = false;
+
+  /// The offer timestamp already answered, so a document update that repeats
+  /// the same offer does not start a second exchange.
+  int? _answeredOfferTs;
+
+  /// Why the last direct attempt failed, if one did. Reported, never hidden:
+  /// the user is otherwise looking at a tunnel they did not choose.
+  String? _directFailure;
+
   /// The HTTP half of this channel: images and actions, over the origin the
   /// socket actually reached.
   late final ServerHttp _http = ServerHttp(
@@ -742,12 +823,25 @@ class AgentService extends ChangeNotifier {
   /// reached.
   Uri? get httpBase => ServerHttp.originOf(_activeEndpoint ?? _lastEndpoint);
 
-  /// History images, fetched on demand over HTTP (never shipped with history).
+  /// History images, fetched on demand (never shipped with history). Over a
+  /// direct channel they are requested as a command and arrive as a push; over
+  /// the tunnel they are an HTTP request to the tunnel origin.
   late final ImageStore images = ImageStore((imageId) {
+    if (_direct) {
+      _send({'type': 'get_image', 'imageId': imageId});
+      return;
+    }
     unawaited(_http.fetchImage(imageId));
   });
 
   void _send(Map<String, dynamic> cmd) {
+    // Over a direct channel there is no HTTP origin to reach: a third party in
+    // the data path is exactly what the direct transport exists to avoid. The
+    // frames are the same ones the tunnel carries.
+    if (_direct) {
+      _ws?.send({'type': 'command', 'cmd': cmd});
+      return;
+    }
     // A user message is an ACTION, not an observation: it goes over HTTP so its
     // outcome is a status code the app can act on.
     if (cmd['type'] == 'user_message') {
@@ -756,6 +850,13 @@ class AgentService extends ChangeNotifier {
     }
     _ws?.send({'type': 'command', 'cmd': cmd});
   }
+
+  /// Whether the live channel reaches the machine directly, with no third party
+  /// in the data path.
+  bool get directConnection => _direct;
+
+  /// Why the last direct attempt failed, if it did.
+  String? get directFailure => _directFailure;
 
   /// Mark the tracked send that matches this command as refused, with its reason.
   void _failSend(Map<String, dynamic> cmd, String reason) {
@@ -1070,100 +1171,6 @@ class AgentService extends ChangeNotifier {
 }
 
 /// Manages a single WebSocket connection to the PiNest server.
-class WebSocketConnection {
-  final Uri endpoint;
-  WebSocketChannel? _channel;
-  StreamSubscription? _sub;
-  Timer? _heartbeat;
-  bool _open = false;
-  bool _closedByUs = false;
-  DateTime _lastInbound = DateTime.now();
-
-  WebSocketConnection(this.endpoint) {
-    if (endpoint.scheme != 'wss' ||
-        !endpoint.hasAuthority ||
-        endpoint.host.isEmpty ||
-        endpoint.userInfo.isNotEmpty ||
-        endpoint.hasQuery ||
-        endpoint.hasFragment) {
-      throw ArgumentError.value(endpoint, 'endpoint', 'must be a safe WSS URI');
-    }
-  }
-
-  Future<void> connect({
-    required Future<String> Function() token,
-    required void Function(Map<String, dynamic>) onMessage,
-    required void Function(String) onError,
-    required void Function() onClose,
-  }) async {
-    try {
-      _channel = WebSocketChannel.connect(endpoint);
-      // The handshake completes asynchronously — _open must only become true
-      // once the socket is REAL. Setting it earlier silently dropped sends
-      // into a not-yet-open (or already-failed) socket.
-      await _channel!.ready;
-      if (_closedByUs) {
-        _channel?.sink.close();
-        return;
-      }
-      _open = true;
-      _lastInbound = DateTime.now();
-      _sub = _channel!.stream.listen(
-        (data) {
-          _lastInbound = DateTime.now();
-          try {
-            onMessage(jsonDecode(data as String) as Map<String, dynamic>);
-          } catch (_) {}
-        },
-        onError: (e) {
-          _open = false;
-          onError(e.toString());
-        },
-        onDone: () {
-          _open = false;
-          if (!_closedByUs) onClose();
-        },
-        cancelOnError: true,
-      );
-      final idToken = await token();
-      _channel!.sink.add(jsonEncode({'type': 'auth', 'token': idToken}));
-      // Heartbeat: tunnels idle-timeout and kill the socket server-side while
-      // the client half stays open — every send then vanishes silently.
-      // Ping every 20s; if nothing inbound for 60s, the socket is dead:
-      // close it so onClose fires and the service re-dials.
-      _heartbeat = Timer.periodic(const Duration(seconds: 20), (_) {
-        if (!_open) return;
-        _channel?.sink.add(
-          jsonEncode({
-            'type': 'command',
-            'cmd': {'type': 'ping'},
-          }),
-        );
-        if (DateTime.now().difference(_lastInbound).inSeconds > 60) {
-          _open = false;
-          close();
-          onClose();
-        }
-      });
-    } catch (e) {
-      _open = false;
-      onError(e.toString());
-    }
-  }
-
-  void send(Map<String, dynamic> msg) {
-    if (_open) _channel?.sink.add(jsonEncode(msg));
-  }
-
-  void close() {
-    _closedByUs = true;
-    _heartbeat?.cancel();
-    _sub?.cancel();
-    _channel?.sink.close();
-    _open = false;
-  }
-}
-
 /// A one-shot, user-facing message from the server (see `AgentService.notices`).
 class ServerNotice {
   final String message;
