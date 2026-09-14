@@ -67,13 +67,35 @@ class AgentService extends ChangeNotifier {
   String get connectionReason {
     final reason = _error?.trim();
     if (reason != null && reason.isNotEmpty) {
-      return reason;
+      // Name the host: "Failed to connect WebSocket" without one cannot be
+      // told apart from a stale address or a blocked network, and the address
+      // is the first thing anyone needs to check.
+      final host = _dialTarget?.host;
+      return host == null ? reason : '$host: $reason';
     }
     final direct = _direct.failure?.trim();
     if (direct != null && direct.isNotEmpty) {
       return 'direct connection unavailable: $direct';
     }
-    return 'no connection attempt has reported a reason yet';
+    return _connectionNote;
+  }
+
+  /// What the connection path last did.
+  ///
+  /// Every branch that can leave the app offline says something here, because
+  /// the alternative is a screen that reads "offline" while nothing - not the
+  /// discovery listener, not the dial - has recorded whether it even ran.
+  String _connectionNote = 'no connection attempt has reported a reason yet';
+
+  /// The endpoint of the attempt being reported, so the reason can name it.
+  Uri? _dialTarget;
+
+  void _note(String note) {
+    if (_connectionNote == note) {
+      return;
+    }
+    _connectionNote = note;
+    notifyListeners();
   }
 
   /// Transient server messages the user must SEE: `notice` (something they
@@ -228,6 +250,7 @@ class AgentService extends ChangeNotifier {
           (doc) async {
             if (_boundUid != uid) return;
             if (!doc.exists) {
+              _note('the machine has not published anything for this account yet');
               _transitionToDisconnected(forgetEndpoint: true);
               return;
             }
@@ -239,6 +262,7 @@ class AgentService extends ChangeNotifier {
             final endpoint = secureDiscoveryWebSocketUri(data['url']);
 
             if (!fresh) {
+              _note('the machine\'s last update is ${(age / 1000).round()}s old, so it is not being used');
               _transitionToDisconnected(forgetEndpoint: true);
               return;
             }
@@ -264,19 +288,28 @@ class AgentService extends ChangeNotifier {
                 remote: endpoint,
                 lastFailedLocal: _localFailed,
               );
-              if (picked != null) await _dial(picked);
+              if (picked != null) {
+                _note('connecting to ${picked.host}');
+                _dialTarget = picked;
+                await _dial(picked);
+              } else {
+                _note('the machine published no endpoint this app can dial');
+              }
             }
             // A direct connection needs no third party in the data path. A
             // failure is not silent: the link records why, and a machine with
             // no tunnel at all is still reachable this way.
             _direct.tryConnectInBackground(data);
             if (endpoint == null && !_direct.active) {
+              _note('the machine published no tunnel URL; a direct connection is being attempted');
               _transitionToDisconnected(forgetEndpoint: true, notify: false);
               notifyListeners();
             }
           },
           onError: (e) {
-            _error = e.toString();
+            // A listener that dies silently is the worst case: the app looks
+            // offline and nothing anywhere says the updates stopped arriving.
+            _note('the machine\'s updates stopped reaching this app: $e');
             notifyListeners();
           },
         );
@@ -296,6 +329,20 @@ class AgentService extends ChangeNotifier {
   Future<void> _dialChannel(ControlChannel socket) async {
     _transitionToDisconnected();
     _ws = socket;
+    try {
+      await _connectChannel(socket);
+    } catch (e) {
+      // A dial can THROW instead of reporting through onError - a handshake
+      // that never completes is now one of those. Uncaught, it left the app
+      // offline with no reason recorded and no retry scheduled.
+      if (!identical(_ws, socket)) return;
+      _error = '$e';
+      _note('connecting to ${socket.endpoint?.host ?? 'the machine'} failed: $e');
+      _transitionToDisconnected(source: socket, reconnect: true);
+    }
+  }
+
+  Future<void> _connectChannel(ControlChannel socket) async {
     await socket.connect(
       token: _token,
       onMessage: (message) {
@@ -310,6 +357,7 @@ class AgentService extends ChangeNotifier {
           _localFailed = _localEndpoint;
         }
         _error = e;
+        _note('the connection failed: $e');
         _noteChannelGone(socket);
         _transitionToDisconnected(source: socket, reconnect: true);
       },
@@ -318,6 +366,7 @@ class AgentService extends ChangeNotifier {
         // The old code waited for a Firestore doc change to re-dial — which
         // never comes when the doc is unchanged — so the app went silently
         // deaf and every send vanished. Re-dial on our own with backoff.
+        _note('the connection dropped; reconnecting');
         _noteChannelGone(socket);
         _transitionToDisconnected(source: socket, reconnect: true);
       },
@@ -407,6 +456,7 @@ class AgentService extends ChangeNotifier {
     switch (msg['type']) {
       case 'authed':
         _connected = true;
+        _dialTarget = _ws?.endpoint;
         _activeEndpoint = _ws?.endpoint;
         _reconnectDelay = 2; // backoff satisfied — reset
         _flushOutbox();

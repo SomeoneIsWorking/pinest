@@ -23,6 +23,27 @@ Map<String, dynamic> commandFrame(Map<String, dynamic> command) => {
       'cmd': command,
     };
 
+/// Wait for a handshake, or report the deadline and close the socket.
+///
+/// The one rule behind the timeout, as its own function: a dial that never
+/// completes must become a reported failure and a closed socket rather than an
+/// app that sits offline with nothing recorded and never retries. Kept separate
+/// from the transport so the rule is testable without a network.
+Future<void> awaitHandshake({
+  required Future<void> ready,
+  required Uri endpoint,
+  required Duration timeout,
+  required void Function() close,
+}) {
+  return ready.timeout(
+    timeout,
+    onTimeout: () {
+      close();
+      throw TimeoutException('no handshake from $endpoint in ${timeout.inSeconds}s');
+    },
+  );
+}
+
 abstract class ControlChannel {
   /// The endpoint this channel dials, when it dials one. A peer-to-peer channel
   /// has no address: it was negotiated, not dialed.
@@ -48,11 +69,16 @@ abstract class ControlChannel {
 /// before it is declared dead. A tunnel idle-timeout or a killed host leaves
 /// the client half open, and every send then vanishes silently.
 const Duration kChannelHeartbeatInterval = Duration(seconds: 20);
+/// How long a dial may hang before it is reported as a failure. Without this a
+/// black-holed connect never returned and never errored, so the app sat offline
+/// with nothing recorded and never retried.
+const Duration kChannelOpenTimeout = Duration(seconds: 15);
 const Duration kChannelSilenceTimeout = Duration(seconds: 60);
 
 class WebSocketConnection implements ControlChannel {
   @override
   final Uri endpoint;
+  final Duration _openTimeout;
   WebSocketChannel? _channel;
   StreamSubscription? _sub;
   Timer? _heartbeat;
@@ -60,7 +86,8 @@ class WebSocketConnection implements ControlChannel {
   bool _closedByUs = false;
   DateTime _lastInbound = DateTime.now();
 
-  WebSocketConnection(this.endpoint) {
+  WebSocketConnection(this.endpoint, {Duration? openTimeout})
+      : _openTimeout = openTimeout ?? kChannelOpenTimeout {
     if (endpoint.scheme != 'wss' ||
         !endpoint.hasAuthority ||
         endpoint.host.isEmpty ||
@@ -86,7 +113,12 @@ class WebSocketConnection implements ControlChannel {
       // The handshake completes asynchronously — _open must only become true
       // once the socket is REAL. Setting it earlier silently dropped sends
       // into a not-yet-open (or already-failed) socket.
-      await _channel!.ready;
+      await awaitHandshake(
+        ready: _channel!.ready,
+        endpoint: endpoint,
+        timeout: _openTimeout,
+        close: () => _channel?.sink.close(),
+      );
       if (_closedByUs) {
         _channel?.sink.close();
         return;
