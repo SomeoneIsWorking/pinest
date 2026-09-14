@@ -124,6 +124,13 @@ requests the resolved address with the tunnel's own SNI/Host; any HTTP status
 server. Live evidence: a real quick tunnel that answers `HTTP 000` from this
 host was proven `answered=true, vantage=public-dns` by the shipping check.
 
+Verified live end to end on 2026-09-14: the state frame reports
+`provider=cloudflared` with a published `*.trycloudflare.com` URL, the name
+resolves to a Cloudflare edge address through public resolvers, and requests
+through it reach this server's auth boundary (`/image/tunnel-probe` → 401,
+`/history` with a wrong key → 401 `missing or invalid access key`). The direct
+transport's offer is published alongside the URL.
+
 A tunnel still being verified has no handle, so a teardown during that window
 left its process running with a public name pointed at a dead port (one orphaned
 cloudflared per reload). Providers now report the process the moment it spawns,
@@ -601,10 +608,10 @@ Evidence: Node suite (`npm test`) passes with 296 tests and 0 failures; `npm run
 
 ## Current focus
 
-S15/G7 is the current focus: the host half of the direct transport is verified
-live, so the next milestone is the browser client's answer path - a
-`RTCPeerConnection` in the Flutter web app that reads the offer from discovery,
-writes its answer, and runs the existing protocol over the DataChannel (pushes
-bridged with the scheduler's drop-stale behaviour, actions framed with real
-status responses). #46 tracks it; #41, #42, #44, and #45 are the open work in
-priority order.
+S15/G7 is the current focus. Both halves of the direct transport exist and are
+verified separately - the host's offer is published through the real discovery
+document and a peer completes the exchange; the browser's answer path runs in
+real Chromium - and the tunnel path is verified live end to end. What remains is
+the one thing that needs the operator's device: a real phone/browser reaching
+the live host over the direct channel with no tunnel in the data path (#46).
+`p2p` is off by default in a fresh install.
