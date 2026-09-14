@@ -8,6 +8,8 @@
 /// it could not.
 library;
 
+import 'dart:async';
+
 import 'control_channel.dart';
 import '../logic/direct_offer.dart';
 
@@ -71,6 +73,17 @@ class DirectLink {
     _attemptInFlight = false;
     _answeredOfferTs = null;
     _failure = null;
+  }
+
+  /// Attempt a direct connection without making the caller wait for it.
+  ///
+  /// Answering an offer takes as long as ICE takes - up to the gather and
+  /// open deadlines - and the caller's other path (the tunnel) is the one that
+  /// works today. Awaiting this first left the app with no connection at all for
+  /// the length of a punch that may never land, which reads as "the machine is
+  /// offline". The attempt still upgrades the connection if it opens.
+  void tryConnectInBackground(Map<String, dynamic>? discovery) {
+    unawaited(tryConnect(discovery));
   }
 
   /// Answer [discovery]'s offer when it carries a fresh one.
