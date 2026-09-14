@@ -15,6 +15,8 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import 'control_channel.dart';
+
 class ServerHttp {
   ServerHttp({
     required Uri? Function() endpoint,
@@ -72,6 +74,19 @@ class ServerHttp {
 
   Uri? get _base => originOf(_endpoint());
 
+  /// POST one command to one route, as the frame both transports carry.
+  ///
+  /// One place builds the body and one place chooses the client, so a route
+  /// cannot accidentally send a bare command over HTTP while the socket sends a
+  /// frame - the mismatch that made every posted message fail on the machine.
+  Future<http.Response> _postCommand(String path, Map<String, dynamic> command) {
+    final url = _base!.replace(path: path);
+    final headers = {'content-type': 'application/json', 'x-pinest-key': _accessKey()!};
+    final body = json.encode(commandFrame(command));
+    return _client?.post(url, headers: headers, body: body) ??
+        http.post(url, headers: headers, body: body);
+  }
+
   /// Fetch one history image's bytes. Images are never shipped with history, so
   /// this is the only way a referenced image becomes visible.
   Future<void> fetchImage(String imageId) async {
@@ -104,28 +119,15 @@ class ServerHttp {
     required String sessionId,
     int? cursor,
   }) async {
-    final base = _base;
-    final key = _accessKey();
-    if (base == null || key == null) {
+    if (_base == null || _accessKey() == null) {
       return (frame: null, error: "not connected yet");
     }
     try {
-      final response = await (_client?.post(
-            base.replace(path: '/history'),
-            headers: {'content-type': 'application/json', 'x-pinest-key': key},
-            body: json.encode({
-              'sessionId': sessionId,
-              'cursor': ?cursor,
-            }),
-          ) ??
-          http.post(
-            base.replace(path: '/history'),
-            headers: {'content-type': 'application/json', 'x-pinest-key': key},
-            body: json.encode({
-              'sessionId': sessionId,
-              'cursor': ?cursor,
-            }),
-          ));
+      final response = await _postCommand('/history', {
+        'type': 'get_history',
+        'sessionId': sessionId,
+        'cursor': ?cursor,
+      });
       if (response.statusCode != 200) {
         return (frame: null, error: reasonFor(response));
       }
@@ -143,23 +145,12 @@ class ServerHttp {
   /// refusal with a reason, and an unreachable server is reported as such
   /// rather than left "sending" forever.
   Future<void> postMessage(Map<String, dynamic> cmd, {required bool online}) async {
-    final base = _base;
-    final key = _accessKey();
-    if (base == null || key == null || !online) {
+    if (_base == null || _accessKey() == null || !online) {
       _onOffline(cmd);
       return;
     }
     try {
-      final response = await (_client?.post(
-            base.replace(path: '/message'),
-            headers: {'content-type': 'application/json', 'x-pinest-key': key},
-            body: json.encode(cmd),
-          ) ??
-          http.post(
-            base.replace(path: '/message'),
-            headers: {'content-type': 'application/json', 'x-pinest-key': key},
-            body: json.encode(cmd),
-          ));
+      final response = await _postCommand('/message', cmd);
       if (response.statusCode == 202) {
         return;
       }

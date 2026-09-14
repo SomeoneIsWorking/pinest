@@ -169,6 +169,9 @@ class AgentService extends ChangeNotifier {
 
     if (forgetEndpoint) _lastEndpoint = null;
     if (clearClientState) {
+      // A different account (or a fresh start) must not inherit an offer it
+      // already answered, nor the claim that the previous machine is direct.
+      _direct.reset();
       _hostname = '';
       _activeSessionId = null;
       _homePath = null;
@@ -284,6 +287,7 @@ class AgentService extends ChangeNotifier {
           _localFailed = _localEndpoint;
         }
         _error = e;
+        _noteChannelGone(socket);
         _transitionToDisconnected(source: socket, reconnect: true);
       },
       onClose: () {
@@ -291,9 +295,20 @@ class AgentService extends ChangeNotifier {
         // The old code waited for a Firestore doc change to re-dial — which
         // never comes when the doc is unchanged — so the app went silently
         // deaf and every send vanished. Re-dial on our own with backoff.
+        _noteChannelGone(socket);
         _transitionToDisconnected(source: socket, reconnect: true);
       },
     );
+  }
+
+  /// A direct channel has no origin; the tunnel socket does. Losing the direct
+  /// one means the machine is no longer reached directly, so the link must stop
+  /// claiming it - otherwise the app shows "connected directly" over a tunnel
+  /// and routes sends at a channel that is gone.
+  void _noteChannelGone(ControlChannel socket) {
+    if (socket.endpoint == null) {
+      _direct.channelLost();
+    }
   }
 
   /// Set when the socket was lost with sends possibly unconfirmed.
@@ -802,7 +817,7 @@ class AgentService extends ChangeNotifier {
     // the data path is exactly what the direct transport exists to avoid. The
     // frames are the same ones the tunnel carries.
     if (_direct.active) {
-      _ws?.send({'type': 'command', 'cmd': cmd});
+      _ws?.send(commandFrame(cmd));
       return;
     }
     // A user message is an ACTION, not an observation: it goes over HTTP so its
@@ -811,7 +826,7 @@ class AgentService extends ChangeNotifier {
       unawaited(_http.postMessage(cmd, online: _connected));
       return;
     }
-    _ws?.send({'type': 'command', 'cmd': cmd});
+    _ws?.send(commandFrame(cmd));
   }
 
   /// Whether the live channel reaches the machine directly, with no third party
