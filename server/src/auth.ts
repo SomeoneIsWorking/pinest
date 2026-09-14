@@ -84,6 +84,11 @@ export interface FirebaseAuth {
   verifyToken(token: string): Promise<Identity | null>;
   /** Publish the presence/discovery doc: users/{uid}. */
   publishPresence(uid: string, doc: PresenceDoc): Promise<void>;
+  /** Merge raw fields into the owner's discovery doc (WebRTC signaling rides
+   * here rather than a second service: the doc is already watched by the app). */
+  patchUserDoc(uid: string, fields: Record<string, unknown>): Promise<void>;
+  /** Read the owner's discovery doc, or null when it does not exist. */
+  readUserDoc(uid: string): Promise<Record<string, unknown> | null>;
   /** Force a fresh browser sign-in (the /pinest-auth command). */
   forceReLogin(expectedUid?: string): Promise<Identity>;
   /** Human name for status lines ("hosted" vs "admin:<project>"). */
@@ -276,14 +281,40 @@ async function verifyHostedLoginPair(
 }
 
 /** Convert a flat presence doc to Firestore REST fields. */
-export function presenceToFirestoreFields(doc: PresenceDoc): Record<string, any> {
-  const fields: Record<string, any> = {
-    url: doc.url === null ? { nullValue: null } : { stringValue: doc.url },
-    online: { booleanValue: doc.online },
-    ts: { integerValue: String(doc.ts ?? Date.now()) },
+
+/** Plain value → Firestore REST value. Only the shapes signaling needs; an
+ * unsupported value throws rather than being silently written as something
+ * else, because a wrong encoding here is invisible until a browser fails. */
+export function toFirestoreValue(value: unknown): Record<string, unknown> {
+  if (value === null) return { nullValue: null };
+  if (typeof value === "string") return { stringValue: value };
+  if (typeof value === "number") return { integerValue: String(Math.trunc(value)) };
+  if (typeof value === "boolean") return { booleanValue: value };
+  throw new Error(`unsupported Firestore field value: ${typeof value}`);
+}
+
+/** Firestore REST value → plain value. */
+export function fromFirestoreValue(value: unknown): unknown {
+  if (typeof value !== "object" || value === null) return undefined;
+  const record = value as Record<string, unknown>;
+  if ("nullValue" in record) return null;
+  if ("stringValue" in record) return record.stringValue;
+  if ("booleanValue" in record) return record.booleanValue;
+  if ("integerValue" in record) return Number(record.integerValue);
+  if ("timestampValue" in record) return record.timestampValue;
+  return undefined;
+}
+
+/** The presence doc as plain values. Encoding happens once, in
+ * `toFirestoreValue`, so a second writer cannot encode differently. */
+export function presenceFields(doc: PresenceDoc): Record<string, unknown> {
+  const fields: Record<string, unknown> = {
+    url: doc.url,
+    online: doc.online,
+    ts: doc.ts ?? Date.now(),
   };
-  if (doc.ownerEmail !== undefined) fields.ownerEmail = doc.ownerEmail === null ? { nullValue: null } : { stringValue: doc.ownerEmail };
-  if (doc.hostname !== undefined) fields.hostname = { stringValue: doc.hostname };
+  if (doc.ownerEmail !== undefined) fields.ownerEmail = doc.ownerEmail;
+  if (doc.hostname !== undefined) fields.hostname = doc.hostname;
   return fields;
 }
 
@@ -391,8 +422,32 @@ class RestFirebase implements FirebaseAuth {
   }
 
   async publishPresence(uid: string, doc: PresenceDoc): Promise<void> {
+    await this.patchUserDoc(uid, presenceFields(doc));
+  }
+
+  async patchUserDoc(uid: string, fields: Record<string, unknown>): Promise<void> {
+    await this.patchUserDocRaw(uid, fields);
+  }
+
+  async readUserDoc(uid: string): Promise<Record<string, unknown> | null> {
     const cfg = firebaseWebConfig();
-    const mask = Object.keys(presenceToFirestoreFields(doc))
+    const res = await this.fetchImpl(
+      `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/users/${uid}`,
+      { headers: { Authorization: `Bearer ${await this.machineIdToken()}` } },
+    );
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`discovery doc read failed: HTTP ${res.status}`);
+    const body = await res.json() as { fields?: Record<string, unknown> };
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(body.fields ?? {})) {
+      out[key] = fromFirestoreValue(value);
+    }
+    return out;
+  }
+
+  private async patchUserDocRaw(uid: string, fields: Record<string, unknown>): Promise<void> {
+    const cfg = firebaseWebConfig();
+    const mask = Object.keys(fields)
       .map((f) => `updateMask.fieldPaths=${encodeURIComponent(f)}`).join("&");
     for (let attempt = 0; attempt < 2; attempt++) {
       const res = await this.fetchImpl(
@@ -403,7 +458,11 @@ class RestFirebase implements FirebaseAuth {
             "Content-Type": "application/json",
             Authorization: `Bearer ${await this.machineIdToken()}`,
           },
-          body: JSON.stringify({ fields: presenceToFirestoreFields(doc) }),
+          body: JSON.stringify({
+            fields: Object.fromEntries(
+              Object.entries(fields).map(([key, value]) => [key, toFirestoreValue(value)]),
+            ),
+          }),
         });
       if (res.status === 401 && attempt === 0) {
         await this.refreshMachineToken();
@@ -411,7 +470,7 @@ class RestFirebase implements FirebaseAuth {
       }
       if (!res.ok) {
         const text = await res.text().catch(() => "");
-        throw new Error(`presence publish failed (${res.status}): ${text.slice(0, 200)}`);
+        throw new Error(`discovery doc write failed (${res.status}): ${text.slice(0, 200)}`);
       }
       return;
     }
@@ -588,13 +647,17 @@ export class AdminFirebase implements FirebaseAuth {
   }
 
   async publishPresence(uid: string, doc: PresenceDoc): Promise<void> {
-    await this.db.collection("users").doc(uid).set({
-      url: doc.url,
-      online: doc.online,
-      ownerEmail: doc.ownerEmail,
-      hostname: doc.hostname,
-      ts: doc.ts ?? Date.now(),
-    }, { merge: true });
+    await this.patchUserDoc(uid, presenceFields(doc));
+  }
+
+  async patchUserDoc(uid: string, fields: Record<string, unknown>): Promise<void> {
+    await this.db.collection("users").doc(uid).set(fields, { merge: true });
+  }
+
+  async readUserDoc(uid: string): Promise<Record<string, unknown> | null> {
+    const snap = await this.db.collection("users").doc(uid).get();
+    if (!snap.exists) return null;
+    return (snap.data() as Record<string, unknown> | undefined) ?? {};
   }
 
   async forceReLogin(expectedUid?: string): Promise<Identity> {
