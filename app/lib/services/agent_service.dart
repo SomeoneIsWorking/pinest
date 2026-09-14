@@ -59,6 +59,23 @@ class AgentService extends ChangeNotifier {
   String? _error;
   String? get error => _error;
 
+  /// Why the app is not connected, in the words of whoever last refused it.
+  ///
+  /// A bare "offline" cannot be told apart from a machine that is up but
+  /// unreachable, which is exactly the difference a user needs to see - and a
+  /// report cannot carry it if the app never says it.
+  String get connectionReason {
+    final reason = _error?.trim();
+    if (reason != null && reason.isNotEmpty) {
+      return reason;
+    }
+    final direct = _direct.failure?.trim();
+    if (direct != null && direct.isNotEmpty) {
+      return 'direct connection unavailable: $direct';
+    }
+    return 'no connection attempt has reported a reason yet';
+  }
+
   /// Transient server messages the user must SEE: `notice` (something they
   /// asked for happened — compact/clear) and `error`. A stream, not state:
   /// each one is shown once. Before this the server's `error` was parsed into
