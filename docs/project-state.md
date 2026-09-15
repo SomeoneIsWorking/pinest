@@ -284,6 +284,18 @@ path wired to fail loudly so a delivery could not be a poll in disguise
 paced poll remains there as the declared fallback, and the status names which one
 is in play rather than leaving it to be assumed.
 
+A watch that dies rebuilds itself. Firestore tears down an errored snapshot
+listener and never delivers again, and the first version only kept the reason:
+through the 2026-09-15 quota outage the machine went half-alive - publishing
+fresh offers on its own timer while reading nobody's answer, so the app sat at
+"online, not reachable" even after the quota returned, until a process restart
+rebuilt the watch. `npm run verify:direct` measured the deafness as four
+exchanges ending `no channels (saw none)` against seconds-old offers, and passed
+end-to-end (`ice=connected`, framed protocol both ways) the moment a fresh
+listener existed. The watch now re-arms on a bounded backoff that resets on a
+delivered read and stays dead through an owner's `stop()` (I-063); the hosted
+poll fallback re-reads on its own timer and was never at risk.
+
 Gap: the direct transport is browser-only (a Dart VM has no ICE stack here), the
 tunnel stays in use until a direct channel is actually open, and travel across a
 third network is still unproven: every live verification so far ran both peers on
@@ -806,12 +818,10 @@ Evidence: Node suite (`npm test`) passes with 296 tests and 0 failures; `npm run
 
 ## Current focus
 
-S22 is the current focus: the host terminal's own session views now behave like
-Pi's about commands and input — Pi's command list in the prompt, `/tree` and the
-two live selectors through Pi's own components, mouse in fullscreen TUI mode, a
-new session asked where to run, and a view opened mid-run that keeps streaming.
-What remains there is a human's eyes on a real terminal (I-061), since only the
-operator can see it and the wheel needs fullscreen mode. Two older workstreams
-stay open behind it, unowned by this focus: direct-channel traversal from another
-network (goal G7), and observing that the context-budget fix actually changes
-behaviour.
+S15 is the current focus: the direct transport is proven on this machine in both
+directions and now rebuilds its own discovery watch after an outage (I-063);
+what remains is the one piece a local run cannot supply - a real phone on
+another network, and meanwhile the tunnel that carries it. The session-view work
+in front of it still awaits one thing only a person can give: eyes on a real
+fullscreen terminal (I-061). The context-budget fix behind both awaits
+observation that it changes behaviour.
