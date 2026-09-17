@@ -56,7 +56,17 @@ import {
 
 import { SessionTranscript, sourcesForSession } from "./session-transcript.ts";
 import type { TranscriptSession } from "./session-transcript.ts";
-import { frame, terminalRows, dispatchInto, type FrameRegion } from "./tui-frame.ts";
+import {
+  frame,
+  terminalRows,
+  dispatchInto,
+  type FrameRegion,
+  enableMouseTracking,
+  disableMouseTracking,
+  parseWheelInput,
+  isMouseSequence,
+} from "./tui-frame.ts";
+import { handleClipboardPaste } from "./clipboard.ts";
 import {
   attachCommandList,
   parseSlashCommand,
@@ -147,6 +157,7 @@ class AttachView implements AttachComponent {
   private model: ModelSelectorComponent | null = null;
   private thinking: ThinkingSelectorComponent | null = null;
   private helpScroll = 0;
+  private queuedMessages: { steering: string[]; followUp: string[] } = { steering: [], followUp: [] };
 
   constructor(opts: AttachViewOptions) {
     this.opts = opts;
@@ -175,6 +186,9 @@ class AttachView implements AttachComponent {
       ),
     );
     this.editor.onSubmit = (text: string) => void this.submit(text);
+    this.editor.onPasteImage = () => void handleClipboardPaste(this.editor, tui);
+
+    enableMouseTracking(tui);
 
     this.unsubscribe = this.session.subscribe((event: any) => this.onEvent(event));
     if (typeof entry.onNotice === "function") {
@@ -224,6 +238,12 @@ class AttachView implements AttachComponent {
       case "agent_end":
         this.status = "idle";
         this.transcript.finish();
+        break;
+      case "queue_update":
+        this.queuedMessages = {
+          steering: Array.isArray(event.steering) ? event.steering : [],
+          followUp: Array.isArray(event.followUp) ? event.followUp : [],
+        };
         break;
       case "thinking_level_changed":
       case "session_info_changed":
@@ -340,7 +360,12 @@ class AttachView implements AttachComponent {
     }
     this.editor.addToHistory(trimmed);
     this.editor.setText("");
-    this.feedback = result.queued ? "queued: the session is mid-run" : "";
+    if (result.queued) {
+      if (!this.queuedMessages.steering.includes(trimmed)) {
+        this.queuedMessages.steering.push(trimmed);
+      }
+    }
+    this.feedback = "";
     this.status = "working";
     this.updateChrome();
     this.opts.tui.requestRender();
@@ -638,13 +663,26 @@ class AttachView implements AttachComponent {
     const from = this.scroll.scrollTop;
     const window = content.slice(from, from + viewport);
     const bar = scrollbar(content.length, viewport, from);
+    const queued = this.getQueuedMessages();
+    const queuedLines: string[] = [];
+    for (const msg of queued.steering) {
+      queuedLines.push(`  ${safeFg(this.opts.theme, "muted", `Steering: ${msg}`)}`);
+    }
+    for (const msg of queued.followUp) {
+      queuedLines.push(`  ${safeFg(this.opts.theme, "muted", `Follow-up: ${msg}`)}`);
+    }
+
     // Where the prompt sits in this frame, recorded for the pointer: the frame's
     // top border, the directory line, the scrolled window, and a spacer come
     // before it. Recomputed on every draw because the editor changes height as
     // the prompt wraps.
     const editorLines = this.editor.render(contentWidth);
     const editorHeight = editorLines.length;
-    this.promptLayout = { top: 3 + viewport, height: editorHeight, width: contentWidth };
+    this.promptLayout = {
+      top: 3 + viewport + queuedLines.length,
+      height: editorHeight,
+      width: contentWidth,
+    };
     const body: string[] = [];
     body.push(`  ${safeFg(this.opts.theme, "muted", this.opts.entry.cwd)}`);
     for (let i = 0; i < viewport; i += 1) {
@@ -656,6 +694,9 @@ class AttachView implements AttachComponent {
       body.push(bar === null ? line : `${padTo(line, contentWidth)} ${bar[i] ?? " "}`);
     }
     body.push("");
+    for (const line of queuedLines) {
+      body.push(line);
+    }
     // The prompt is OUTSIDE the scrolled window, so it stays put: a session you
     // cannot type into is a session you cannot use.
     // The editor is drawn at the same width as the transcript body, so its
@@ -719,10 +760,30 @@ class AttachView implements AttachComponent {
     return [`  ${safeFg(theme, "muted", heading)}`, "", ...lines];
   }
 
+  private getQueuedMessages(): { steering: string[]; followUp: string[] } {
+    const s = this.session as any;
+    const steering = typeof s?.getSteeringMessages === "function"
+      ? s.getSteeringMessages()
+      : this.queuedMessages.steering;
+    const followUp = typeof s?.getFollowUpMessages === "function"
+      ? s.getFollowUpMessages()
+      : this.queuedMessages.followUp;
+    return {
+      steering: Array.isArray(steering) ? steering : [],
+      followUp: Array.isArray(followUp) ? followUp : [],
+    };
+  }
+
+  private queuedLineCount(): number {
+    const queued = this.getQueuedMessages();
+    return queued.steering.length + queued.followUp.length;
+  }
+
   /** How many rows the transcript window gets, for the page keys. */
   private viewportRows(width: number): number {
     const height = terminalRows(this.opts.tui);
-    const chrome = 2 + 1 + 1 + this.editor.render(width - 6).length + 1;
+    const queuedCount = this.queuedLineCount();
+    const chrome = 2 + 1 + 1 + queuedCount + this.editor.render(width - 6).length + 1;
     return Math.max(3, height - chrome);
   }
 
@@ -738,6 +799,32 @@ class AttachView implements AttachComponent {
     // A disposed overlay must be inert: its session subscription is gone, so
     // acting on input would leave the flow in a state nothing can repair.
     if (this.disposed) {
+      return;
+    }
+    const wheelDelta = parseWheelInput(data);
+    if (wheelDelta !== null) {
+      if (this.mode !== "transcript") {
+        const component = this.tree ?? this.model ?? this.thinking;
+        if (component && this.selectorLayout) {
+          const fakeMouseEvent: TuiMouseEvent = {
+            type: "wheel",
+            button: wheelDelta < 0 ? "wheelUp" : "wheelDown",
+            wheelDelta,
+            screenX: 0,
+            screenY: 0,
+            x: 0,
+            y: 0,
+          } as any;
+          dispatchInto(component, fakeMouseEvent, this.selectorLayout);
+          this.opts.tui.requestRender();
+          return;
+        }
+      }
+      this.scroll.scrollBy(wheelDelta);
+      this.opts.tui.requestRender();
+      return;
+    }
+    if (isMouseSequence(data)) {
       return;
     }
     if (this.mode !== "transcript") {
@@ -868,6 +955,7 @@ class AttachView implements AttachComponent {
 
   dispose(): void {
     this.disposed = true;
+    disableMouseTracking(this.opts.tui);
     try {
       this.unsubscribe();
     } catch {

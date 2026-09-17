@@ -22,7 +22,16 @@ import type {
 } from "@earendil-works/pi-tui";
 import { rawKeyHint } from "@earendil-works/pi-coding-agent";
 
-import { frame, terminalRows, dispatchInto, FRAME_TOP } from "./tui-frame.ts";
+import {
+  frame,
+  terminalRows,
+  dispatchInto,
+  FRAME_TOP,
+  enableMouseTracking,
+  disableMouseTracking,
+  parseWheelInput,
+  isMouseSequence,
+} from "./tui-frame.ts";
 
 export interface SessionSummary {
   id: string;
@@ -167,6 +176,8 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
     onSelect(target);
   };
 
+  enableMouseTracking(opts.tui);
+
   return {
     render(width: number): string[] {
       const height = rows();
@@ -210,6 +221,29 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
     },
 
     handleInput(data: string): void {
+      const wheelDelta = parseWheelInput(data);
+      if (wheelDelta !== null) {
+        if (mode !== "confirm" && sessions.length > 0 && shown.length > 0) {
+          const fakeMouseEvent: TuiMouseEvent = {
+            type: "wheel",
+            button: wheelDelta < 0 ? "wheelUp" : "wheelDown",
+            wheelDelta,
+            screenX: 0,
+            screenY: 0,
+            x: 0,
+            y: 0,
+          } as any;
+          const result = view.handleMouse(fakeMouseEvent);
+          if (result) {
+            refresh();
+          }
+        }
+        return;
+      }
+      if (isMouseSequence(data)) {
+        return;
+      }
+
       if (mode === "confirm" && confirming) {
         if (matchesKey(data, Key.escape) || matchesKey(data, Key.left) || data === "q") {
           confirming = null;
@@ -311,6 +345,10 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
 
     invalidate(): void {
       view.invalidate();
+    },
+
+    dispose(): void {
+      disableMouseTracking(opts.tui);
     },
 
     /** The wheel moves the selection; a press moves it under the pointer and a

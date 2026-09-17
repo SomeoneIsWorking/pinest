@@ -63,6 +63,48 @@ export const FRAME_LEFT = 2;
 /** The frame's top chrome: the title border row. */
 export const FRAME_TOP = 1;
 
+/** Check if terminal input data is a mouse tracking sequence. */
+export function isMouseSequence(data: string): boolean {
+  return /^\x1b\[<\d+;\d+;\d+[Mm]$/.test(data) || (data.length === 6 && data.startsWith("\x1b[M"));
+}
+
+/**
+ * Parse wheel direction from terminal mouse sequences (SGR or X10).
+ * Returns -3 for wheel up (scroll toward oldest), 3 for wheel down, or null if not a wheel event.
+ */
+export function parseWheelInput(data: string): number | null {
+  const sgr = /^\x1b\[<(\d+);(\d+);(\d+)[Mm]$/.exec(data);
+  if (sgr && sgr[1]) {
+    const button = Number.parseInt(sgr[1], 10);
+    if ((button & 64) !== 0) {
+      const direction = button & 3;
+      return direction === 0 ? -3 : 3;
+    }
+  }
+  if (data.length === 6 && data.startsWith("\x1b[M")) {
+    const button = data.charCodeAt(3) - 32;
+    if ((button & 64) !== 0) {
+      const direction = button & 3;
+      return direction === 0 ? -3 : 3;
+    }
+  }
+  return null;
+}
+
+/** Enable SGR mouse tracking in regular TUI mode so overlays can receive wheel events. */
+export function enableMouseTracking(tui: any): void {
+  if (tui?.mode === "regular" && typeof tui?.terminal?.write === "function") {
+    tui.terminal.write("\x1b[?1000h\x1b[?1002h\x1b[?1006h");
+  }
+}
+
+/** Restore terminal mouse tracking state when overlay closes. */
+export function disableMouseTracking(tui: any): void {
+  if (tui?.mode === "regular" && typeof tui?.terminal?.write === "function") {
+    tui.terminal.write("\x1b[?1006l\x1b[?1002l\x1b[?1000l");
+  }
+}
+
 /** Send one pointer event to a component drawn in `region`, in its own terms. */
 export function dispatchInto(
   target: MouseTarget,
