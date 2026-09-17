@@ -432,6 +432,14 @@ export function registerHostCommands(pi: ExtensionAPI, deps: () => HostCommandDe
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
       const { say, captureUi } = deps();
       captureUi(ctx);
+      // pi runs an extension command the moment it is sent, even while a
+      // response is streaming, and its own /reload refuses that moment with a
+      // warning only the TUI sees. Decide it here instead of reporting a reload
+      // that did not happen, and hand a bad moment back to the settle path.
+      if (typeof (ctx as { isIdle?: () => boolean }).isIdle === "function" && !ctx.isIdle()) {
+        say(ctx, `[pinest] ${queueReload(pi, ctx).message}`);
+        return;
+      }
       try {
         say(ctx, "[pinest] reloading extensions, skills, prompts, settings…");
         await ctx.reload();

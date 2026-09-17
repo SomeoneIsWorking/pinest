@@ -81,7 +81,9 @@ test("a reload asked for while idle goes out immediately", () => {
 test("with a direct reload available it is used, and nothing is queued", () => {
   const { sent, api } = fakePi();
   let reloaded = 0;
-  const commandCtx = { mode: "tui", reload: () => { reloaded += 1; } } as any;
+  // pi's own idle answer and the caller's flag agree here, which is the shape
+  // of every real command context: a command only ever runs when pi allows it.
+  const commandCtx = { mode: "tui", isIdle: () => true, reload: () => { reloaded += 1; } } as any;
   const result = queueReload(api, commandCtx, { working: false });
   assert.equal(result.ok, true);
   assert.equal(reloaded, 1);
@@ -128,6 +130,44 @@ test("an explicit flag still wins over the probe for a known state", () => {
   const result = queueReload(api, eventCtx, { working: false });
   assert.equal(result.ok, true);
   assert.deepEqual(sent, ["/pinest-reload"], "a known-idle caller is not deferred");
+});
+
+// ── The refusal pi keeps to itself ────────────────────────────────────────
+//
+// Measured in pi's own source: interactive-mode's `ctx.reload()` IS its
+// `/reload`, which returns early with a TUI-only warning when the session is
+// streaming; and `prompt()` dispatches an extension command BEFORE that check,
+// so a command sent mid-response runs and reloads nothing. A "settled" event is
+// therefore not proof that a reload will be accepted. `ctx.isIdle()` is the same
+// condition pi checks, and it is what these cases hold the reload paths to.
+
+test("a still-busy settle keeps the reload pending instead of spending it", () => {
+  const { sent, api } = fakePi();
+  queueReload(api, eventCtx, { working: true });
+  const busy = { mode: "tui", isIdle: () => false } as any;
+  assert.equal(flushDeferredReload(api, busy), false, "pi would refuse this moment");
+  assert.deepEqual(sent, [], "so nothing is sent to be refused");
+  assert.equal(reloadDeferred(), true, "and the ask survives for the next settle");
+
+  const idle = { mode: "tui", isIdle: () => true } as any;
+  assert.equal(flushDeferredReload(api, idle), true, "the next genuinely idle settle fires it");
+  assert.deepEqual(sent, ["/pinest-reload"]);
+});
+
+test("pi's own answer decides whether a reload is busy, not our mirror of it", () => {
+  // `isWorking` is pinest's view of the session status; pi's is the authority,
+  // and the two disagree exactly when a turn has just started or just ended.
+  const { sent, api } = fakePi();
+  setIsWorkingProbe(() => false);
+  const busy = { mode: "tui", isIdle: () => false } as any;
+  assert.match(queueReload(api, busy).message, /deferred/i, "pi says busy, so it is busy");
+  assert.deepEqual(sent, [], "and a request that would be refused is not made");
+  assert.equal(reloadDeferred(), true);
+  assert.equal(
+    getHostReloadResume(),
+    null,
+    "a reload nobody asked the agent for owes the host session no invented turn",
+  );
 });
 
 // ── The host session's continuation across a reload ───────────────────────
