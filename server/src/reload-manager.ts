@@ -209,6 +209,25 @@ export function setIsWorkingProbe(probe: () => boolean): void {
   _isWorking = probe;
 }
 
+/**
+ * What pi itself says about accepting a reload right now.
+ *
+ * `ExtensionContext.isIdle()` is the same condition pi's own `/reload` checks
+ * before it will do anything, and it is available to every handler — including
+ * the tool and event contexts that cannot call `ctx.reload()` at all. That
+ * makes it strictly better than any flag we can pass, which is why it wins.
+ * `null` means this context cannot answer and the caller's flag decides.
+ */
+function idleFromContext(ctx: ExtensionContext | null | undefined): boolean | null {
+  try {
+    const probe = (ctx as { isIdle?: () => boolean } | null | undefined)?.isIdle;
+    return typeof probe === "function" ? ctx!.isIdle() : null;
+  } catch {
+    // A stale context cannot answer the question; fall back to the probe.
+    return null;
+  }
+}
+
 /** Queue explicit reload.
  *
  * `working` must say whether the session is mid-response. pi's TUI REFUSES to
@@ -223,7 +242,8 @@ export function queueReload(
   options: { working?: boolean; requestedByAgent?: boolean } = {},
 ): { ok: boolean; message: string } {
   if (!pi) return { ok: false, message: "reload unavailable: extension not wired to a pi host" };
-  const working = options.working ?? _isWorking();
+  const idle = idleFromContext(ctx);
+  const working = options.working ?? (idle === null ? _isWorking() : !idle);
   try {
     const t = watcherTargets(ctx);
     const broken = firstSyntaxError(t.dirs, t.files);
@@ -281,9 +301,22 @@ export function queueReload(
 
 /** Fire a deferred reload once the session is idle. Returns true if it fired.
  * Called from the settle event: the only moment the TUI will accept a reload
- * that was asked for during a turn. */
-export function flushDeferredReload(pi: ExtensionAPI | null): boolean {
+ * that was asked for during a turn.
+ *
+ * "Settled" is not the same as "a reload will be accepted". pi dispatches an
+ * extension command the instant one is sent — even mid-response — so a settle
+ * at which something else has already started a run, or at which compaction is
+ * running, spends the request on a refusal that only the TUI hears about. Ask
+ * pi instead of assuming, and keep the request pending for the next settle. */
+export function flushDeferredReload(
+  pi: ExtensionAPI | null,
+  ctx?: ExtensionContext | null,
+): boolean {
   if (!_deferredReload || !pi) return false;
+  if (idleFromContext(ctx) === false) {
+    debug("[remote-code] session settled but is still busy — the deferred reload keeps waiting");
+    return false;
+  }
   _deferredReload = false;
   debug("[remote-code] session settled — firing the deferred reload");
   pi.sendUserMessage("/pinest-reload", { expandPromptTemplates: true });
