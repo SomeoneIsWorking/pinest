@@ -205,16 +205,23 @@ is published and the channel carries the auth handshake, a command, and an
 inbound frame; a peer that never opens a channel fails as a timeout rather than
 hanging; a description that is not an offer is refused.
 
-The transport owns its channels from the moment they exist. A peer may speak the
-instant its channel opens - the app sends its auth handshake as `connect`
-returns, while the machine resolves its channel promise at that same moment and
-builds the bridge a beat later - so a handler attached after that loses the
-handshake, the machine's own server closes the socket for being unauthenticated
-after ten seconds, and the direct channel reads as a punch that never landed.
-Measured live: both channels opened and no frame ever arrived. The exchange now
-buffers what a channel says until a consumer attaches (and reports a channel
-that closed before anyone listened), which the regression test proves by sending
-the frame before the bridge exists.
+The transport owns its channels from the moment they exist, and "moment" means
+creation, not the peer's DCEP ACK. A peer may speak the instant its channel
+opens: the app sends its auth handshake as `connect` returns, and Gecko does so
+before it has even put its own DCEP ACK for that stream on the wire — measured
+on a Firefox 156 peer, the `auth` frame arrived as SCTP DATA on stream 3 at a
+LOWER TSN than the ACK for stream 3. That ordering is legal (SCTP guarantees
+per-stream ordering only), and werift hands a message to a channel whose
+`onmessage` is unset to nobody, silently. Attaching the handler when the channel
+reported `open` therefore lost the handshake, kept `rawIn` and `framesToServer`
+at zero while both ends showed both labels open, and had the machine's own
+server close the unauthenticated socket after ten seconds — a punch that landed
+and carried nothing. `adoptChannel` now wraps each channel as it is created (the
+queue that holds what a channel says until a consumer attaches), the exchange
+still resolves only when both are genuinely open and rejects one that closes
+before opening, and the regression test sends the handshake from the peer's own
+`stateChange` "open" — i.e. before its ACK — where it FAILS on the previous code
+and passes on this one (I-065).
 
 The transport carries the protocol's own messages, whatever their size. A
 DataChannel message is bounded by the SCTP maximum a peer advertises and werift
@@ -272,7 +279,11 @@ not read the app's answer, the app could not read the machine's presence, and th
 result was a punch that failed with a 1008 timeout at one end and "Machine online,
 not reachable" at the other (issue #57). One read now yields both halves, the app's
 report is floored at one write per five seconds with a 30-second heartbeat, and
-presence is republished every 40 seconds instead of every 20.
+presence is republished every 40 seconds instead of every 20. That quota defect was
+real, but the counters it was recorded under — channels open, `framesToServer` zero,
+1008 authentication timeout — were measured again over dozens of correctly-signalled
+exchanges and belong to the pre-ACK drop above, not to the quota (I-065 corrects
+I-057).
 
 The machine's half of that exchange is no longer a poll at all. The app already
 pushed (the web SDK's `snapshots()` delivers per change); the machine read the
@@ -309,7 +320,12 @@ third network is still unproven: every live verification so far ran both peers o
 one machine, where ICE can succeed on a local candidate, so a real phone on
 another network is the remaining evidence. `npm run verify:direct` prints that
 limitation itself rather than letting a local success stand in for it. `p2p` is
-off by default in a fresh install.
+off by default in a fresh install. Peer interop is proven against Chromium and
+Gecko only, and it now MATTERS which: the pre-ACK ordering above is Gecko's
+(`p2p-integration.test.ts` reproduces that ordering deterministically in one
+process, and `test/direct_channel_web_test.dart` runs the app's own side in real
+Chromium), so a third engine needs a both-ends run — an instrument that does not
+exist yet and that no unit test can stand in for.
 
 ### S10 — Context and compaction controls
 
@@ -483,6 +499,29 @@ Auto-reload-on-change was REMOVED (2026-08-29) after it took the host down:
 every edit the agent made to its own source fired a reload, tearing down the
 instance mid-edit, and a half-written file left no working host to come back
 to. See I-021.
+
+The HOST session is nudged to continue too (2026-09-17). Adopted subsessions
+were already resumed, and one whose registry row was `running` was nudged with
+`RESUME_NUDGE` — but the host session is the one that ASKS for a reload and the
+one doing the work, and it had no equivalent, so a reload left it idle in the
+middle of a task until the user typed something. A reload it asked for through
+the `reload_runtime` tool is deferred to idle (pi refuses a reload while
+streaming), which means its turn has ended mid-task by the time the runtime goes
+away; and a reload that reaches teardown with a turn still streaming cut that run
+off in exactly the way a `running` subsession row is cut off. Both now record a
+plain-data continuation intent on
+`globalThis[Symbol.for("pinest.host.reload_resume")]` — the same device that
+parks live subsessions — and the re-imported instance starts ONE turn for it via
+`pi.sendMessage({ customType: "pinest", … }, { triggerTurn: true })` once
+bootstrap is wired. A reload at a genuine rest records nothing (no work was cut
+short); teardown restamps the record as the runtime actually goes away, so a
+reload that never completed ages out instead of firing a turn minutes later; and
+the record is consumed before the nudge is sent so a failed send cannot fire
+twice. Evidence: `server/test/reload-manager.test.ts` covers the deferred
+agent-requested reload being continued exactly once, an idle reload recording
+nothing, the stale record aging out, and the record being plain data (the parked
+subsession OBJECTS are a version hazard across a re-import; a string nudge and a
+timestamp are not).
 
 Footer interval leak across reloads resolved (2026-09-05): `FooterManager`
 (`server/src/footer.ts`) now owns interval lifecycle, stops timers on

@@ -1,6 +1,6 @@
 import type { HttpHistoryRunner } from "./http-api.ts";
 import { offerDirectTransport, type DirectTransport } from "./direct-transport.ts";
-import { createSessionLifecycle } from "./session-lifecycle.ts";
+import { createSessionLifecycle, RESUME_NUDGE } from "./session-lifecycle.ts";
 import {
   checkPathCommand,
   createFolderCommand,
@@ -63,6 +63,9 @@ import {
   queueReload,
   flushDeferredReload,
   changedSources,
+  getHostReloadResume,
+  setHostReloadResume,
+  triggerHostReloadResumeIfPending,
 } from "./reload-manager.ts";
 export {
   noteChangedSources,
@@ -436,7 +439,24 @@ async function teardownRemote(reason: "reload" | "shutdown" = "shutdown"): Promi
   if (_heartbeat) { clearInterval(_heartbeat); _heartbeat = null; }
   _bgManager?.dispose();
   _bgManager = null;
-  if (reason === "reload" && _supervisor) _supervisor.stashForReload();
+  if (reason === "reload") {
+    if (_supervisor) _supervisor.stashForReload();
+    // A reload reaches here mid-turn only when it did not go through
+    // `queueReload` (pi's own /reload, or a second request path) - pi refuses
+    // one while streaming, and a deferred one fires only after the turn has
+    // settled. Either way the run stopped where it stopped, so the host is owed
+    // the same continuation a restored `running` subsession row gets.
+    //
+    // This is also where the record is stamped: the runtime is going away NOW,
+    // and a request-time stamp on a reload that never completes must stay old
+    // enough to age out rather than fire a turn minutes later.
+    const requested = getHostReloadResume();
+    if (requested) {
+      setHostReloadResume({ ...requested, stampedAt: Date.now() });
+    } else if (_status === "working") {
+      setHostReloadResume({ stampedAt: Date.now(), reason: "working_interrupted", nudge: RESUME_NUDGE });
+    }
+  }
   try { await _supervisor?.shutdownAll(); } catch { /* */ }
   _supervisor = null;
   try { _ws?.stop(); } catch { /* */ }
@@ -1030,6 +1050,7 @@ function bridge(pi: ExtensionAPI): void {
         });
         notify(`[pinest] online as ${_ownerEmail ?? "(unknown)"} — ${_ws?.tunnelUrl ?? "tunnel still starting…"}`);
         renderFooter();
+        triggerHostReloadResumeIfPending(_pi);
       })
       .catch((e) => {
         const reason = (e as Error)?.message?.split("\n")[0] ?? String(e);

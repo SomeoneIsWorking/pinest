@@ -11,17 +11,28 @@ import {
   flushDeferredReload,
   reloadDeferred,
   setIsWorkingProbe,
+  setHostReloadResume,
+  getHostReloadResume,
+  clearHostReloadResume,
+  triggerHostReloadResumeIfPending,
+  RELOAD_RUNTIME_NUDGE,
+  HOST_RELOAD_RESUME_KEY,
 } from "../src/reload-manager.ts";
 
 const TMP = makeTempDir("rc-reload-test-");
 process.env.RC_CONFIG_PATH = join(TMP, "config.json");
 
-function fakePi(): { sent: string[]; api: any } {
+function fakePi(): { sent: string[]; injected: any[]; api: any } {
   const sent: string[] = [];
+  const injected: any[] = [];
   return {
     sent,
+    injected,
     api: {
       sendUserMessage: (text: string) => { sent.push(text); },
+      sendMessage: (message: unknown, options: unknown) => {
+        injected.push({ message, options });
+      },
       on: () => {},
       registerCommand: () => {},
     },
@@ -31,9 +42,13 @@ function fakePi(): { sent: string[]; api: any } {
 /** A context that reports no syntax problems and does not reload directly. */
 const eventCtx = { mode: "tui" } as any;
 
+/** Let a scheduled continuation run. */
+const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
 beforeEach(() => {
   removeTempDir(TMP);
   setIsWorkingProbe(() => false);
+  clearHostReloadResume();
 });
 
 test("a reload asked for mid-turn is DEFERRED, not silently refused", () => {
@@ -113,4 +128,72 @@ test("an explicit flag still wins over the probe for a known state", () => {
   const result = queueReload(api, eventCtx, { working: false });
   assert.equal(result.ok, true);
   assert.deepEqual(sent, ["/pinest-reload"], "a known-idle caller is not deferred");
+});
+
+// ── The host session's continuation across a reload ───────────────────────
+//
+// Measured: a reload left the host session idle in the middle of a task, while
+// a subsession whose row was `running` was nudged to continue (RESUME_NUDGE, in
+// session-lifecycle.ts). The host is the session that asked for the reload and
+// the one doing the work, and it had no equivalent.
+
+test("the reload tool owes the host a continuation, and it arrives once", async () => {
+  const { api } = fakePi();
+  // `reload_runtime` is a TOOL: it is always called from inside a turn, and pi
+  // refuses a reload while streaming, so the request is deferred to idle and the
+  // agent's turn ends in the middle of its task.
+  setIsWorkingProbe(() => true);
+  queueReload(api, eventCtx, { requestedByAgent: true });
+  assert.equal(reloadDeferred(), true, "the reload waits for the turn to settle");
+  assert.ok(getHostReloadResume(), "and the host is recorded as owed another turn");
+
+  // The reload happens; the re-imported runtime is what consumes the record.
+  const after = fakePi();
+  assert.equal(triggerHostReloadResumeIfPending(after.api, { delayMs: 0 }), true);
+  await tick();
+  assert.equal(after.injected.length, 1, "exactly one continuation turn is started");
+  const { message, options } = after.injected[0];
+  assert.equal(message.customType, "pinest");
+  assert.deepEqual(message.content, [{ type: "text", text: RELOAD_RUNTIME_NUDGE }]);
+  assert.equal(options.triggerTurn, true, "an idle runtime only turns if asked to");
+  assert.equal(after.sent.length, 0, "it is an extension message, not a user message");
+
+  assert.equal(getHostReloadResume(), null, "the record is consumed, not left behind");
+  assert.equal(triggerHostReloadResumeIfPending(after.api, { delayMs: 0 }), false);
+  await tick();
+  assert.equal(after.injected.length, 1, "and a settled host is not nudged twice");
+});
+
+test("a reload at a genuine rest owes the host nothing", async () => {
+  const { api } = fakePi();
+  queueReload(api, eventCtx, { working: false });
+  const after = fakePi();
+  assert.equal(triggerHostReloadResumeIfPending(after.api, { delayMs: 0 }), false);
+  await tick();
+  assert.deepEqual(after.injected, [], "no turn is invented for work that was not cut short");
+});
+
+test("a continuation left by a reload that never completed ages out", async () => {
+  // Otherwise a record from a reload that failed (or a runtime that never came
+  // back) would start a turn minutes later, apparently out of nowhere.
+  const at = Date.now();
+  setHostReloadResume({ stampedAt: at, reason: "working_interrupted", nudge: "stale" });
+  const after = fakePi();
+  assert.equal(
+    triggerHostReloadResumeIfPending(after.api, { delayMs: 0, now: at + 10 * 60_000 }),
+    false,
+  );
+  await tick();
+  assert.deepEqual(after.injected, [], "an old record must not fire a turn");
+  assert.equal(getHostReloadResume(), null, "and it is dropped, not retried forever");
+});
+
+test("the record is plain data, so it survives a module re-import", () => {
+  // The parked subsession objects are a version hazard; this record must not be
+  // one, so it holds strings and a number and nothing else.
+  setHostReloadResume({ stampedAt: 1, reason: "reload_runtime", nudge: "n" });
+  const raw = (globalThis as any)[HOST_RELOAD_RESUME_KEY];
+  assert.deepEqual(Object.keys(raw).sort(), ["nudge", "reason", "stampedAt"]);
+  assert.equal(typeof raw.stampedAt, "number");
+  assert.equal(typeof raw.nudge, "string");
 });
