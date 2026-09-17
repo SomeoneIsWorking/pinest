@@ -92,6 +92,10 @@ export class SessionTranscript {
       this.beginStreaming(message);
       return;
     }
+    if (message?.role === "toolResult") {
+      this.onToolResult(message);
+      return;
+    }
     this.append(message, { spacer: true });
   }
 
@@ -152,7 +156,10 @@ export class SessionTranscript {
         component.updateResult({ content: [{ type: "text", text: reason }], isError: true });
       }
     }
-    this.closeStreaming();
+    if (failed) {
+      this.pendingTools.clear();
+    }
+    this.streaming = null;
   }
 
   /** A tool began, is streaming, or finished.
@@ -193,11 +200,11 @@ export class SessionTranscript {
   }
 
   /** A tool result that arrived as a message (a rebuilt transcript): hand it to
-   * the component that asked for it, or show it when nothing did. */
+   * the component that asked for it, or ignore it when nothing did (tool results
+   * render inside their ToolExecutionComponent). */
   onToolResult(message: any): void {
     const component = this.pendingTools.get(message?.toolCallId);
     if (!component) {
-      this.appendSafely(message, { spacer: false });
       return;
     }
     component.updateResult(message as any);
