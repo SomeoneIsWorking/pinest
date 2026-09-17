@@ -22,6 +22,7 @@
  * werift's API is deliberately non-standard in places; anything assumed here
  * is checked against node_modules/werift/lib/webrtc/src/*.d.ts, not guessed. */
 
+import { lookup } from "node:dns/promises";
 import { RTCDataChannel, RTCPeerConnection, RTCSessionDescription } from "werift";
 
 export interface P2PExchangeOptions {
@@ -46,6 +47,8 @@ export interface P2PExchange {
    * before it opens rejects instead. */
   channels: Promise<P2PChannels>;
   close(): void;
+  /** Fired when the underlying peer connection drops or fails. */
+  onDisconnected?: (handler: () => void) => void;
 }
 
 /** The channels this host offers, each named for the direction its data
@@ -75,6 +78,7 @@ export interface P2PChannel {
     onMessage: (data: string | Buffer) => void;
     onClosed: () => void;
   }): void;
+  close?(): void;
 }
 
 export interface P2PChannels {
@@ -107,6 +111,56 @@ function withTimeout<T>(work: Promise<T>, ms: number, what: string): Promise<T> 
   });
 }
 
+/**
+ * Resolve `.local` mDNS host candidates in answer SDP to concrete IP addresses.
+ *
+ * Browsers (Firefox, Chrome, Safari) mask local IP addresses with mDNS UUIDs
+ * (`<uuid>.local`) for privacy. Werift's internal mDNS lookup fails because it
+ * attempts to bind port 5353, which conflicts with OS mDNS daemons (systemd-resolved
+ * or avahi-daemon) or host firewalls. The OS resolver resolves `.local` names
+ * directly through system mechanisms; resolving them before passing the SDP to
+ * werift ensures candidate pairs for local/LAN peers are formed correctly.
+ */
+export async function resolveMdnsCandidates(
+  sdp: string,
+  lookupFn: (host: string) => Promise<{ address: string }> = (h) => lookup(h),
+): Promise<string> {
+  const lines = sdp.split(/\r?\n/);
+  const cache = new Map<string, string | null>();
+  let modified = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue;
+    const match = /^(a=candidate:\S+\s+\d+\s+\S+\s+\d+\s+)(\S+\.local)(\s+\d+\s+.*)$/.exec(line);
+    if (!match) continue;
+
+    const prefix = match[1];
+    const host = match[2];
+    const suffix = match[3];
+    if (!prefix || !host || !suffix) continue;
+
+    let resolved = cache.get(host);
+    if (resolved === undefined) {
+      try {
+        const result = await lookupFn(host);
+        resolved = result.address;
+      } catch {
+        resolved = null;
+      }
+      cache.set(host, resolved);
+    }
+
+    if (resolved) {
+      lines[i] = `${prefix}${resolved}${suffix}`;
+      modified = true;
+    }
+  }
+
+  const joiner = sdp.includes("\r\n") ? "\r\n" : "\n";
+  return modified ? lines.join(joiner) : sdp;
+}
+
 /** Start one exchange: a peer connection, an offer, and at most one answer. */
 export function startP2PExchange(options: P2PExchangeOptions): P2PExchange {
   const pc = new RTCPeerConnection({
@@ -121,11 +175,44 @@ export function startP2PExchange(options: P2PExchangeOptions): P2PExchange {
     rejectChannels = reject;
   });
 
+  const disconnectHandlers: (() => void)[] = [];
+  const triggerDisconnect = (): void => {
+    for (const h of disconnectHandlers.splice(0)) {
+      try {
+        h();
+      } catch {
+        /* ignore */
+      }
+    }
+    for (const channel of opened.values()) {
+      channel.close?.();
+    }
+  };
+
+  pc.iceConnectionStateChange.subscribe((state) => {
+    options.log?.(`ice connection state: ${state}`);
+    if (state === "disconnected" || state === "failed" || state === "closed") {
+      triggerDisconnect();
+    }
+  });
+  pc.connectionStateChange.subscribe((state) => {
+    options.log?.(`peer connection state: ${state}`);
+    if (state === "disconnected" || state === "failed" || state === "closed") {
+      triggerDisconnect();
+    }
+  });
+
   /** Hold everything a channel says until a consumer takes over. */
   const wrap = (dataChannel: RTCDataChannel): P2PChannel => {
     const queue: (string | Buffer)[] = [];
     let handlers: Parameters<P2PChannel["attach"]>[0] | null = null;
     let closed = false;
+    const notifyClosed = (): void => {
+      if (!closed) {
+        closed = true;
+        handlers?.onClosed();
+      }
+    };
     dataChannel.onmessage = (event) => {
       if (handlers) {
         handlers.onMessage(event.data);
@@ -133,10 +220,12 @@ export function startP2PExchange(options: P2PExchangeOptions): P2PExchange {
         queue.push(event.data);
       }
     };
-    dataChannel.onclose = () => {
-      closed = true;
-      handlers?.onClosed();
-    };
+    dataChannel.onclose = notifyClosed;
+    dataChannel.stateChange.subscribe((state) => {
+      if (state === "closed" || state === "closing") {
+        notifyClosed();
+      }
+    });
     return {
       send: (data) => dataChannel.send(data),
       attach: (next) => {
@@ -146,6 +235,14 @@ export function startP2PExchange(options: P2PExchangeOptions): P2PExchange {
         }
         if (closed) {
           next.onClosed();
+        }
+      },
+      close: () => {
+        notifyClosed();
+        try {
+          dataChannel.close();
+        } catch {
+          /* already closed */
         }
       },
     };
@@ -205,11 +302,14 @@ export function startP2PExchange(options: P2PExchangeOptions): P2PExchange {
       return;
     }
     try {
+      // Resolve any .local mDNS host candidates through the host OS resolver
+      // before werift attempts candidate pairing.
+      const resolvedSdp = await resolveMdnsCandidates(sdp);
       // Bounded, so an exchange step that never completes is reported as a
       // failure instead of leaving the peer silently waiting: an answer that
       // arrives in the wrong state must be observable either way.
       await withTimeout(
-        pc.setRemoteDescription(new RTCSessionDescription(sdp, "answer")),
+        pc.setRemoteDescription(new RTCSessionDescription(resolvedSdp, "answer")),
         ANSWER_APPLY_TIMEOUT_MS,
         "applying the answer",
       );
@@ -224,6 +324,9 @@ export function startP2PExchange(options: P2PExchangeOptions): P2PExchange {
   return {
     channels,
     acceptAnswer,
+    onDisconnected: (handler: () => void) => {
+      disconnectHandlers.push(handler);
+    },
     offer: async (ts: number) => {
       adoptChannel(pc.createDataChannel(PUSH_CHANNEL_LABEL));
       adoptChannel(pc.createDataChannel(ACTIONS_CHANNEL_LABEL));
@@ -236,6 +339,7 @@ export function startP2PExchange(options: P2PExchangeOptions): P2PExchange {
       return local.sdp;
     },
     close: () => {
+      triggerDisconnect();
       try {
         pc.close();
       } catch {

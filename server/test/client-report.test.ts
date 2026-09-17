@@ -100,6 +100,14 @@ test("the one-line summary names the browser, the path and the failure", () => {
   assert.match(line, /12s ago/, "the age is the machine's own arithmetic");
   assert.match(line, /Failed to connect WebSocket/);
   assert.match(line, /pinest-push/);
+
+  const directFailed = parseClientReport(goodReport({
+    direct: { active: false, failure: "TimeoutException: channels never opened" },
+    lastError: null,
+  }));
+  assert.ok("report" in directFailed);
+  const failedLine = describeClientReport(directFailed.report, directFailed.report.at + 5_000);
+  assert.match(failedLine, /direct channel failed: TimeoutException/);
 });
 
 test("the size limit is a real boundary, not a decoration", () => {

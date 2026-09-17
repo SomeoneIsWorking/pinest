@@ -20,6 +20,7 @@ interface FakeExchange extends P2PExchange {
   answers: string[];
   /** Resolve the channels the driver is waiting on. */
   connect(): void;
+  disconnect(): void;
   fail(error: Error): void;
 }
 
@@ -39,6 +40,7 @@ function harness() {
   ): FakeExchange => {
     let resolveChannel: (channel: unknown) => void = () => {};
     let rejectChannel: (e: Error) => void = () => {};
+    let disconnectHandler: (() => void) | null = null;
     const channel = new Promise<unknown>((resolve, reject) => {
       resolveChannel = resolve;
       rejectChannel = reject;
@@ -55,6 +57,8 @@ function harness() {
         push: { send: () => {}, attach: () => {} },
         actions: { send: () => {}, attach: () => {} },
       }),
+      disconnect: () => { disconnectHandler?.(); },
+      onDisconnected: (handler) => { disconnectHandler = handler; },
       fail: (error) => rejectChannel(error),
       // The real exchange hands its description to `publish`, which is what
       // records it here.
@@ -274,5 +278,24 @@ test("a punch that lands while its replacement is gathering is used, not strande
   );
   assert.equal(h.built[0]!.closed, false, "which is still not closed by the refresh");
 
+  await t.close();
+});
+
+test("a disconnected channel marks the exchange dead and immediately publishes a fresh offer", async () => {
+  const h = harness();
+  const t = await h.transport;
+  assert.equal(h.built.length, 1);
+  h.built[0]!.connect();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(t.status().channelOpen, true);
+
+  h.built[0]!.disconnect();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(t.status().channelOpen, false, "channel is no longer open");
+  assert.equal(h.built.length, 2, "a fresh exchange was started immediately");
+  assert.equal(h.published.length, 2, "a fresh offer was published without waiting");
   await t.close();
 });

@@ -121,6 +121,17 @@ export function bridgeToLoopback(
       }
     },
     onClosed: () => {
+      if (closing) return;
+      closing = true;
+      socket.close();
+      events.onClosed?.();
+    },
+  });
+
+  channels.push.attach({
+    onMessage: () => {},
+    onClosed: () => {
+      if (closing) return;
       closing = true;
       socket.close();
       events.onClosed?.();
@@ -172,8 +183,10 @@ export function bridgeToLoopback(
   });
 
   function close(): void {
+    if (closing) return;
     closing = true;
     socket.close();
+    events.onClosed?.();
   }
 
   return {
