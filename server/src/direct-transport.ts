@@ -203,6 +203,7 @@ export async function offerDirectTransport(
             current.dead = true;
             peer.close();
             log("direct transport: the direct channel ended; a fresh offer is published");
+            void refreshIfStale();
           },
           onError: (message) => {
             lastError = message;
@@ -220,6 +221,20 @@ export async function offerDirectTransport(
         lastError = error.message;
         log(`direct transport: no channel: ${error.message}`);
       });
+
+    peer.onDisconnected?.(() => {
+      log("direct transport: peer connection disconnected or failed");
+      if (currentBridge) {
+        currentBridge.close();
+      } else if (live === current && current.channelOpen) {
+        current.channelOpen = false;
+        current.dead = true;
+        channelCloses += 1;
+        peer.close();
+        log("direct transport: the direct channel ended; a fresh offer is published");
+        void refreshIfStale();
+      }
+    });
 
     return { sdp: await peer.offer(ts), exchange: current };
   };

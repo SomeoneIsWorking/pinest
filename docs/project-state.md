@@ -252,10 +252,17 @@ report into the same discovery document it already answers offers in
 (`app/lib/logic/client_report.dart`), the machine reads it on the poll it was
 already making and refuses by name anything that is not a report
 (`server/src/client-report.ts`), and both ends of a failure are visible in
-Settings. The bridge counts what it relays - bridges built, DataChannel messages
-seen, whole frames in each direction, and the loopback socket's state - because
-"the peer sent nothing" and "the machine never got it" were otherwise identical
-from the outside (`server/src/p2p-bridge.ts`).
+Settings. Direct connection failures are specifically reported (`direct.failure`)
+so the machine status immediately shows why a peer failed. Browser `.local` mDNS
+host candidates are resolved via the OS resolver (`server/src/p2p.ts`) before
+`werift` candidate pairing, overcoming werift's internal port 5353 bind conflict
+with OS mDNS resolvers (I-064). Dropped peer connections are tracked via
+`iceConnectionStateChange` and `connectionStateChange` events, clearing stale
+channel states and triggering immediate offer refreshes so peers are never
+locked out by dead exchanges. The bridge counts what it relays - bridges built,
+DataChannel messages seen, whole frames in each direction, and the loopback
+socket's state - because "the peer sent nothing" and "the machine never got it"
+were otherwise identical from the outside (`server/src/p2p-bridge.ts`).
 
 That document is METERED, and the transport stops treating it as free. Measured
 live: two document reads every two seconds (the answer and the report) is 86,400

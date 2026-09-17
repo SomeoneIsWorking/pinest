@@ -164,12 +164,13 @@ class AgentService extends ChangeNotifier {
       path: _direct.active
           ? 'direct'
           : _ws?.endpoint?.host ?? (_connected ? 'unknown' : 'none'),
-      note: _connectionNote,
-      lastError: _error,
+      note: connectionReason,
+      lastError: _error ?? _direct.failure,
       directActive: _direct.active,
       directIce: _direct.iceState,
       directChannels: _direct.openChannels,
       directPairs: _direct.candidatePairs,
+      directFailure: _direct.failure,
       bundle: const String.fromEnvironment('WEB_BUILD_ID').isEmpty
           ? null
           : const String.fromEnvironment('WEB_BUILD_ID'),
@@ -428,7 +429,12 @@ class AgentService extends ChangeNotifier {
     // still reachable this way.
     _direct.tryConnectInBackground(data);
     if (endpoint == null && !_direct.active) {
-      _note('the machine published no tunnel URL; a direct connection is being attempted');
+      final directErr = _direct.failure?.trim();
+      if (directErr != null && directErr.isNotEmpty) {
+        _note('the machine published no tunnel URL; direct connection failed: $directErr');
+      } else {
+        _note('the machine published no tunnel URL; a direct connection is being attempted');
+      }
       _transitionToDisconnected(forgetEndpoint: true, notify: false);
       notifyListeners();
     }
@@ -785,7 +791,16 @@ class AgentService extends ChangeNotifier {
           .set(answerFields(sdp, writtenAt, offerTs), SetOptions(merge: true));
     },
     open: (channel) => _dialChannel(channel),
-    onChanged: notifyListeners,
+    onChanged: () {
+      if (_ws == null && !_direct.active && _direct.failure != null) {
+        final directErr = _direct.failure!.trim();
+        if (directErr.isNotEmpty && _lastEndpoint == null) {
+          _note('the machine published no tunnel URL; direct connection failed: $directErr');
+        }
+      }
+      _reportToMachine();
+      notifyListeners();
+    },
   );
 
   /// The HTTP half of this channel: images and actions, over the origin the

@@ -113,10 +113,11 @@ Future<ControlChannel> connectDataChannel({
   await ready.future.timeout(
     kChannelOpenTimeout,
     onTimeout: () {
+      final ice = pc.iceConnectionState;
       pc.close();
       throw TimeoutException(
         'the direct channels never both opened '
-        '(saw ${opened.keys.join(', ')})',
+        '(saw ${opened.keys.join(', ')}, ice=$ice)',
       );
     },
   );
@@ -203,6 +204,18 @@ class DataChannelConnection implements ControlChannel, PathReporting {
     _actions.onerror = ((web.Event _) {
       _onError?.call('direct channel error');
     }).toJS;
+    _pc.addEventListener(
+      'iceconnectionstatechange',
+      ((web.Event _) {
+        final state = _pc.iceConnectionState;
+        if (state == 'disconnected' || state == 'failed' || state == 'closed') {
+          if (!_closedByUs) {
+            _onError?.call('direct connection $state');
+            _onClose?.call();
+          }
+        }
+      }).toJS,
+    );
   }
 
   final web.RTCDataChannel _push;

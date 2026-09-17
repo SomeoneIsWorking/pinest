@@ -37,6 +37,7 @@ Map<String, dynamic> clientReportPayload({
   required List<String> directChannels,
   required String? directPairs,
   required String? bundle,
+  String? directFailure,
 }) {
   return <String, dynamic>{
     'at': at,
@@ -50,6 +51,8 @@ Map<String, dynamic> clientReportPayload({
       'ice': directIce,
       'channels': directChannels,
       'pairs': directPairs,
+      if (directFailure != null && directFailure.isNotEmpty)
+        'failure': directFailure,
     },
     'bundle': bundle,
   };
