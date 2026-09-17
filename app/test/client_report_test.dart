@@ -44,6 +44,24 @@ void main() {
       expect(payload.keys.toSet(), {'at', 'platform', 'connected', 'path', 'note',
         'lastError', 'direct', 'bundle'});
     });
+
+    test('carries direct failure when present', () {
+      final payload = clientReportPayload(
+        at: 1700000000000,
+        platform: 'Firefox',
+        connected: false,
+        path: 'none',
+        note: 'the machine published no tunnel URL; direct connection failed: TimeoutException',
+        lastError: 'TimeoutException',
+        directActive: false,
+        directIce: 'checking',
+        directChannels: const [],
+        directPairs: null,
+        directFailure: 'TimeoutException: channels never opened',
+        bundle: null,
+      );
+      expect(payload['direct']['failure'], 'TimeoutException: channels never opened');
+    });
   });
 
   group('the reporter', () {

@@ -46,6 +46,7 @@ export interface ClientReport {
     ice: string | null;
     channels: string[];
     pairs: string | null;
+    failure: string | null;
   };
   /** The bundle the browser is actually running, so a stale tab is visible. */
   bundle: string | null;
@@ -90,6 +91,7 @@ export function parseClientReport(raw: unknown): { report: ClientReport } | { pr
         ice: typeof directRaw.ice === "string" ? text(directRaw.ice, 40) : null,
         channels,
         pairs: typeof directRaw.pairs === "string" ? text(directRaw.pairs, MAX_STRING) : null,
+        failure: typeof directRaw.failure === "string" ? text(directRaw.failure, MAX_STRING) : null,
       },
       bundle: typeof record.bundle === "string" ? text(record.bundle, 64) : null,
     },
@@ -104,7 +106,9 @@ export function describeClientReport(report: ClientReport, now: number): string 
   const error = report.lastError ? `; last error: ${report.lastError}` : "";
   const direct = report.direct.active
     ? `; direct channel open (ice=${report.direct.ice ?? "?"}, channels=${report.direct.channels.join("+") || "none"})`
-    : "; no direct channel";
+    : report.direct.failure
+      ? `; direct channel failed: ${report.direct.failure}`
+      : "; no direct channel";
   return `the browser (${report.platform || "unknown platform"}) reported ${ageSeconds}s ago: ${where}${direct}${error}`;
 }
 
