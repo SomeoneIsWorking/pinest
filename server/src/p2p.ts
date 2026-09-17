@@ -202,6 +202,10 @@ export function startP2PExchange(options: P2PExchangeOptions): P2PExchange {
     }
   });
 
+  /** Every label this exchange has taken ownership of, so a channel is wrapped
+   * exactly once whether it arrives from `createDataChannel` or from the peer. */
+  const adopted = new Set<string>();
+
   /** Hold everything a channel says until a consumer takes over. */
   const wrap = (dataChannel: RTCDataChannel): P2PChannel => {
     const queue: (string | Buffer)[] = [];
@@ -248,14 +252,29 @@ export function startP2PExchange(options: P2PExchangeOptions): P2PExchange {
     };
   };
 
-  /** Resolve once BOTH channels of this exchange are open. A channel that
-   * closes before opening rejects: an exchange that reports channels before ICE
-   * has run is reporting a peer that is not there. */
+  /** Own a channel: hold everything it says from the moment it EXISTS, and
+   * resolve once BOTH channels of this exchange are open. A channel that closes
+   * before opening rejects: an exchange that reports channels before ICE has run
+   * is reporting a peer that is not there.
+   *
+   * The message handler is attached here, at channel creation, and NOT when the
+   * channel reports "open". The peer considers a channel it received open as
+   * soon as it processes our DCEP OPEN, so it may send on it before its own DCEP
+   * ACK - which is what tells THIS end the channel is open - reaches us. Gecko
+   * does exactly that: measured on a Firefox 156 peer, the app's `auth` frame
+   * arrived as SCTP DATA (stream 3, PPID 53) at a lower TSN than the ACK for
+   * stream 3, and werift hands a message to a channel with no `onmessage` to
+   * nobody, without a log line: the frame vanished and the loopback socket then
+   * timed out unauthenticated, which is what `rawIn: 0` meant for hours.
+   * Ordering like that is legal - per-stream ordering is the only guarantee -
+   * so this end has to be holding the bytes before it can possibly need them. */
   const adoptChannel = (dataChannel: RTCDataChannel): void => {
     const label = dataChannel.label;
-    if (opened.has(label)) return;
+    if (adopted.has(label)) return;
+    adopted.add(label);
+    const channel = wrap(dataChannel);
     const ready = (): void => {
-      opened.set(label, wrap(dataChannel));
+      opened.set(label, channel);
       const push = opened.get(PUSH_CHANNEL_LABEL);
       const actions = opened.get(ACTIONS_CHANNEL_LABEL);
       if (push && actions) {
