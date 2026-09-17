@@ -223,6 +223,18 @@ before opening, and the regression test sends the handshake from the peer's own
 `stateChange` "open" — i.e. before its ACK — where it FAILS on the previous code
 and passes on this one (I-065).
 
+Confirmed live against the real browser, not just in the probe (2026-09-17): after
+the host reloaded onto the fix, the app's own open tab (Firefox/Zen, bundle
+`fc538d2`) completed the channel and the machine's counters went from
+`rawIn 0 / framesToServer 0` to `rawIn 33, framesToServer 33, framesToClient 329`
+with `channelOpen: true, bridgeSocket: "open"` and the browser reporting
+`connected: true, path: direct, ice: connected, channels: pinest-push+pinest-actions`
+— while the machine was mid-turn, so the growing `framesToClient` is the app
+watching that turn stream over the direct channel and the growing `framesToServer`
+is the app's own requests arriving on it. Its candidate pairs were `host↔host,
+host↔host, srflx↔srflx (gathered: host, srflx)`, i.e. this pair met locally, which
+is exactly the limit the gap below names.
+
 The transport carries the protocol's own messages, whatever their size. A
 DataChannel message is bounded by the SCTP maximum a peer advertises and werift
 enforces it by throwing; the machine's first push after a direct channel opened
