@@ -31,9 +31,9 @@ const TOKEN = "owner-token";
 async function gather(peer: RTCPeerConnection): Promise<void> {
   if (peer.iceGatheringState === "complete") return;
   await new Promise<void>((resolve) => {
-    const stop = peer.iceGatheringStateChange.subscribe((state) => {
+    const subscription = peer.iceGatheringStateChange.subscribe((state) => {
       if (state === "complete") {
-        stop();
+        subscription.unSubscribe();
         resolve();
       }
     });
@@ -99,9 +99,26 @@ interface Bridge {
 }
 
 /** A real server, a real exchange, a real bridge, and an answering peer. */
+/** A peer that speaks the instant its channel opens.
+ *
+ * `speakOnOpen` is the one thing a peer is allowed to do that this end cannot
+ * predict the timing of: a channel whose DCEP OPEN has been processed is open
+ * for the PEER, so it may send on it before its own DCEP ACK - the only thing
+ * that tells THIS end the channel is open - has been put on the wire. Gecko
+ * does exactly that, and the frame it sends first is the app's `auth`. */
+interface SpeakOnOpen {
+  label: string;
+  message: unknown;
+}
+
+/** A real server, a real exchange, a real bridge, and an answering peer. */
 async function joined(
   t: { after(fn: () => unknown): void },
-  options: { state?: ServerMessage; verify?: (token: string) => VerifiedToken | null } = {},
+  options: {
+    state?: ServerMessage;
+    verify?: (token: string) => VerifiedToken | null;
+    speakOnOpen?: SpeakOnOpen;
+  } = {},
 ): Promise<Bridge> {
   const verified: string[] = [];
   const failures: string[] = [];
@@ -132,7 +149,19 @@ async function joined(
     publishOffer: async (sdp) => {
       answerer = new RTCPeerConnection();
       answerer.ondatachannel = (event) => {
-        opened.set(event.channel.label, event.channel);
+        const channel = event.channel;
+        const speak = options.speakOnOpen;
+        if (speak && channel.label === speak.label) {
+          const subscription = channel.stateChange.subscribe((state) => {
+            if (state !== "open") return;
+            subscription.unSubscribe();
+            const writer = new FrameWriter();
+            for (const frame of writer.frames(JSON.stringify(speak.message))) {
+              channel.send(frame);
+            }
+          });
+        }
+        opened.set(channel.label, channel);
         if (opened.size === 2) bothOpen();
       };
       await answerer.setRemoteDescription(new RTCSessionDescription(sdp, "offer"));
@@ -198,6 +227,39 @@ test("the app's framed handshake crosses the bridge to the real server and back"
   assert.equal(status.rawIn, 2, "both DataChannel messages reached the bridge");
   assert.equal(status.framesToServer, 2, "auth and subscribe reached the server");
   assert.equal(status.framesToClient, 2, "authed and the state snapshot came back");
+});
+
+test("a peer that speaks before its own ACK is still heard", async (t) => {
+  // The live failure this pins: the app's `auth` frame arrived as SCTP DATA on
+  // stream 3 at a LOWER TSN than the DCEP ACK for stream 3 (measured on a
+  // Firefox 156 peer), so this end had not yet heard the channel open when the
+  // first frame was already there. The frame was dropped by the transport with
+  // no log line, `rawIn` stayed 0, and the loopback socket then timed out
+  // unauthenticated - which reads exactly like a peer that sent nothing.
+  //
+  // Ordering like that is legal: per-stream ordering is the only guarantee SCTP
+  // makes, and the peer is free to use a channel the moment IT considers it
+  // open. The exchange must therefore be holding the bytes before it can need
+  // them, which means owning the channel when it is CREATED, not when it opens.
+  const state: ServerMessage = { type: "state", sessions: [{ id: "s1" }] } as unknown as ServerMessage;
+  const { transport, peer, verified, failures } = await joined(t, {
+    state,
+    speakOnOpen: { label: "pinest-actions", message: { type: "auth", token: TOKEN } },
+  });
+
+  const authed = await peer.next("authed");
+  assert.equal(authed.type, "authed", "the server answered the early handshake");
+  assert.deepEqual(verified, [TOKEN], "the token sent before the ACK was read by the server");
+
+  const status = transport.status();
+  assert.equal(status.rawIn, 1, "the early DataChannel message reached the bridge");
+  assert.equal(status.framesToServer, 1, "and became one whole frame for the server");
+  assert.equal(status.lastError, null, "nothing about that ordering is an error");
+  assert.deepEqual(failures, [], "the transport reported no failure");
+
+  // And the channel is still a channel: later frames ride the same exchange.
+  peer.send({ type: "subscribe", sessionIds: [] });
+  await peer.next("state");
 });
 
 test("a peer that connects and says nothing is visible as such", async (t) => {
