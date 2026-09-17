@@ -614,7 +614,7 @@ export function registerHostCommands(pi: ExtensionAPI, deps: () => HostCommandDe
     parameters: Type.Object({}),
     async execute(_toolCallId: string, _params: unknown, _signal: any, _onUpdate: unknown, ctx: any) {
       const pending = pendingReloadState();
-      const { message } = queueReload(pi, ctx);
+      const { message } = queueReload(pi, ctx, { requestedByAgent: true });
       return {
         content: [{ type: "text", text: message }],
         details: { pending },

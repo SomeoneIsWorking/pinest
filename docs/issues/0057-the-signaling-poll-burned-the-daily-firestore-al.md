@@ -6,7 +6,7 @@ symptom: direct connection fails with 'the machine never got it' (framesToServer
 state_items: S15
 tags: p2p,quota,firestore,cost
 created: 2026-09-14
-updated: 2026-09-14
+updated: 2026-09-17
 ---
 
 ## What happened
@@ -59,3 +59,6 @@ burst of reports or a second machine on the same account would still be paid for
 out of the same allowance. The visible instrument for that is not built yet: the
 machine does not count its own reads and writes, so the next exhaustion would
 again be discovered as a mysterious failure.
+
+### Note (2026-09-17)
+Correction (see I-065): the 'channels open, zero frames relayed, 1008 authentication timeout' symptom recorded here is NOT a quota consequence. It was measured again on 2026-09-17 over dozens of fresh exchanges with signaling healthy; its cause is that Gecko sends on a DataChannel before its own DCEP ACK and werift dropped the frame for a channel with no onmessage. The quota fix here stands on its own.
