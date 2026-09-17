@@ -297,13 +297,69 @@ test("a refused command is shown, never swallowed", () => {
   assert.match(lines, /not sent/i, "a message that did not reach the session must say so");
 });
 
-test("a command sent while the session is busy is reported as queued", () => {
+test("a command sent while the session is busy is displayed as steering", () => {
   const h = harness({ submitResult: { delivered: true, queued: true } });
   for (const ch of "go on") {
     h.view.handleInput(ch);
   }
   h.view.handleInput("\r");
-  assert.match(h.lines().join("\n"), /queued/i);
+  assert.match(h.lines().join("\n"), /steering: go on/i);
+  assert.doesNotMatch(h.lines().join("\n"), /queued: the session is mid-run/);
+});
+
+test("queue_update event displays steering and follow-up messages", () => {
+  const h = harness();
+  h.emit({
+    type: "queue_update",
+    steering: ["make it faster"],
+    followUp: ["and write tests"],
+  });
+  const text = h.lines().join("\n");
+  assert.match(text, /Steering: make it faster/);
+  assert.match(text, /Follow-up: and write tests/);
+  assert.doesNotMatch(text, /queued: the session is mid-run/);
+});
+
+test("mouse wheel in regular mode scrolls the transcript", () => {
+  const h = harness({ messages: longMessages() });
+  const before = h.lines().join("\n");
+  // SGR wheel up (\x1b[<64;10;10M) scrolls up toward older messages
+  h.view.handleInput("\x1b[<64;10;10M");
+  const after = h.lines().join("\n");
+  // Window shifted upwards
+  assert.notEqual(before, after);
+});
+
+test("toolResult message does not throw stack overflow or render error placeholder", () => {
+  const h = harness();
+  // Simulate assistant message starting tool call
+  h.emit({
+    type: "message_start",
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "call_1", name: "bash", arguments: { command: "ls" } }],
+    },
+  });
+  h.emit({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      stopReason: "tool_use",
+      content: [{ type: "toolCall", id: "call_1", name: "bash", arguments: { command: "ls" } }],
+    },
+  });
+  // Simulate toolResult arriving
+  h.emit({
+    type: "message_start",
+    message: {
+      role: "toolResult",
+      toolCallId: "call_1",
+      content: [{ type: "text", text: "file.txt" }],
+    },
+  });
+  const text = h.lines().join("\n");
+  assert.doesNotMatch(text, /could not be rendered/);
+  assert.doesNotMatch(text, /Maximum call stack size/);
 });
 
 test("left arrow on an empty prompt goes back to the sessions list, not away", () => {
