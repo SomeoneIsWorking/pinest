@@ -1064,9 +1064,12 @@ function bridge(pi: ExtensionAPI): void {
       });
   });
 
-  pi.on("agent_settled", () => {
+  pi.on("agent_settled", (_event: unknown, ctx?: ExtensionContext) => {
+    // A pending reload goes first, and pre-empts compaction: reloading rebuilds
+    // everything compaction would have adjusted, and a compaction started here
+    // makes the session busy again — which is a reload pi then refuses.
+    if (flushDeferredReload(_pi, ctx)) return;
     hostContext.maybeAutoCompact();
-    flushDeferredReload(_pi); // a reload asked for mid-turn is refused until now
   });
 
   // Reload tears this instance down; the re-imported instance bootstraps

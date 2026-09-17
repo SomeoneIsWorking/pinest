@@ -491,6 +491,27 @@ raises an `error` message to the app instead of silently doing nothing. On
 reload the instance tears down (WS/tunnel stop, live sessions parked for
 adoption) and the re-imported instance bootstraps fresh.
 
+A reload request is only spent on a moment pi will accept (2026-09-17, I-067).
+`ctx.reload()` IS pi's own `/reload`, whose first statement returns early with a
+TUI-only warning while the session is streaming — and `session.prompt()`
+dispatches an extension command BEFORE that check, so a queued
+`/pinest-reload` ran mid-response and reloaded nothing. The request was cleared
+before the send, so it was not refused but lost: the tool answered
+"[pinest] reloading extensions, skills, prompts, settings…", the runtime
+record's `at` never moved and `factoryEntries` stayed put. One reader now asks
+pi instead of assuming — `idleFromContext()` uses pi's own
+`ExtensionContext.isIdle()`, the same condition `/reload` checks, ahead of any
+caller flag and ahead of pinest's `setIsWorkingProbe` status mirror —
+`flushDeferredReload` keeps a busy settle's request pending instead of spending
+it, `agent_settled` flushes a pending reload BEFORE `maybeAutoCompact()` (a
+compaction started there is what makes the session busy again), and the command
+re-defers and says so where pi would refuse. Evidence: the two new
+`server/test/reload-manager.test.ts` cases fail against the pre-fix manager
+(`✖ pi would refuse this moment`, `✖ pi says busy, so it is busy`) and pass with
+it, while the direct-reload case keeps "always defer" from being a way to pass.
+No `waitForIdle` appears in the shipping handler; the earlier claim in this
+paragraph that it did was wrong.
+
 Reload hands live sessions over instead of stopping them (2026-08-29):
 `stashForReload()` parks the `AgentSession` objects on `globalThis` without
 aborting, `adoptStashedSessions()` re-wires them into the re-imported instance
@@ -533,7 +554,9 @@ twice. Evidence: `server/test/reload-manager.test.ts` covers the deferred
 agent-requested reload being continued exactly once, an idle reload recording
 nothing, the stale record aging out, and the record being plain data (the parked
 subsession OBJECTS are a version hazard across a re-import; a string nudge and a
-timestamp are not).
+timestamp are not). This continuation can only fire once the reload it belongs
+to actually happens — which is why the refusal above had to be fixed before it
+could be observed at all.
 
 Footer interval leak across reloads resolved (2026-09-05): `FooterManager`
 (`server/src/footer.ts`) now owns interval lifecycle, stops timers on
