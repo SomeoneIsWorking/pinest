@@ -77,11 +77,18 @@ Future<ControlChannel> connectDataChannel({
       return;
     }
     channel.onopen = ((web.Event _) => settle()).toJS;
+    channel.addEventListener('open', ((web.Event _) => settle()).toJS);
   }
 
   pc.ondatachannel = ((web.RTCDataChannelEvent event) {
     adopt(event.channel);
   }).toJS;
+  pc.addEventListener(
+    'datachannel',
+    ((web.RTCDataChannelEvent event) {
+      adopt(event.channel);
+    }).toJS,
+  );
 
   try {
     await pc.setRemoteDescription(
@@ -196,6 +203,15 @@ class DataChannelConnection implements ControlChannel, PathReporting {
     _push.onerror = ((web.Event _) {
       _onError?.call('direct channel error');
     }).toJS;
+    _actions.onopen = ((web.Event _) {
+      _flushPending();
+    }).toJS;
+    _actions.addEventListener(
+      'open',
+      ((web.Event _) {
+        _flushPending();
+      }).toJS,
+    );
     _actions.onclose = ((web.Event _) {
       if (!_closedByUs) {
         _onClose?.call();
@@ -244,7 +260,7 @@ class DataChannelConnection implements ControlChannel, PathReporting {
   Future<void> refreshCandidatePairs() async {
     try {
       final entries = <JSObject>[];
-      final report = _pc.getStats();
+      final report = await _pc.getStats().toDart;
       (report as JSObject).callMethod<JSAny?>(
         'forEach'.toJS,
         ((JSAny value, JSAny _) {
@@ -318,16 +334,33 @@ class DataChannelConnection implements ControlChannel, PathReporting {
   @override
   void send(Map<String, dynamic> msg) => _sendJson(msg);
 
+  final List<JSArrayBuffer> _pending = [];
+
+  void _flushPending() {
+    if (_actions.readyState != 'open') return;
+    while (_pending.isNotEmpty) {
+      try {
+        final frame = _pending.removeAt(0);
+        _actions.send(frame);
+      } catch (e) {
+        _onError?.call('could not send over the direct channel: $e');
+        break;
+      }
+    }
+  }
+
   /// One JSON frame, split into as many DataChannel messages as it needs: SCTP
   /// refuses a message over the peer's advertised maximum, and the machine's
   /// bridge died on the first 408 KB push that ignored this.
   void _sendJson(Map<String, dynamic> msg) {
-    if (_actions.readyState != 'open') {
-      return;
-    }
     try {
       for (final frame in _writer.frames(jsonEncode(msg))) {
-        _actions.send(frame.toJS);
+        final jsBuffer = frame.buffer.toJS;
+        if (_actions.readyState == 'open') {
+          _actions.send(jsBuffer);
+        } else {
+          _pending.add(jsBuffer);
+        }
       }
     } catch (e) {
       _onError?.call('could not send over the direct channel: $e');
