@@ -397,6 +397,7 @@ async function main(): Promise<void> {
   actions.close();
   pc.close();
   clearTimeout(watchdog);
+  process.exit(0);
 }
 
 try {
