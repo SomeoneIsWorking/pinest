@@ -59,7 +59,7 @@ interface Signaling {
 const VERIFIER_CLIENT_ID = "00000000000000000000000000000001";
 
 async function reportPresence(uid: string, token: string, clientId: string, timeoutMs: number): Promise<void> {
-  const mask = `updateMask.fieldPaths=clients.${clientId}`;
+  const mask = `updateMask.fieldPaths=clients.\`${clientId}\``;
   const response = await fetchBounded(`${docUrl(uid)}?${mask}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -115,7 +115,7 @@ async function writeAnswer(
   namedOffer: number,
   timeoutMs: number,
 ): Promise<void> {
-  const mask = `updateMask.fieldPaths=p2pAnswers.${clientId}`;
+  const mask = `updateMask.fieldPaths=p2pAnswers.\`${clientId}\``;
   const response = await fetchBounded(`${docUrl(uid)}?${mask}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },

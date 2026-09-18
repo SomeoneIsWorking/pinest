@@ -225,6 +225,7 @@ export function createP2PSignaling(deps: P2PSignalingDeps): P2PSignaling {
     },
     onReports: (handler) => {
       reportHandlers.push(handler);
+      start();
     },
     // The watch's own complaint is authoritative: a listener that died with
     // nothing arriving would otherwise leave `lastReadError` stale at null, and
