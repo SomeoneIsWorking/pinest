@@ -23,19 +23,8 @@
  */
 
 import debug from "./log.ts";
-import { CLIENT_REPORT_FIELD, CLIENT_REPORT_MAP_FIELD, parseClientReport, type ClientReport } from "./client-report.ts";
+import { CLIENT_REPORT_MAP_FIELD, parseClientReport, type ClientReport } from "./client-report.ts";
 import type { DiscoveryWatch } from "./discovery-watch.ts";
-
-/** The lane the flat, single-client fields belong to. Not a client id: a build
- * that predates client ids writes `p2pOffer`/`p2pAnswer` and has no id to give,
- * and it must keep working exactly as it did. */
-export const LEGACY_LANE = "";
-
-/** The fields the app writes its answer into, in the flat single-client shape.
- * Named here because this module owns the answer half of the document
- * contract. */
-export const ANSWER_FIELD = "p2pAnswer";
-export const ANSWER_OFFER_FIELD = "p2pAnswerOfferTs";
 
 /** The map fields that carry one lane per client. `p2pOffers` is written only
  * by this machine, which therefore rewrites the whole map and needs no
@@ -156,21 +145,13 @@ export function createP2PSignaling(deps: P2PSignalingDeps): P2PSignaling {
 
   /** Write every live lane's offer back. `p2pOffers` has this machine as its
    * only writer, so the map is rebuilt from the lanes rather than patched key
-   * by key: a merge would leave a retracted lane behind for someone to answer.
-   * The legacy lane is not part of the map - its offer is two flat fields. */
+   * by key: a merge would leave a retracted lane behind for someone to answer. */
   const writeLanes = async (): Promise<void> => {
-    const legacy = lanes.get(LEGACY_LANE);
     const offers: Record<string, unknown> = {};
     for (const [lane, state] of lanes) {
-      if (lane === LEGACY_LANE) continue;
       offers[lane] = { sdp: state.sdp, ts: state.ts };
     }
-    const fields: Record<string, unknown> = { [OFFERS_FIELD]: offers };
-    if (legacy) {
-      fields.p2pOffer = legacy.sdp;
-      fields.p2pOfferTs = legacy.ts;
-    }
-    await deps.writeFields(fields);
+    await deps.writeFields({ [OFFERS_FIELD]: offers });
   };
 
   /** One delivery from the watch: the document as it now stands. */
@@ -181,11 +162,6 @@ export function createP2PSignaling(deps: P2PSignalingDeps): P2PSignaling {
     // reports by the module that defines them, the answers here.
     if (reportHandlers.length > 0) {
       const reports: { lane: string; seen: { report: ClientReport } | { problem: string } }[] = [];
-      // The flat field first: it is the single-client shape, and it is what a
-      // build without client ids writes.
-      if (data?.[CLIENT_REPORT_FIELD] !== undefined) {
-        reports.push({ lane: LEGACY_LANE, seen: laneReport(data[CLIENT_REPORT_FIELD]) });
-      }
       for (const [lane, raw] of Object.entries(readMap(data, CLIENT_REPORT_MAP_FIELD))) {
         reports.push({ lane, seen: laneReport(raw) });
       }
@@ -194,10 +170,6 @@ export function createP2PSignaling(deps: P2PSignalingDeps): P2PSignaling {
     // Answers, one lane at a time. A lane with no live offer cannot be
     // answered: its client is unknown to this machine, or its offer was
     // retracted, and applying an answer to either is impossible.
-    const flat = data?.[ANSWER_FIELD];
-    if (typeof flat === "string") {
-      deliver(LEGACY_LANE, { sdp: flat, offerTs: typeof data?.[ANSWER_OFFER_FIELD] === "number" ? data[ANSWER_OFFER_FIELD] as number : null });
-    }
     for (const [lane, raw] of Object.entries(readMap(data, ANSWERS_FIELD))) {
       const answer = laneAnswer(raw);
       if (answer) deliver(lane, answer);
@@ -212,7 +184,7 @@ export function createP2PSignaling(deps: P2PSignalingDeps): P2PSignaling {
       // no explanation. Report it once per offer rather than every poll.
       if (!state.reportedGarbage) {
         state.reportedGarbage = true;
-        debug(`[pinest] p2p signaling: ignored an answer for lane ${lane || "(legacy)"} that is not an SDP`);
+        debug(`[pinest] p2p signaling: ignored an answer for lane ${lane} that is not an SDP`);
       }
       return;
     }
@@ -220,7 +192,7 @@ export function createP2PSignaling(deps: P2PSignalingDeps): P2PSignaling {
       if (state.reported !== answer.offerTs) {
         state.reported = answer.offerTs;
         debug(
-          `[pinest] p2p signaling: ignored an answer for lane ${lane || "(legacy)"} that names ${
+          `[pinest] p2p signaling: ignored an answer for lane ${lane} that names ${
             answer.offerTs === null ? "no offer" : `a different exchange (${answer.offerTs})`
           }; the live offer is ${state.ts}`,
         );

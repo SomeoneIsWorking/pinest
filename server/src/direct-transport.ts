@@ -16,10 +16,7 @@
  * would need a second peer connection with the same local description, and
  * their binding requests would be indistinguishable here. Every client
  * therefore gets its own lane - its own offer, peer, bridge and refresh clock -
- * and a lane that is replaced or dropped is replaced or dropped alone. The
- * lane named `LEGACY_LANE` serves the flat document fields a build without
- * client ids writes, and it behaves exactly as this transport did when it was
- * the only lane there was.
+ * and a lane that is replaced or dropped is replaced or dropped alone.
  *
  * THE OFFER IS PERISHABLE. This machine's address on the internet is a
  * carrier-grade NAT mapping, and such a mapping stops accepting packets within
@@ -35,7 +32,6 @@
 
 import { DEFAULT_STUN, startP2PExchange, type P2PExchange } from "./p2p.ts";
 import { bridgeToLoopback, type LoopbackBridge } from "./p2p-bridge.ts";
-import { LEGACY_LANE } from "./p2p-signaling.ts";
 
 /**
  * How long an exchange may stay live without a connected channel.
@@ -131,8 +127,6 @@ export interface DirectTransportOptions {
 }
 
 export interface DirectTransport {
-  /** The first published offer, once it exists. */
-  offerSdp: Promise<string>;
   /** Whether a direct channel now carries traffic, per lane. */
   status: () => DirectTransportStatus;
   /** Open a lane for this client if it has none, so a client that has just
@@ -191,7 +185,7 @@ export async function offerDirectTransport(
   let bridgeSocket: string | null = null;
   let closed = false;
 
-  const label = (lane: string): string => (lane === LEGACY_LANE ? "the single-client lane" : `lane ${lane}`);
+  const label = (lane: string): string => `lane ${lane}`;
 
   /** What is running through THIS lane right now, straight from its bridge: a
    * status read mid-connection is current, not the last thing a closed bridge
@@ -392,14 +386,10 @@ export async function offerDirectTransport(
     }));
   };
 
-  const legacy = LEGACY_LANE;
-
-  /** Close one lane and withdraw its offer. The single-client lane is never
-   * closed: a build without client ids has no way to ask for it back, and its
-   * offer sitting unread is exactly what it did before lanes existed. */
+  /** Close one lane and withdraw its offer. */
   const closeLane = async (laneId: string): Promise<void> => {
     const lane = lanes.get(laneId);
-    if (laneId === legacy || !lane) return;
+    if (!lane) return;
     log(`direct transport: ${label(laneId)} went away; withdrawing its offer`);
     // Fold what its bridge carried into the totals before the lane is gone,
     // or a client that connects and leaves would vanish from the counters.
@@ -415,9 +405,6 @@ export async function offerDirectTransport(
     await options.retractOffer(laneId);
   };
 
-  const { sdp: offerSdp, lane: firstLane } = await beginExchange(legacy);
-  log(`direct transport: offer published for ${label(firstLane.id)} (${offerSdp.length} bytes), refreshed every ${OFFER_LIFETIME_MS / 1000}s while unconnected`);
-
   const timer = setInterval(() => {
     void refreshIfStale().catch((error: Error) => {
       lastError = error.message;
@@ -427,14 +414,13 @@ export async function offerDirectTransport(
   timer.unref?.();
 
   for (const extra of options.startLanes ?? []) {
-    if (extra !== legacy) await beginExchange(extra);
+    await beginExchange(extra);
   }
 
   return {
-    offerSdp: Promise.resolve(offerSdp),
     refreshIfStale,
     ensureLane: async (laneId) => {
-      if (closed || laneId === legacy || lanes.has(laneId)) return;
+      if (closed || !laneId || lanes.has(laneId)) return;
       if (lanes.size >= MAX_LANES) {
         // Over the cap: evict the oldest lane that is NOT connected. A client
         // is only ever dropped for a newer one, never for its own age, and
@@ -442,7 +428,7 @@ export async function offerDirectTransport(
         // the newcomer waits, which is the honest answer: the machine is at
         // capacity rather than pretending it took the connection.
         const victim = [...lanes.values()]
-          .filter((lane) => lane.id !== legacy && !lane.channelOpen)
+          .filter((lane) => !lane.channelOpen)
           .sort((a, b) => a.offerTs - b.offerTs)[0];
         if (!victim) {
           log(`direct transport: ${label(laneId)} is waiting; all ${MAX_LANES} lanes are in use`);

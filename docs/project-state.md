@@ -258,8 +258,8 @@ other's connection (measured live: alternating between 6 in / 52 out and 9 in /
 55 out as each client displaced the other). Signaling now maps offers
 (`p2pOffers.<id>`) and answers (`p2pAnswers.<id>`) per client ID, with
 `MAX_LANES = 4` concurrent peer connections and eviction dropping only
-unconnected lanes. Legacy single-client builds continue using flat fields
-(`LEGACY_LANE`). Each client persists a 32-character hex identity in storage
+unconnected lanes. Legacy single-client flat fields have been retired in favor
+of the client lane schema. Each client persists a 32-character hex identity in storage
 (`client_identity.dart`), reports under `clients.<id>`, and answers its own
 matching lane in `p2pOffers`.
 app's write time is a different device's clock, and comparing the two refuses a
