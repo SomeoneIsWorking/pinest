@@ -99,6 +99,32 @@ void main() {
     expect(looksLikeSdp('v=0 short'), isFalse);
   });
 
+  test('prefers a matching lane offer over the legacy flat offer', () {
+    final doc = {
+      'p2pOffer': _offer,
+      'p2pOfferTs': 1000,
+      'p2pOffers': {
+        'client-a': {
+          'sdp': 'v=0\r\nm=application 9 UDP/DTLS/SCTP lane-a\r\n',
+          'ts': 1200,
+        },
+      },
+    };
+    // When client-a asks, it gets its own lane offer
+    final answerA = offerToAnswer(doc, now: 1500, laneId: 'client-a');
+    expect(answerA, isNotNull);
+    expect(answerA!.sdp, contains('lane-a'));
+    expect(answerA.ts, 1200);
+    expect(answerA.laneId, 'client-a');
+
+    // When another client asks, it falls back to the legacy flat offer
+    final answerB = offerToAnswer(doc, now: 1500, laneId: 'client-b');
+    expect(answerB, isNotNull);
+    expect(answerB!.sdp, _offer);
+    expect(answerB.ts, 1000);
+    expect(answerB.laneId, isNull);
+  });
+
   test('the answer names the offer it answers, not just when it was written', () {
     // The machine matches an answer to an exchange by identity. Its own offer
     // timestamp is the only value both sides agree on: the app's write time is

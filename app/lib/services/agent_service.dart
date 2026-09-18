@@ -9,11 +9,14 @@ import 'outgoing_queue.dart';
 import 'direct_channel.dart';
 import 'direct_link.dart';
 import 'control_channel.dart';
+import 'client_identity.dart';
+import '../logic/client_lane.dart';
 import '../logic/client_report.dart';
 import '../logic/direct_offer.dart';
 import '../logic/command_id.dart';
 import 'client_reporter.dart';
 import 'link_bridge.dart';
+import 'remote_fs.dart';
 import 'server_http.dart';
 import 'session_store.dart';
 import 'user_preferences.dart';
@@ -123,6 +126,13 @@ class AgentService extends ChangeNotifier {
     reload: reloadPage,
   );
 
+  /// This install's unique, persisted lane id in the discovery document.
+  final ClientIdentity _clientId = ClientIdentity();
+
+  AgentService() {
+    unawaited(_clientId.ensure());
+  }
+
   /// When this app was loaded, captured once: a reload request older than this
   /// page has already had its effect and must not cause a reload loop.
   final int _loadedAtMs = DateTime.now().millisecondsSinceEpoch;
@@ -212,10 +222,14 @@ class AgentService extends ChangeNotifier {
     if (uid == null) {
       throw StateError('no uid to report the client state for');
     }
+    // Under this client's own key: several apps can be signed in at once, and a
+    // report written to the flat field would let the last writer speak for all
+    // of them (and cost the others their lanes, since a lane exists while a
+    // report does).
     await _db
         .collection('users')
         .doc(uid)
-        .set({kClientReportField: payload}, SetOptions(merge: true));
+        .set(clientLaneFields(await _clientId.ensure(), payload), SetOptions(merge: true));
   }
 
   /// Transient server messages the user must SEE: `notice` (something they
@@ -782,13 +796,21 @@ class AgentService extends ChangeNotifier {
     connect: connectDataChannel,
     iceServers: kDirectIceServers,
     available: () => directTransportAvailable,
-    publishAnswer: (sdp, writtenAt, offerTs) {
+    clientId: () => _clientId.known,
+    publishAnswer: (sdp, writtenAt, offerTs, laneId) {
       final uid = _boundUid;
       if (uid == null) throw StateError('no uid to publish an answer for');
+      // The answer goes back under the same key the offer came from. An offer
+      // from the flat single-client fields - the shape a machine without lane
+      // support publishes - is answered in that shape, so a new app still
+      // connects to an older machine.
+      final fields = laneId == null
+          ? answerFields(sdp, writtenAt, offerTs)
+          : laneAnswerFields(laneId, sdp, offerTs);
       return _db
           .collection('users')
           .doc(uid)
-          .set(answerFields(sdp, writtenAt, offerTs), SetOptions(merge: true));
+          .set(fields, SetOptions(merge: true));
     },
     open: (channel) => _dialChannel(channel),
     onChanged: () {
@@ -1134,44 +1156,14 @@ class AgentService extends ChangeNotifier {
     timeout: const Duration(seconds: 10),
   );
 
+  late final RemoteFs _fs = RemoteFs(requests: _requests, send: _send);
+
   void reload() => _send({'type': 'reload'});
 
-  Future<List<String>> listPaths(String prefix) =>
-      _requests.request<List<String>>(
-        send: (id) => _send({
-          'type': 'list_paths',
-          'sessionId': 'spawn_dialog',
-          'id': id,
-          'prefix': prefix,
-        }),
-        decode: (message) => (message['paths'] as List? ?? const [])
-            .map((path) => path.toString())
-            .toList(),
-        fallback: const [],
-        timeout: const Duration(seconds: 5),
-      );
-
-  Future<bool> checkPath(String path) => _requests.request<bool>(
-    send: (id) => _send({'type': 'path_check', 'id': id, 'path': path}),
-    decode: (message) => message['isDirectory'] == true,
-    fallback: false,
-    timeout: const Duration(seconds: 5),
-  );
-
-  Future<String?> createFolder(String path) => _requests.request<String?>(
-    send: (id) => _send({'type': 'folder_create', 'id': id, 'path': path}),
-    decode: (message) => message['path'] as String?,
-    fallback: null,
-    timeout: const Duration(seconds: 10),
-  );
-
-  String displayPath(String path) {
-    final home = homePath;
-    if (home == null) return path;
-    if (path == home) return '~';
-    if (path.startsWith('$home/')) return '~${path.substring(home.length)}';
-    return path;
-  }
+  Future<List<String>> listPaths(String prefix) => _fs.listPaths(prefix);
+  Future<bool> checkPath(String path) => _fs.checkPath(path);
+  Future<String?> createFolder(String path) => _fs.createFolder(path);
+  String displayPath(String path) => RemoteFs.formatDisplayPath(path, homePath);
 
   @override
   void dispose() {

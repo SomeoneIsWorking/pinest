@@ -68,6 +68,47 @@ def describe_report(client: dict | None) -> str:
     )
 
 
+def describe_transport(state: dict) -> str:
+    """What the machine's own end of the direct channel is doing.
+
+    The other half of `describe_report`, and the half that decides the hard
+    cases: a peer can report both labels open and `ice: connected` while the
+    machine received nothing at all (that was I-065, and `rawIn` is the field
+    that showed it). The counters print even when nothing is connected, because
+    "never connected" and "connected and then stopped" are different faults.
+    """
+    p2p = state.get("p2p")
+    if not isinstance(p2p, dict):
+        return "this host is not publishing a transport state (no direct offer is being made)"
+    if not p2p.get("offerTs"):
+        return "the machine has published no direct offer at all"
+    age = p2p.get("offerAgeMs")
+    age_text = f"newest offer {int(age / 1000)}s old" if isinstance(age, int) else "no offer"
+    # `rawIn` counts messages that reached the bridge; the frames are what it
+    # relayed onward. Equal numbers mean nothing was refused; rawIn on its own
+    # means the bytes arrived and the framing did not.
+    traffic = (
+        f"{p2p.get('framesToServer', 0)} in / {p2p.get('framesToClient', 0)} out "
+        f"({p2p.get('rawIn', 0)} reached the bridge)"
+    )
+    shape = (
+        f"{p2p.get('exchanges', 0)} exchange(s), {p2p.get('channelCloses', 0)} channel(s) closed, "
+        f"{p2p.get('bridges', 0)} bridge(s)"
+    )
+    if p2p.get("channelOpen"):
+        head = f"connected now · {traffic} · {shape}"
+        head += f"; the socket to itself is {p2p['bridgeSocket']}" if p2p.get("bridgeSocket") else ""
+    else:
+        head = f"nothing connected now · {traffic} · {shape} · {age_text}"
+    # The socket state belongs to the LAST bridge, so it is only meaningful while
+    # one is up; `lastError` is likewise whatever went wrong most recently and
+    # says nothing about the connection in front of you. Both are labelled so
+    # neither reads as current, because both invite a wrong conclusion.
+    if p2p.get("lastError"):
+        head += f"; an earlier failure: {p2p['lastError']}"
+    return head
+
+
 def read_state(port: int, token: str) -> tuple[dict | None, str]:
     """The machine's current state, with nothing asked of anyone."""
     ws = WebSocket(port, AUTH_TIMEOUT_S)
@@ -132,7 +173,7 @@ def main() -> int:
         default=os.environ.get("PINEST_FIREBASE_API_KEY", DEFAULT_API_KEY),
         help="override the (public) Firebase web apiKey",
     )
-    parser.add_argument("--status", action="store_true", help="only print the app's report")
+    parser.add_argument("--status", action="store_true", help="only print the machine's transport view and the app's report")
     parser.add_argument(
         "--wait-for-report",
         type=float,
@@ -162,6 +203,7 @@ def main() -> int:
         # never itself change anything.
         state, note = read_state(ports[0], token)
         print(note, flush=True)
+        print(f"the machine's own view: {describe_transport(state or {})}", flush=True)
         print(f"the app says: {describe_report(report_from_state(state or {}))}", flush=True)
         return 0
 
