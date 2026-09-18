@@ -52,8 +52,8 @@ class _FakeChannel implements ControlChannel {
       await publishAnswer('answer-for:$offerSdp');
       return _FakeChannel(offerSdp);
     },
-    publishAnswer: (sdp, writtenAt, offerTs) async =>
-        published.add('$sdp@$writtenAt#offer$offerTs'),
+    publishAnswer: (sdp, writtenAt, offerTs, [laneId]) async =>
+        published.add('$sdp@$writtenAt#offer$offerTs${laneId != null ? "[$laneId]" : ""}'),
     open: (channel) async => connections.add(channel.endpoint?.toString() ?? 'direct'),
     onChanged: () => changes.add('changed'),
   );
@@ -150,7 +150,7 @@ void main() {
         await gate.future;
         return _FakeChannel(offerSdp);
       },
-      publishAnswer: (sdp, writtenAt, offerTs) async => published.add(sdp),
+      publishAnswer: (sdp, writtenAt, offerTs, [laneId]) async => published.add(sdp),
       open: (channel) async {},
       onChanged: () {},
     );
@@ -180,7 +180,7 @@ void main() {
         await gate.future;
         return _FakeChannel(offerSdp);
       },
-      publishAnswer: (sdp, writtenAt, offerTs) async {},
+      publishAnswer: (sdp, writtenAt, offerTs, [laneId]) async {},
       open: (channel) async => opened += 1,
       onChanged: () {},
     );

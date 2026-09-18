@@ -8,10 +8,10 @@ import {
   currentHostThinkingLevel,
 } from "./host-interactive-commands.ts";
 import { sessionHistory as querySessionHistory, listModels as queryModels } from "./pi-context-queries.ts";
-import { createP2PSignaling, type P2PSignaling } from "./p2p-signaling.ts";
+import { LEGACY_LANE, createP2PSignaling, type P2PSignaling } from "./p2p-signaling.ts";
 import { createDiscoveryWatch } from "./discovery-watch.ts";
 import { createFirestoreWatch } from "./firestore-listen.ts";
-import { CLIENT_RELOAD_FIELD, describeClientReport, type ClientReport } from "./client-report.ts";
+import { CLIENT_RELOAD_FIELD, ClientReports, clientReportView, type ClientReport } from "./client-report.ts";
 import type { ClientReportView } from "./protocol.ts";
 import debug from "./log.ts";
 /**
@@ -163,46 +163,23 @@ let _submitter: MessageSubmitter | null = null;
 // broadcast happens; this entry point wires it to the live pieces.
 /** What the app last said about itself, as read from the discovery document.
  * Kept as the reader's own answer (a report, or the reason there is none) so a
- * diagnosis can never be silently empty. */
+ * diagnosis can never be silently empty. With several clients each reporting
+ * under its own lane, this is the one worth showing: a problem outranks a
+ * report, and the newest wins among equals - a client that cannot say what is
+ * wrong with it is more informative than one that can. */
+/** What the app last said about itself, as read from the discovery document.
+ * Kept as the reader's own answer (a report, or the reason there is none) so a
+ * diagnosis can never be silently empty. Several clients can report at once,
+ * and `ClientReports` owns which of them this is. */
 let _clientReport: { report: ClientReport } | { problem: string } | null = null;
+
+/** Every client that has reported, by lane, so each can be offered its own
+ * direct connection. */
+const _clientReports = new ClientReports();
 
 /** The signaling poll's own handle, for the reason a read failed. */
 let _signaling: P2PSignaling | null = null;
 
-/** The app's own report, in the shape the wire and the app's Settings screen
- * use. Null until the first poll reads something. */
-function clientReportView(): ClientReportView | null {
-  if (!_clientReport) {
-    return null;
-  }
-  if ("problem" in _clientReport) {
-    return {
-      read: false,
-      problem: _clientReport.problem,
-      at: null,
-      platform: null,
-      connected: null,
-      path: null,
-      note: null,
-      lastError: null,
-      summary: `This browser has not reported anything this machine can read: ${_clientReport.problem}.`,
-      bundle: null,
-    };
-  }
-  const report = _clientReport.report;
-  return {
-    read: true,
-    problem: null,
-    at: report.at,
-    platform: report.platform,
-    connected: report.connected,
-    path: report.path,
-    note: report.note,
-    lastError: report.lastError,
-    summary: describeClientReport(report, Date.now()),
-    bundle: report.bundle,
-  };
-}
 
 const _publisher = new StatePublisher({
   hostname,
@@ -217,7 +194,7 @@ const _publisher = new StatePublisher({
   tunnelProvider: () => _ws?.tunnel?.provider ?? null,
   localUrl: () => (_ws ? `ws://127.0.0.1:${_ws.port}` : null),
   p2p: () => _directTransport?.status() ?? null,
-  client: () => clientReportView(),
+  client: () => clientReportView(_clientReport, Date.now()),
   presenceError: () => _presenceError,
   signalingError: () => _signaling?.readError() ?? null,
   signalingMode: () => _signaling?.watchMode() ?? null,
@@ -723,9 +700,9 @@ async function startDirectTransport(): Promise<void> {
   }
   try {
     const signaling = createP2PSignaling({
-      writeOffer: async (sdp, ts) => {
+      writeFields: async (fields) => {
         if (!_fb || !_ownerUid) throw new Error("no owner record to publish an offer to");
-        await _fb.patchUserDoc(_ownerUid, { p2pOffer: sdp, p2pOfferTs: ts });
+        await _fb.patchUserDoc(_ownerUid, fields);
       },
       // The machine learns the answer by WATCHING the document, not by reading
       // it on a timer: a listener costs one read per change and nothing at all
@@ -740,12 +717,23 @@ async function startDirectTransport(): Promise<void> {
       }),
     });
     _signaling = signaling;
-    signaling.onReport((seen) => {
-      _clientReport = seen;
+    signaling.onReports((reports) => {
+      _clientReports.update(reports);
+      _clientReport = _clientReports.view();
+      // A client that has reported gets a lane of its own: one offer is
+      // answerable by one peer, so this is what lets a second app on the same
+      // account connect at all instead of its answer being refused as the
+      // first client's redelivered one.
+      void Promise.all(
+        reports
+          .filter(({ lane }) => lane !== LEGACY_LANE)
+          .map(({ lane }) => _directTransport?.ensureLane(lane)),
+      ).catch((error: Error) => debug(`[remote-code] p2p: could not open a client lane: ${error.message}`));
     });
     _directTransport = await offerDirectTransport({
       port,
-      publishOffer: (sdp, ts) => signaling.publishOffer(sdp, ts),
+      publishOffer: (lane, sdp, ts) => signaling.publishOffer(lane, sdp, ts),
+      retractOffer: (lane) => signaling.retractOffer(lane),
       onAnswer: (handler) => signaling.onAnswer(handler),
       log: (message) => debug(`[remote-code] p2p: ${message}`),
     });
