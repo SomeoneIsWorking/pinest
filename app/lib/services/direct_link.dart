@@ -24,7 +24,7 @@ class DirectLink {
   DirectLink({
     required ConnectDirect connect,
     required List<String> iceServers,
-    required Future<void> Function(String sdp, int writtenAt, int offerTs, String? laneId) publishAnswer,
+    required Future<void> Function(String sdp, int writtenAt, int offerTs, String laneId) publishAnswer,
     required Future<void> Function(ControlChannel channel) open,
     required void Function() onChanged,
     bool Function()? available,
@@ -41,7 +41,7 @@ class DirectLink {
 
   final ConnectDirect _connect;
   final List<String> _iceServers;
-  final Future<void> Function(String sdp, int writtenAt, int offerTs, String? laneId) _publishAnswer;
+  final Future<void> Function(String sdp, int writtenAt, int offerTs, String laneId) _publishAnswer;
   final Future<void> Function(ControlChannel channel) _open;
   final void Function() _onChanged;
   final bool Function() _available;
@@ -124,10 +124,8 @@ class DirectLink {
     if (_attemptInFlight) {
       return false;
     }
-    // The lane this client owns, so an offer addressed to it is preferred and
-    // the answer goes back under the same key. Null means the machine has not
-    // published one (an older machine, or it has not read this client's report
-    // yet) and the flat single-client fields are used instead.
+    // The lane this client owns, so an offer addressed to it is answered and
+    // the answer goes back under the same key.
     final laneId = _clientId();
     final offer = offerToAnswer(
       discovery,

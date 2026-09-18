@@ -135,103 +135,6 @@ def verify_boundary(project_id: str, token: str, uid: str) -> dict[str, int]:
             f"{base}/users/{uid}",
             token,
             method="PATCH",
-            update_mask=["p2pAnswer", "p2pAnswerTs", "p2pAnswerOfferTs"],
-            body=json.dumps(
-                {
-                    "fields": {
-                        "p2pAnswer": {
-                            "stringValue": "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n"
-                        },
-                        "p2pAnswerTs": {"integerValue": ts_str},
-                        "p2pAnswerOfferTs": {"integerValue": "1"},
-                    }
-                }
-            ).encode(),
-        ),
-        "invalid_signaling_write": request_status(
-            f"{base}/users/{uid}",
-            token,
-            method="PATCH",
-            update_mask=["p2pAnswer", "p2pAnswerTs", "p2pAnswerOfferTs"],
-            body=json.dumps(
-                {
-                    "fields": {
-                        "p2pAnswer": {"stringValue": "not-an-sdp"},
-                        "p2pAnswerTs": {"integerValue": "1"},
-                        "p2pAnswerOfferTs": {"integerValue": "1"},
-                    }
-                }
-            ).encode(),
-        ),
-        # An answer that names no offer cannot be matched to an exchange, so the
-        # machine would have to compare clocks to attribute it - the comparison
-        # that silently refuses a valid answer when two devices disagree. The
-        # boundary refuses the unattributable write instead.
-        "unidentified_signaling_write": request_status(
-            f"{base}/users/{uid}",
-            token,
-            method="PATCH",
-            update_mask=["p2pAnswer", "p2pAnswerTs", "p2pAnswerOfferTs"],
-            body=json.dumps(
-                {
-                    "fields": {
-                        "p2pAnswer": {
-                            "stringValue": "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n"
-                        },
-                        "p2pAnswerTs": {"integerValue": ts_str},
-                        "p2pAnswerOfferTs": {"nullValue": None},
-                    }
-                }
-            ).encode(),
-        ),
-        # The app's own report, and the machine's reload request: the two halves
-        # of a diagnosis that has to cross between a browser the machine cannot
-        # inspect and a machine the browser cannot inspect.
-        "valid_client_report_write": request_status(
-            f"{base}/users/{uid}",
-            token,
-            method="PATCH",
-            update_mask=["client"],
-            body=json.dumps(
-                {
-                    "fields": {
-                        "client": {
-                            "mapValue": {
-                                "fields": {
-                                    "at": {"integerValue": ts_str},
-                                    "platform": {"stringValue": "Zen"},
-                                    "connected": {"booleanValue": False},
-                                    "lastError": {"nullValue": None},
-                                }
-                            }
-                        }
-                    }
-                }
-            ).encode(),
-        ),
-        # A report that is not shaped like one is refused: a write that reached
-        # the document half-formed would be read as a diagnosis of the browser
-        # rather than as a refusal of the write.
-        "invalid_client_report_write": request_status(
-            f"{base}/users/{uid}",
-            token,
-            method="PATCH",
-            update_mask=["client"],
-            body=json.dumps(
-                {"fields": {"client": {"mapValue": {"fields": {"connected": {"booleanValue": True}}}}}}
-            ).encode(),
-        ),
-        "valid_client_reload_write": request_status(
-            f"{base}/users/{uid}",
-            token,
-            method="PATCH",
-            update_mask=["clientReload"],
-            body=json.dumps({"fields": {"clientReload": {"integerValue": ts_str}}}).encode(),
-        ),
-        "valid_lane_signaling_write": request_status(
-            f"{base}/users/{uid}",
-            token,
-            method="PATCH",
             update_mask=["p2pAnswers"],
             body=json.dumps(
                 {
@@ -254,7 +157,20 @@ def verify_boundary(project_id: str, token: str, uid: str) -> dict[str, int]:
                 }
             ).encode(),
         ),
-        "valid_lane_client_report_write": request_status(
+        "invalid_signaling_write": request_status(
+            f"{base}/users/{uid}",
+            token,
+            method="PATCH",
+            update_mask=["p2pAnswers"],
+            body=json.dumps(
+                {
+                    "fields": {
+                        "p2pAnswers": {"stringValue": "not-a-map"}
+                    }
+                }
+            ).encode(),
+        ),
+        "valid_client_report_write": request_status(
             f"{base}/users/{uid}",
             token,
             method="PATCH",
@@ -281,6 +197,22 @@ def verify_boundary(project_id: str, token: str, uid: str) -> dict[str, int]:
                 }
             ).encode(),
         ),
+        "invalid_client_report_write": request_status(
+            f"{base}/users/{uid}",
+            token,
+            method="PATCH",
+            update_mask=["clients"],
+            body=json.dumps(
+                {"fields": {"clients": {"stringValue": "not-a-map"}}}
+            ).encode(),
+        ),
+        "valid_client_reload_write": request_status(
+            f"{base}/users/{uid}",
+            token,
+            method="PATCH",
+            update_mask=["clientReload"],
+            body=json.dumps({"fields": {"clientReload": {"integerValue": ts_str}}}).encode(),
+        ),
     }
     expected = {
         "own_document_get": 200,
@@ -289,12 +221,9 @@ def verify_boundary(project_id: str, token: str, uid: str) -> dict[str, int]:
         "invalid_own_write": 403,
         "valid_signaling_write": 200,
         "invalid_signaling_write": 403,
-        "unidentified_signaling_write": 403,
         "valid_client_report_write": 200,
         "invalid_client_report_write": 403,
         "valid_client_reload_write": 200,
-        "valid_lane_signaling_write": 200,
-        "valid_lane_client_report_write": 200,
     }
     for name, actual in checks.items():
         if actual != expected[name]:

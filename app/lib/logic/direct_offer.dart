@@ -33,10 +33,7 @@ bool looksLikeSdp(Object? value) {
 ///
 /// [answeredTs] is the offer timestamp already answered in this app session, so
 /// a document update that repeats the same offer does not start a second
-/// exchange. [laneId] is this client's own lane: its offer is preferred, and the
-/// flat single-client fields are the fallback for a machine that publishes no
-/// lane for it (an older machine, or one that has not yet seen this client's
-/// report).
+/// exchange. [laneId] is this client's own lane in `p2pOffers`.
 AnswerableOffer? offerToAnswer(
   Map<String, dynamic>? document, {
   required int now,
@@ -44,23 +41,14 @@ AnswerableOffer? offerToAnswer(
   String? laneId,
 }) {
   final lane = laneOffer(document, laneId);
-  if (lane != null) {
-    return _acceptable(lane.sdp, lane.ts, now, answeredTs, lane.laneId);
-  }
-  if (document == null) {
+  if (lane == null) {
     return null;
   }
-  final sdp = document['p2pOffer'];
-  final ts = (document['p2pOfferTs'] as num?)?.toInt();
-  if (ts == null || !looksLikeSdp(sdp)) {
-    return null;
-  }
-  return _acceptable(sdp, ts, now, answeredTs, null);
+  return _acceptable(lane.sdp, lane.ts, now, answeredTs, lane.laneId);
 }
 
-/// Whether a candidate offer should be answered, shared by the lane path and
-/// the flat one so the two cannot drift on the rules that matter.
-AnswerableOffer? _acceptable(String sdp, int ts, int now, int? answeredTs, String? laneId) {
+/// Whether a candidate offer should be answered.
+AnswerableOffer? _acceptable(String sdp, int ts, int now, int? answeredTs, String laneId) {
   if (!looksLikeSdp(sdp)) {
     return null;
   }
@@ -80,18 +68,3 @@ AnswerableOffer? _acceptable(String sdp, int ts, int now, int? answeredTs, Strin
   }
   return (sdp: sdp, ts: ts, laneId: laneId);
 }
-
-/// The fields this app writes back: the description, when it was written, and
-/// the offer it answers.
-///
-/// The named offer is what makes the answer attributable. Comparing clocks
-/// instead - this device's write time against the machine's offer time - refuses
-/// a good answer whenever the two devices disagree by more than the age of the
-/// offer, and it does so silently: the punch simply never lands. [offerTs] is
-/// the timestamp of the offer this answer was produced from, so the machine can
-/// check identity rather than order.
-Map<String, Object> answerFields(String sdp, int writtenAt, int offerTs) => {
-  'p2pAnswer': sdp,
-  'p2pAnswerTs': writtenAt,
-  'p2pAnswerOfferTs': offerTs,
-};

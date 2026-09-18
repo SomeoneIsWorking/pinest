@@ -6,7 +6,7 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
 
-import { LEGACY_LANE, createP2PSignaling, looksLikeSdp } from "../src/p2p-signaling.ts";
+import { createP2PSignaling, looksLikeSdp } from "../src/p2p-signaling.ts";
 import type { DiscoveryWatch } from "../src/discovery-watch.ts";
 
 const SDP = "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n";
@@ -76,19 +76,18 @@ function harness(problem: string | null = null): Harness {
     counts: fake.counts,
     writeFields: async (fields: Record<string, unknown>) => {
       h.fields.push(fields);
-      if (typeof fields.p2pOffer === "string") {
-        h.offers.push({ sdp: fields.p2pOffer, ts: Number(fields.p2pOfferTs) });
-      }
       if (fields.p2pOffers && typeof fields.p2pOffers === "object") {
         h.offersMap = fields.p2pOffers as Record<string, { sdp: string; ts: number }>;
+        h.offers = Object.values(h.offersMap);
       }
     },
     deliver: async (fields?: Record<string, unknown>) => {
+      const answers = { ...h.answers };
+      if (h.answer !== null) {
+        answers["client-1"] = h.answer;
+      }
       const data = fields ?? {
-        ...(h.answer === null
-          ? {}
-          : { p2pAnswer: h.answer.sdp, p2pAnswerOfferTs: h.answer.offerTs }),
-        ...(Object.keys(h.answers).length === 0 ? {} : { p2pAnswers: h.answers }),
+        ...(Object.keys(answers).length === 0 ? {} : { p2pAnswers: answers }),
       };
       fake.deliver(data);
       await settle();
@@ -108,7 +107,7 @@ test("an offer is published with its timestamp, and answers are ignored until th
   await h.deliver(); // an answer naming nothing, before any offer exists
   assert.deepEqual(delivered, []);
 
-  await h.signaling.publishOffer(LEGACY_LANE, SDP, OFFER_TS);
+  await h.signaling.publishOffer("client-1", SDP, OFFER_TS);
   assert.equal(h.offers.length, 1);
   assert.equal(h.offers[0]!.sdp, SDP);
   assert.equal(h.offers[0]!.ts, OFFER_TS);
@@ -117,9 +116,9 @@ test("an offer is published with its timestamp, and answers are ignored until th
 
 test("publishing an offer starts the watch exactly once, however many offers", async () => {
   const h = harness();
-  await h.signaling.publishOffer(LEGACY_LANE, SDP, OFFER_TS);
-  await h.signaling.publishOffer(LEGACY_LANE, SDP, OFFER_TS + 100);
-  await h.signaling.publishOffer(LEGACY_LANE, SDP, OFFER_TS + 200);
+  await h.signaling.publishOffer("client-1", SDP, OFFER_TS);
+  await h.signaling.publishOffer("client-1", SDP, OFFER_TS + 100);
+  await h.signaling.publishOffer("client-1", SDP, OFFER_TS + 200);
   assert.equal(h.counts.starts, 1, "one watch, not one per exchange");
   h.signaling.stop();
   assert.equal(h.counts.stops, 1, "the watch is stopped with signaling");
@@ -129,7 +128,7 @@ test("the answer that names the live offer is delivered exactly once", async () 
   const h = harness();
   const delivered: string[] = [];
   h.signaling.onAnswer((_lane, sdp) => delivered.push(sdp));
-  await h.signaling.publishOffer(LEGACY_LANE, SDP, OFFER_TS);
+  await h.signaling.publishOffer("client-1", SDP, OFFER_TS);
 
   h.answer = { sdp: SDP, offerTs: OFFER_TS };
   await h.deliver();
@@ -150,7 +149,7 @@ test("an answer that names another exchange is refused, not applied", async () =
   const h = harness();
   const delivered: string[] = [];
   h.signaling.onAnswer((_lane, sdp) => delivered.push(sdp));
-  await h.signaling.publishOffer(LEGACY_LANE, SDP, OFFER_TS);
+  await h.signaling.publishOffer("client-1", SDP, OFFER_TS);
 
   h.answer = { sdp: SDP, offerTs: OFFER_TS - 1 }; // the previous exchange
   await h.deliver();
@@ -171,7 +170,7 @@ test("a new exchange resets what has been delivered, not the answer's age", asyn
   const h = harness();
   const delivered: string[] = [];
   h.signaling.onAnswer((_lane, sdp) => delivered.push(sdp));
-  await h.signaling.publishOffer(LEGACY_LANE, SDP, OFFER_TS);
+  await h.signaling.publishOffer("client-1", SDP, OFFER_TS);
   h.answer = { sdp: SDP, offerTs: OFFER_TS };
   await h.deliver();
   assert.equal(delivered.length, 1);
@@ -179,7 +178,7 @@ test("a new exchange resets what has been delivered, not the answer's age", asyn
   // The machine replaces a stale offer and publishes a new one. The app answers
   // it - with an answer that names the NEW offer but was written at a time this
   // machine would call older than that offer. It must still be applied.
-  await h.signaling.publishOffer(LEGACY_LANE, SDP, OFFER_TS + 100);
+  await h.signaling.publishOffer("client-1", SDP, OFFER_TS + 100);
   h.answer = { sdp: SDP, offerTs: OFFER_TS + 100 };
   await h.deliver();
   assert.equal(delivered.length, 2, "the second exchange's answer is applied");
@@ -190,7 +189,7 @@ test("something that is not an SDP never reaches the peer", async () => {
   const h = harness();
   const delivered: string[] = [];
   h.signaling.onAnswer((_lane, sdp) => delivered.push(sdp));
-  await h.signaling.publishOffer(LEGACY_LANE, SDP, OFFER_TS);
+  await h.signaling.publishOffer("client-1", SDP, OFFER_TS);
 
   h.answer = { sdp: "not an sdp at all", offerTs: OFFER_TS };
   await h.deliver();
@@ -221,12 +220,15 @@ test("the app's own report rides the same delivery as the answer", async () => {
   const h = harness();
   const seen: unknown[] = [];
   h.signaling.onReports((reports) => seen.push(...reports.map((r) => r.seen)));
-  await h.signaling.publishOffer(LEGACY_LANE, SDP, OFFER_TS);
+  await h.signaling.publishOffer("client-1", SDP, OFFER_TS);
 
   await h.deliver({
-    client: { at: Date.now(), platform: "Zen", connected: false },
-    p2pAnswer: SDP,
-    p2pAnswerOfferTs: OFFER_TS,
+    clients: {
+      "client-1": { at: Date.now(), platform: "Zen", connected: false },
+    },
+    p2pAnswers: {
+      "client-1": { sdp: SDP, offerTs: OFFER_TS },
+    },
   });
   assert.ok(
     seen.some((entry) =>
@@ -241,8 +243,8 @@ test("a report the app could not write is delivered as a problem, not as silence
   const h = harness();
   const seen: unknown[] = [];
   h.signaling.onReports((reports) => seen.push(...reports.map((r) => r.seen)));
-  await h.signaling.publishOffer(LEGACY_LANE, SDP, OFFER_TS);
-  await h.deliver({ client: { nonsense: true } });
+  await h.signaling.publishOffer("client-1", SDP, OFFER_TS);
+  await h.deliver({ clients: { "client-1": { nonsense: true } } });
   assert.ok(
     seen.some((entry) =>
       entry !== null && typeof entry === "object" && "problem" in (entry as object)),
@@ -256,12 +258,12 @@ test("the watch's own complaint is the machine's reason, and it clears", async (
   // document (an exhausted quota), so it never saw the app's answer while the
   // app could not see the machine. Nothing anywhere said so.
   const h = harness("Quota exceeded.");
-  await h.signaling.publishOffer(LEGACY_LANE, SDP, OFFER_TS);
+  await h.signaling.publishOffer("client-1", SDP, OFFER_TS);
   await h.deliver(); // the watch's first delivery is where a failure is noticed
   assert.equal(h.signaling.readError(), "Quota exceeded.");
 
   const healthy = harness(null);
-  await healthy.signaling.publishOffer(LEGACY_LANE, SDP, OFFER_TS);
+  await healthy.signaling.publishOffer("client-1", SDP, OFFER_TS);
   await healthy.deliver();
   assert.equal(healthy.signaling.readError(), null, "a working watch reports no reason");
   h.signaling.stop();
@@ -357,39 +359,6 @@ test("a withdrawn lane's offer is gone, so nobody can answer it", async () => {
   h.signaling.stop();
 });
 
-test("the single-client lane keeps the flat fields a build without ids writes", async () => {
-  // Backward compatibility is not optional: the shipped app answers
-  // `p2pOffer`/`p2pOfferTs`, and it must keep working while new builds move to
-  // lanes.
-  const h = harness();
-  await h.signaling.publishOffer(LEGACY_LANE, SDP, OFFER_TS);
-  assert.equal(h.fields.length, 1);
-  assert.equal(h.fields[0]!.p2pOffer, SDP);
-  assert.equal(h.fields[0]!.p2pOfferTs, OFFER_TS);
-  assert.deepEqual(h.fields[0]!.p2pOffers, {}, "the map is empty: no client has an id yet");
-
-  const delivered: string[] = [];
-  h.signaling.onAnswer((lane, sdp) => delivered.push(`${lane}:${sdp}`));
-  h.answer = { sdp: SDP, offerTs: OFFER_TS };
-  await h.deliver();
-  assert.deepEqual(delivered, [`:${SDP}`], "delivered on the lane named \"\"");
-  h.signaling.stop();
-});
-
-test("a legacy client and a client with an id are served at the same time", async () => {
-  const h = harness();
-  const delivered: string[] = [];
-  h.signaling.onAnswer((lane) => delivered.push(lane));
-  await h.signaling.publishOffer(LEGACY_LANE, SDP, OFFER_TS);
-  await h.signaling.publishOffer("client-a", SDP, OFFER_TS + 1);
-
-  h.answer = { sdp: SDP, offerTs: OFFER_TS };
-  h.answers["client-a"] = { sdp: SDP, offerTs: OFFER_TS + 1 };
-  await h.deliver();
-  assert.deepEqual(delivered.sort(), ["", "client-a"]);
-  h.signaling.stop();
-});
-
 test("reports from several clients arrive labelled, not merged into one", async () => {
   const h = harness();
   const seen: { lane: string; platform?: string }[] = [];
@@ -398,9 +367,8 @@ test("reports from several clients arrive labelled, not merged into one", async 
       if ("report" in report) seen.push({ lane, platform: report.report.platform });
     }
   });
-  await h.signaling.publishOffer(LEGACY_LANE, SDP, OFFER_TS);
+  await h.signaling.publishOffer("client-a", SDP, OFFER_TS);
   await h.deliver({
-    client: { at: Date.now(), platform: "Old-Build", connected: true },
     clients: {
       "client-a": { at: Date.now(), platform: "Phone", connected: true },
       "client-b": { at: Date.now(), platform: "Laptop", connected: false },
@@ -409,7 +377,6 @@ test("reports from several clients arrive labelled, not merged into one", async 
   assert.deepEqual(
     seen.sort((a, b) => a.lane.localeCompare(b.lane)),
     [
-      { lane: "", platform: "Old-Build" },
       { lane: "client-a", platform: "Phone" },
       { lane: "client-b", platform: "Laptop" },
     ],

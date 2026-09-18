@@ -54,8 +54,6 @@ void main() {
           'client-a': {'sdp': 'v=0 offer-a', 'ts': 1001},
           'client-b': {'sdp': 'v=0 offer-b', 'ts': 1002},
         },
-        'p2pOffer': 'v=0 legacy',
-        'p2pOfferTs': 1000,
       };
 
       final offerA = laneOffer(doc, 'client-a');

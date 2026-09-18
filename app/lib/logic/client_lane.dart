@@ -25,11 +25,6 @@ const String kClientsField = 'clients';
 /// colliding is not a thing anyone has to think about.
 const int kClientIdHexChars = 32;
 
-/// A lane id that the machine cannot confuse with a real client's: it is the
-/// fixed key its own single-client lane lives under, and a client that named
-/// itself this would fight the one offer a build without ids answers.
-const String kReservedLaneSuffix = '';
-
 /// Whether [value] is a lane id this app would write: hex only, because it is
 /// used as a Firestore map key and gains nothing from punctuation.
 bool looksLikeClientId(Object? value) {
@@ -84,14 +79,11 @@ Map<String, Object> laneAnswerFields(String clientId, String sdp, int offerTs) =
 };
 
 /// The offer to answer, and the lane it came from.
-typedef AnswerableOffer = ({String sdp, int ts, String? laneId});
+typedef AnswerableOffer = ({String sdp, int ts, String laneId});
 
 /// Read one lane's offer out of [document].
 ///
-/// `laneId` is this client's own key. When the machine does not publish one - it
-/// is a build from before lanes, or this client has not reported yet - the flat
-/// single-client fields are used instead, so a new app still connects to an
-/// older machine.
+/// `laneId` is this client's own key.
 AnswerableOffer? laneOffer(Map<String, dynamic>? document, String? laneId) {
   if (document == null || laneId == null) {
     return null;

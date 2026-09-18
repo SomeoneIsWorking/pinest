@@ -54,13 +54,42 @@ function argValue(name: string, fallback: number): number {
 interface Signaling {
   offer: string;
   offerTs: number;
-  /** The offer the app has already answered, when it has. */
-  answerOfferTs: number | null;
 }
 
+const VERIFIER_CLIENT_ID = "00000000000000000000000000000001";
 
-/** Read the live offer, and whether that exchange is already taken. */
-async function readSignaling(uid: string, token: string, timeoutMs: number): Promise<Signaling> {
+async function reportPresence(uid: string, token: string, clientId: string, timeoutMs: number): Promise<void> {
+  const mask = `updateMask.fieldPaths=clients.${clientId}`;
+  const response = await fetchBounded(`${docUrl(uid)}?${mask}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      fields: {
+        clients: {
+          mapValue: {
+            fields: {
+              [clientId]: {
+                mapValue: {
+                  fields: {
+                    at: { integerValue: String(Date.now()) },
+                    platform: { stringValue: "Verifier" },
+                    connected: { booleanValue: false },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    }),
+  }, timeoutMs);
+  if (!response.ok) {
+    throw new VerificationError(`reporting verifier presence failed: HTTP ${response.status}`);
+  }
+}
+
+/** Read the live offer for this verifier lane. */
+async function readSignaling(uid: string, token: string, clientId: string, timeoutMs: number): Promise<Signaling | null> {
   const response = await fetchBounded(
     docUrl(uid),
     { headers: { Authorization: `Bearer ${token}` } },
@@ -68,38 +97,44 @@ async function readSignaling(uid: string, token: string, timeoutMs: number): Pro
   );
   if (!response.ok) throw new VerificationError(`discovery read failed: HTTP ${response.status}`);
   const fields = ((await response.json()) as { fields?: Record<string, any> }).fields ?? {};
-  const offer = fields.p2pOffer?.stringValue;
-  const offerTs = Number(fields.p2pOfferTs?.integerValue ?? NaN);
+  const offers = fields.p2pOffers?.mapValue?.fields ?? {};
+  const entry = offers[clientId]?.mapValue?.fields;
+  const offer = entry?.sdp?.stringValue;
+  const offerTs = Number(entry?.ts?.integerValue ?? NaN);
   if (typeof offer !== "string" || !Number.isFinite(offerTs)) {
-    throw new VerificationError(
-      "the discovery document carries no direct offer: peer-to-peer is off there (config `p2p`) "
-      + "or the machine is not running the direct transport",
-    );
+    return null;
   }
-  const answerOfferTs = Number(fields.p2pAnswerOfferTs?.integerValue ?? NaN);
-  return { offer, offerTs, answerOfferTs: Number.isFinite(answerOfferTs) ? answerOfferTs : null };
+  return { offer, offerTs };
 }
 
 async function writeAnswer(
   uid: string,
   token: string,
+  clientId: string,
   sdp: string,
   namedOffer: number,
   timeoutMs: number,
 ): Promise<void> {
-  // The named offer is what the machine matches on, and the deployed rules
-  // refuse an answer without it: an unattributable answer would have to be
-  // placed by comparing the two peers' clocks.
-  const mask = ["p2pAnswer", "p2pAnswerTs", "p2pAnswerOfferTs"]
-    .map((f) => `updateMask.fieldPaths=${f}`).join("&");
+  const mask = `updateMask.fieldPaths=p2pAnswers.${clientId}`;
   const response = await fetchBounded(`${docUrl(uid)}?${mask}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     body: JSON.stringify({
       fields: {
-        p2pAnswer: { stringValue: sdp },
-        p2pAnswerTs: { integerValue: String(Date.now()) },
-        p2pAnswerOfferTs: { integerValue: String(namedOffer) },
+        p2pAnswers: {
+          mapValue: {
+            fields: {
+              [clientId]: {
+                mapValue: {
+                  fields: {
+                    sdp: { stringValue: sdp },
+                    offerTs: { integerValue: String(namedOffer) },
+                  },
+                },
+              },
+            },
+          },
+        },
       },
     }),
   }, timeoutMs);
@@ -182,49 +217,28 @@ async function main(): Promise<void> {
   }, timeoutMs * 4);
 
   const { idToken, uid } = await ownerIdToken(ownerRefreshToken(), timeoutMs);
-  const first = await readSignaling(uid, idToken, timeoutMs);
+  console.log(`requesting lane for verifier ${VERIFIER_CLIENT_ID}...`);
+  await reportPresence(uid, idToken, VERIFIER_CLIENT_ID, timeoutMs);
 
-  const age = Date.now() - first.offerTs;
-  const hostCandidates = candidateReport(first.offer);
-  console.log(
-    `offer: ${first.offer.length} bytes, ${hostCandidates.total} candidate(s), `
-    + `${hostCandidates.srflx} srflx, published ${Math.round(age / 1000)}s ago`,
-  );
-  if (age > 60_000) {
-    console.log(
-      "NOTE: that offer is over a minute old, so its carrier-grade NAT mapping has probably "
-      + "expired. The machine refreshes a stale offer on its own; this run answers what it finds.",
-    );
-  }
-
-  // The machine withdraws and republishes a stale offer on its own clock (45 s
-  // while nothing is connected), so an answer written against the offer read a
-  // moment ago can describe an exchange that no longer exists - exactly how the
-  // app's own retry works, and why this has to read and answer again rather
-  // than answer once and wait. An exchange the app has already answered is left
-  // alone: one exchange takes one answer, and racing the app for it would prove
-  // nothing about either peer.
   const deadline = Date.now() + timeoutMs * 4;
   let connected: { push: any; actions: any; pc: RTCPeerConnection } | null = null;
   let sawLabels: string[] = [];
   let answered = 0;
+  let lastAnsweredOfferTs = 0;
+
   while (Date.now() < deadline && connected === null) {
-    // Poll tightly for an offer nobody has answered yet. The machine replaces a
-    // stale offer every ~45s and the app answers within a few seconds, so an
-    // exchange is only free briefly; a slow poll would never see one and would
-    // report a failure of the transport that is really a race with the app.
-    const signaling = await readSignaling(uid, idToken, timeoutMs);
-    if (signaling.answerOfferTs === signaling.offerTs) {
-      if (Date.now() + 1_500 < deadline) {
-        await sleep(1_000);
-        continue;
-      }
-      console.log(
-        `offer ${signaling.offerTs}: already answered, and no newer offer appeared `
-        + "- the app holds the exchange",
-      );
+    const signaling = await readSignaling(uid, idToken, VERIFIER_CLIENT_ID, timeoutMs);
+    if (!signaling || signaling.offerTs <= lastAnsweredOfferTs) {
+      await sleep(1_000);
       continue;
     }
+
+    const age = Date.now() - signaling.offerTs;
+    const hostCandidates = candidateReport(signaling.offer);
+    console.log(
+      `offer: ${signaling.offer.length} bytes, ${hostCandidates.total} candidate(s), `
+      + `${hostCandidates.srflx} srflx, published ${Math.round(age / 1000)}s ago`,
+    );
 
     const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
     const opened = new Map<string, any>();
@@ -251,7 +265,8 @@ async function main(): Promise<void> {
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     await gather(pc, timeoutMs);
-    await writeAnswer(uid, idToken, pc.localDescription!.sdp!, signaling.offerTs, timeoutMs);
+    await writeAnswer(uid, idToken, VERIFIER_CLIENT_ID, pc.localDescription!.sdp!, signaling.offerTs, timeoutMs);
+    lastAnsweredOfferTs = signaling.offerTs;
     answered += 1;
     console.log(
       `answer ${answered}: published, naming the offer (${signaling.offerTs}) it describes, `

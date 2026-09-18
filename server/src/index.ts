@@ -8,7 +8,7 @@ import {
   currentHostThinkingLevel,
 } from "./host-interactive-commands.ts";
 import { sessionHistory as querySessionHistory, listModels as queryModels } from "./pi-context-queries.ts";
-import { LEGACY_LANE, createP2PSignaling, type P2PSignaling } from "./p2p-signaling.ts";
+import { createP2PSignaling, type P2PSignaling } from "./p2p-signaling.ts";
 import { createDiscoveryWatch } from "./discovery-watch.ts";
 import { createFirestoreWatch } from "./firestore-listen.ts";
 import { CLIENT_RELOAD_FIELD, ClientReports, clientReportView, type ClientReport } from "./client-report.ts";
@@ -725,9 +725,7 @@ async function startDirectTransport(): Promise<void> {
       // account connect at all instead of its answer being refused as the
       // first client's redelivered one.
       void Promise.all(
-        reports
-          .filter(({ lane }) => lane !== LEGACY_LANE)
-          .map(({ lane }) => _directTransport?.ensureLane(lane)),
+        reports.map(({ lane }) => _directTransport?.ensureLane(lane)),
       ).catch((error: Error) => debug(`[remote-code] p2p: could not open a client lane: ${error.message}`));
     });
     _directTransport = await offerDirectTransport({

@@ -5,11 +5,6 @@ import 'package:flutter_test/flutter_test.dart';
 /// Every field the rules recognise as signaling. Adding one here fails the
 /// source checks until the rules carry it in BOTH key lists.
 const List<String> signalingFields = [
-  'p2pOffer',
-  'p2pOfferTs',
-  'p2pAnswer',
-  'p2pAnswerTs',
-  'p2pAnswerOfferTs',
   'p2pOffers',
   'p2pAnswers',
 ];
@@ -17,7 +12,7 @@ const List<String> signalingFields = [
 /// The app's own report, and the machine's one request back. Both are written on
 /// their own rather than as part of a presence update, so each needs its own
 /// exemption — and the app's report must stay bounded: it is client-supplied.
-const List<String> clientFields = ['client', 'clients', 'clientReload'];
+const List<String> clientFields = ['clients', 'clientReload'];
 
 /// The field names in the first `hasOnly([...])` list that follows [marker].
 List<String> _keyList(String source, String marker) {
@@ -93,7 +88,7 @@ void main() {
     },
   );
 
-  test('signaling fields are bounded and must look like SDP', () {
+  test('signaling fields are bounded map structures', () {
     for (final field in signalingFields) {
       expect(
         rules,
@@ -101,19 +96,8 @@ void main() {
         reason: 'signaling key set omitted $field',
       );
     }
-    expect(normalized, contains('value.size() <= 20000'));
-    expect(normalized, contains("value.matches('v=0"));
-    expect(normalized, contains('data.p2pAnswerTs is int'));
-    expect(normalized, contains('data.p2pOfferTs is int'));
-    // An answer must not be writable without the offer it names: an answer that
-    // names nothing cannot be attributed to an exchange, so the machine would
-    // have to compare two devices' clocks to place it - the comparison that
-    // silently refuses a valid answer whenever they disagree.
-    expect(
-      normalized,
-      contains("data.keys().hasAny(['p2pAnswerOfferTs'])"),
-    );
-    expect(normalized, contains('data.p2pAnswerOfferTs is int'));
+    expect(normalized, contains('data.p2pOffers is map && data.p2pOffers.size() <= 8'));
+    expect(normalized, contains('data.p2pAnswers is map && data.p2pAnswers.size() <= 8'));
     // Every field a writer may touch must appear in the document key whitelist,
     // or the write is refused no matter which exemption matches it.
     final presenceKeys = _keyList(normalized, 'data.keys().hasOnly(').toSet();
@@ -154,23 +138,23 @@ void main() {
     // Client-supplied state inside the owner's document: shape-checked and
     // size-capped before it is stored at all.
     expect(normalized, contains('function hasValidClientReport()'));
-    expect(normalized, contains('data.client is map'));
-    expect(normalized, contains('data.client.at is int'));
-    expect(normalized, contains('data.client.connected is bool'));
-    expect(normalized, contains('data.client.platform.size() <= 80'));
-    expect(normalized, contains('data.client.size() <= 20'));
+    expect(normalized, contains('data.clients is map && data.clients.size() <= 8'));
     expect(normalized, contains('data.clientReload is int'));
     expect(normalized, contains('hasValidClientReport()'));
     expect(normalized, contains('touchesOnlyClientReport()'));
   });
 
   test('signaling-only writes are the only ones exempt from presence shape', () {
-    // Both pairs: restricting the exemption to the answer refuses the machine's
-    // own offer write (measured live: HTTP 403 on publish).
     expect(
       normalized,
       contains(
-        "affected.hasAny( ['p2pOffer', 'p2pOfferTs', 'p2pAnswer', 'p2pAnswerTs', 'p2pOffers', 'p2pAnswers'])",
+        "affected.hasOnly(['p2pOffers', 'p2pAnswers'])",
+      ),
+    );
+    expect(
+      normalized,
+      contains(
+        "affected.hasAny(['p2pOffers', 'p2pAnswers'])",
       ),
     );
     expect(

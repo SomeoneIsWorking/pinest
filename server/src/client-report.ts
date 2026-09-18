@@ -20,13 +20,11 @@
 
 /** Fields this module owns inside the owner's discovery document.
  *
- * `client` is the flat, single-client report a build without client ids
- * writes. `clients` is the same report per client id, so several apps on one
+ * `clients` is the report map per client id, so several apps on one
  * account can each say what they see instead of overwriting each other - the
  * map is written one key at a time by the clients themselves. */
 import type { ClientReportView } from "./protocol.ts";
 
-export const CLIENT_REPORT_FIELD = "client";
 export const CLIENT_REPORT_MAP_FIELD = "clients";
 export const CLIENT_RELOAD_FIELD = "clientReload";
 

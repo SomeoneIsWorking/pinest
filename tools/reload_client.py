@@ -147,6 +147,7 @@ def ask_once(port: int, token: str, request_id: str) -> tuple[dict | None, str]:
         ws.send_text(json.dumps({"type": "subscribe", "sessionIds": []}))
         ws.send_text(json.dumps(reload_client_command(request_id)))
         deadline = time.time() + 10.0
+        last_state: dict | None = None
         while time.time() < deadline:
             frame = ws.recv_text(1.0)
             if not frame:
@@ -158,9 +159,11 @@ def ask_once(port: int, token: str, request_id: str) -> tuple[dict | None, str]:
             if parsed.get("type") == "error":
                 return None, f"the machine refused: {parsed.get('message')}"
             if parsed.get("type") == "notice":
-                return parsed, f"the machine answered: {parsed.get('message')}"
+                return last_state or parsed, f"the machine answered: {parsed.get('message')}"
             if parsed.get("type") == "state":
-                return parsed, "the machine sent state without a notice"
+                last_state = parsed
+        if last_state is not None:
+            return last_state, "the machine sent state without a notice"
         return None, "the machine did not answer the request"
     finally:
         ws.close()
