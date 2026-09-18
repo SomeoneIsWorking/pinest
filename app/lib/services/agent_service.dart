@@ -12,7 +12,6 @@ import 'control_channel.dart';
 import 'client_identity.dart';
 import '../logic/client_lane.dart';
 import '../logic/client_report.dart';
-import '../logic/direct_offer.dart';
 import '../logic/command_id.dart';
 import 'client_reporter.dart';
 import 'link_bridge.dart';
@@ -800,17 +799,10 @@ class AgentService extends ChangeNotifier {
     publishAnswer: (sdp, writtenAt, offerTs, laneId) {
       final uid = _boundUid;
       if (uid == null) throw StateError('no uid to publish an answer for');
-      // The answer goes back under the same key the offer came from. An offer
-      // from the flat single-client fields - the shape a machine without lane
-      // support publishes - is answered in that shape, so a new app still
-      // connects to an older machine.
-      final fields = laneId == null
-          ? answerFields(sdp, writtenAt, offerTs)
-          : laneAnswerFields(laneId, sdp, offerTs);
       return _db
           .collection('users')
           .doc(uid)
-          .set(fields, SetOptions(merge: true));
+          .set(laneAnswerFields(laneId, sdp, offerTs), SetOptions(merge: true));
     },
     open: (channel) => _dialChannel(channel),
     onChanged: () {

@@ -152,6 +152,7 @@ async function joined(
   const transport = await offerDirectTransport({
     port: server.port,
     stunServers: [],
+    startLanes: ["test-lane"],
     publishOffer: async (lane, sdp, ts) => {
       publishedLane = lane;
       publishedTs = ts;

@@ -13,7 +13,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { OFFER_LIFETIME_MS, offerDirectTransport } from "../src/direct-transport.ts";
-import { LEGACY_LANE } from "../src/p2p-signaling.ts";
 import type { P2PExchange } from "../src/p2p.ts";
 
 interface FakeExchange extends P2PExchange {
@@ -30,13 +29,14 @@ interface FakeExchange extends P2PExchange {
   fail(error: Error): void;
 }
 
-function harness() {
+function harness(options: { startLanes?: string[] } = {}) {
   let clock = 1_000_000;
   const built: FakeExchange[] = [];
   const published: { lane: string; sdp: string; ts: number }[] = [];
   const retracted: string[] = [];
   const logs: string[] = [];
   let answerHandler: ((lane: string, sdp: string, offerTs: number) => void) | null = null;
+  const defaultLane = options.startLanes ? options.startLanes[0] ?? "client-0" : "client-0";
   /** A gather the test can hold open, because gathering a whole description
    * takes seconds in production and that window is the one under test. */
   let gathering: Promise<void> | null = null;
@@ -92,6 +92,7 @@ function harness() {
     log: (message) => logs.push(message),
     now: () => clock,
     refreshMs: 1_000_000, // the timer never fires; the test drives refresh
+    startLanes: options.startLanes ?? [defaultLane],
     startExchange,
   });
 
@@ -107,7 +108,7 @@ function harness() {
     // The lane and the offer it names, because an answer that does not name a
     // live offer is refused: the driver holds each lane's own exchange, and
     // which answer belongs to which is signaling's decision.
-    answer: (sdp: string, lane: string = LEGACY_LANE, offerTs?: number) => {
+    answer: (sdp: string, lane: string = defaultLane, offerTs?: number) => {
       const ts = offerTs ?? published.filter((p) => p.lane === lane).at(-1)?.ts ?? 0;
       answerHandler?.(lane, sdp, ts);
     },
@@ -220,7 +221,7 @@ test("a channel that fails to open is reported, and the offer still refreshes", 
   await Promise.resolve();
   assert.equal(t.status().lastError, "ICE failed");
   assert.equal(t.status().channelOpen, false);
-  assert.match(h.logs.join("\n"), /no channel on the single-client lane: ICE failed/);
+  assert.match(h.logs.join("\n"), /no channel on lane client-0: ICE failed/);
 
   h.advance(OFFER_LIFETIME_MS + 1);
   await t.refreshIfStale();
@@ -336,7 +337,7 @@ test("a second client gets its own exchange, and neither replaces the other", as
   assert.equal(h.built.filter((p) => p.lane === "client-b").length, 1, "the second client has an exchange of its own");
   assert.deepEqual(
     h.published.map((p) => p.lane).sort(),
-    ["", "client-b"],
+    ["client-0", "client-b"],
     "each client is offered its own description",
   );
 
@@ -417,22 +418,22 @@ test("a lane that has gone away is withdrawn, and its counters are kept", async 
   await t.close();
 });
 
-test("the single-client lane is never withdrawn, and never duplicated", async () => {
-  const h = harness();
+test("dropping a lane withdraws its offer and closes its peer", async () => {
+  const h = harness({ startLanes: [] });
   const t = await h.transport;
-  await t.ensureLane(LEGACY_LANE);
-  assert.equal(h.built.length, 1, "a build with no client id keeps the offer it has always had");
-  await t.dropLane(LEGACY_LANE);
-  assert.deepEqual(h.retracted, [], "and nothing withdraws it: it has no way to ask for it back");
+  await t.ensureLane("client-1");
   assert.equal(t.status().lanes.length, 1);
+  await t.dropLane("client-1");
+  assert.deepEqual(h.retracted, ["client-1"], "and withdraws its offer");
+  assert.equal(t.status().lanes.length, 0);
   await t.close();
 });
 
 test("the lane cap evicts an unconnected client, never a connected one", async () => {
-  const h = harness();
+  const h = harness({ startLanes: ["client-0"] });
   const t = await h.transport;
   const laneNames = (): string[] => t.status().lanes.map((l) => l.lane).sort();
-  h.built[0]!.connect(); // the single-client lane is in use
+  h.built[0]!.connect(); // client-0 is in use
   await Promise.resolve();
   await Promise.resolve();
   await t.ensureLane("client-1");
@@ -441,14 +442,14 @@ test("the lane cap evicts an unconnected client, never a connected one", async (
   await Promise.resolve();
   await t.ensureLane("client-2");
   await t.ensureLane("client-3");
-  assert.equal(t.status().lanes.length, 4, "legacy + 3 = the cap");
+  assert.equal(t.status().lanes.length, 4, "4 clients = the cap");
 
-  // A fifth client takes the OLDEST UNCONNECTED lane's place. Both working
+  // A fifth client takes the OLDEST UNCONNECTED lane's place (client-2). Both working
   // clients keep theirs: the machine never drops a connection that is in use
   // to make room.
   await t.ensureLane("client-4");
   assert.equal(t.status().lanes.length, 4);
-  assert.deepEqual(laneNames(), ["", "client-1", "client-3", "client-4"]);
+  assert.deepEqual(laneNames(), ["client-0", "client-1", "client-3", "client-4"]);
   assert.equal(h.built[2]!.closed, true, "the evicted client's peer is released");
   assert.equal(h.built[0]!.closed, false, "a connected client is not");
   assert.equal(h.built[1]!.closed, false);

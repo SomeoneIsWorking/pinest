@@ -14,9 +14,6 @@
 /// "the browser connected over a local shortcut".
 library;
 
-/// One contract for the field names, mirrored by `server/src/client-report.ts`.
-const String kClientReportField = 'client';
-
 /// The machine's request for this tab to reload, so a stale client is not
 /// something only a human can fix.
 const String kClientReloadField = 'clientReload';

@@ -5,9 +5,9 @@ import 'package:pinest_app/services/remote_fs.dart';
 void main() {
   group('RemoteFs formatDisplayPath', () {
     test('formats paths relative to home', () {
-      expect(RemoteFs.formatDisplayPath('/home/user', '/home/user'), '~');
-      expect(RemoteFs.formatDisplayPath('/home/user/project', '/home/user'), '~/project');
-      expect(RemoteFs.formatDisplayPath('/var/log', '/home/user'), '/var/log');
+      expect(RemoteFs.formatDisplayPath('/mock/user/base', '/mock/user/base'), '~');
+      expect(RemoteFs.formatDisplayPath('/mock/user/base/project', '/mock/user/base'), '~/project');
+      expect(RemoteFs.formatDisplayPath('/var/log', '/mock/user/base'), '/var/log');
       expect(RemoteFs.formatDisplayPath('/var/log', null), '/var/log');
     });
   });
