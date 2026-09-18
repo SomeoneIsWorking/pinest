@@ -18,8 +18,16 @@
  * the last failure, the browser's own name, and how long ago it spoke.
  */
 
-/** Fields this module owns inside the owner's discovery document. */
+/** Fields this module owns inside the owner's discovery document.
+ *
+ * `client` is the flat, single-client report a build without client ids
+ * writes. `clients` is the same report per client id, so several apps on one
+ * account can each say what they see instead of overwriting each other - the
+ * map is written one key at a time by the clients themselves. */
+import type { ClientReportView } from "./protocol.ts";
+
 export const CLIENT_REPORT_FIELD = "client";
+export const CLIENT_REPORT_MAP_FIELD = "clients";
 export const CLIENT_RELOAD_FIELD = "clientReload";
 
 /** A report is bounded because the app is not trusted with unbounded storage:
@@ -100,8 +108,7 @@ export function parseClientReport(raw: unknown): { report: ClientReport } | { pr
 
 /** One line for a human, naming the age against the machine's own clock so a
  * silent browser is visible as silent. */
-export function describeClientReport(report: ClientReport, now: number): string {
-  const ageSeconds = Math.max(0, Math.round((now - report.at) / 1000));
+export function describeClientReport(report: ClientReport, now: number): string {  const ageSeconds = Math.max(0, Math.round((now - report.at) / 1000));
   const where = report.connected ? `connected via ${report.path || "an unnamed path"}` : "not connected";
   const error = report.lastError ? `; last error: ${report.lastError}` : "";
   const direct = report.direct.active
@@ -115,4 +122,95 @@ export function describeClientReport(report: ClientReport, now: number): string 
 function text(value: unknown, limit: number): string {
   if (typeof value !== "string") return "";
   return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+}
+
+/** A report as the machine read it, or the reason it could not. */
+export type ClientReportRead = { report: ClientReport } | { problem: string };
+
+/** The same answer in the shape the wire and the app's Settings screen use.
+ *
+ * Built here rather than by the caller because this module owns the report's
+ * fields: a state message that re-listed them would be a second place they have
+ * to be kept in step. Null until something has been read. */
+export function clientReportView(read: ClientReportRead | null, now: number): ClientReportView | null {
+  if (!read) {
+    return null;
+  }
+  if ("problem" in read) {
+    return {
+      read: false,
+      problem: read.problem,
+      at: null,
+      platform: null,
+      connected: null,
+      path: null,
+      note: null,
+      lastError: null,
+      summary: `This browser has not reported anything this machine can read: ${read.problem}.`,
+      bundle: null,
+    };
+  }
+  const report = read.report;
+  return {
+    read: true,
+    problem: null,
+    at: report.at,
+    platform: report.platform,
+    connected: report.connected,
+    path: report.path,
+    note: report.note,
+    lastError: report.lastError,
+    summary: describeClientReport(report, now),
+    bundle: report.bundle,
+  };
+}
+
+/**
+ * Which clients this machine has heard from, and which of their reports to
+ * show a human.
+ *
+ * Several apps can be signed in to one account at once, and each of them
+ * reports under its own lane so no client overwrites another's words. That
+ * leaves two questions this answers in one place: who is there (which is what
+ * decides who gets a direct offer), and - when there are several - which single
+ * report a status line shows. Picking per lane here means the answer cannot
+ * drift between the state message, the logs and the app.
+ */
+export class ClientReports {
+  private readonly byLane = new Map<string, ClientReportRead>();
+
+  /** Replace the view with what the document currently holds.
+   *
+   * The document is the record of who EXISTS, not of who spoke last: a client
+   * that has stopped writing keeps its last report on disk until it says
+   * otherwise, so it keeps its place here, and its lane keeps its offer. */
+  update(entries: { lane: string; seen: ClientReportRead }[]): void {
+    this.byLane.clear();
+    for (const { lane, seen } of entries) {
+      this.byLane.set(lane, seen);
+    }
+  }
+
+  /** Every lane a client has reported under, in the document's order. */
+  lanes(): string[] {
+    return [...this.byLane.keys()];
+  }
+
+  /** The one report worth showing: a problem outranks a report - a client that
+   * cannot say what is wrong with it is more informative than one that can -
+   * and the newest wins among equals. */
+  view(): ClientReportRead | null {
+    let best: ClientReportRead | null = null;
+    for (const seen of this.byLane.values()) {
+      const problem = "problem" in seen;
+      if (best === null) {
+        best = seen;
+      } else if (!("problem" in best) && problem) {
+        best = seen;
+      } else if (!("problem" in best) && !problem) {
+        best = seen.report.at >= best.report.at ? seen : best;
+      }
+    }
+    return best;
+  }
 }

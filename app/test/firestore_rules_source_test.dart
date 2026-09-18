@@ -10,12 +10,14 @@ const List<String> signalingFields = [
   'p2pAnswer',
   'p2pAnswerTs',
   'p2pAnswerOfferTs',
+  'p2pOffers',
+  'p2pAnswers',
 ];
 
 /// The app's own report, and the machine's one request back. Both are written on
 /// their own rather than as part of a presence update, so each needs its own
 /// exemption — and the app's report must stay bounded: it is client-supplied.
-const List<String> clientFields = ['client', 'clientReload'];
+const List<String> clientFields = ['client', 'clients', 'clientReload'];
 
 /// The field names in the first `hasOnly([...])` list that follows [marker].
 List<String> _keyList(String source, String marker) {
@@ -167,7 +169,9 @@ void main() {
     // own offer write (measured live: HTTP 403 on publish).
     expect(
       normalized,
-      contains("affected.hasAny( ['p2pOffer', 'p2pOfferTs', 'p2pAnswer', 'p2pAnswerTs'])"),
+      contains(
+        "affected.hasAny( ['p2pOffer', 'p2pOfferTs', 'p2pAnswer', 'p2pAnswerTs', 'p2pOffers', 'p2pAnswers'])",
+      ),
     );
     expect(
       normalized,

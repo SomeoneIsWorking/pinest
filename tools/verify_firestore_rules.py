@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import stat
 import sys
+import time
 from typing import Any, Callable
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -111,6 +112,8 @@ def verify_boundary(project_id: str, token: str, uid: str) -> dict[str, int]:
         f"https://firestore.googleapis.com/v1/projects/{project_id}"
         "/databases/(default)/documents"
     )
+    now_ms = int(time.time() * 1000)
+    ts_str = str(now_ms)
     checks = {
         "own_document_get": request_status(f"{base}/users/{uid}", token),
         "foreign_document_get": request_status(f"{base}/users/{NEGATIVE_UID}", token),
@@ -139,7 +142,7 @@ def verify_boundary(project_id: str, token: str, uid: str) -> dict[str, int]:
                         "p2pAnswer": {
                             "stringValue": "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n"
                         },
-                        "p2pAnswerTs": {"integerValue": "1"},
+                        "p2pAnswerTs": {"integerValue": ts_str},
                         "p2pAnswerOfferTs": {"integerValue": "1"},
                     }
                 }
@@ -168,14 +171,15 @@ def verify_boundary(project_id: str, token: str, uid: str) -> dict[str, int]:
             f"{base}/users/{uid}",
             token,
             method="PATCH",
-            update_mask=["p2pAnswer", "p2pAnswerTs"],
+            update_mask=["p2pAnswer", "p2pAnswerTs", "p2pAnswerOfferTs"],
             body=json.dumps(
                 {
                     "fields": {
                         "p2pAnswer": {
                             "stringValue": "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n"
                         },
-                        "p2pAnswerTs": {"integerValue": "1"},
+                        "p2pAnswerTs": {"integerValue": ts_str},
+                        "p2pAnswerOfferTs": {"nullValue": None},
                     }
                 }
             ).encode(),
@@ -194,7 +198,7 @@ def verify_boundary(project_id: str, token: str, uid: str) -> dict[str, int]:
                         "client": {
                             "mapValue": {
                                 "fields": {
-                                    "at": {"integerValue": "1"},
+                                    "at": {"integerValue": ts_str},
                                     "platform": {"stringValue": "Zen"},
                                     "connected": {"booleanValue": False},
                                     "lastError": {"nullValue": None},
@@ -222,7 +226,60 @@ def verify_boundary(project_id: str, token: str, uid: str) -> dict[str, int]:
             token,
             method="PATCH",
             update_mask=["clientReload"],
-            body=json.dumps({"fields": {"clientReload": {"integerValue": "1"}}}).encode(),
+            body=json.dumps({"fields": {"clientReload": {"integerValue": ts_str}}}).encode(),
+        ),
+        "valid_lane_signaling_write": request_status(
+            f"{base}/users/{uid}",
+            token,
+            method="PATCH",
+            update_mask=["p2pAnswers"],
+            body=json.dumps(
+                {
+                    "fields": {
+                        "p2pAnswers": {
+                            "mapValue": {
+                                "fields": {
+                                    "test-lane": {
+                                        "mapValue": {
+                                            "fields": {
+                                                "sdp": {"stringValue": "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n"},
+                                                "offerTs": {"integerValue": ts_str},
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            ).encode(),
+        ),
+        "valid_lane_client_report_write": request_status(
+            f"{base}/users/{uid}",
+            token,
+            method="PATCH",
+            update_mask=["clients"],
+            body=json.dumps(
+                {
+                    "fields": {
+                        "clients": {
+                            "mapValue": {
+                                "fields": {
+                                    "test-lane": {
+                                        "mapValue": {
+                                            "fields": {
+                                                "at": {"integerValue": ts_str},
+                                                "platform": {"stringValue": "Zen"},
+                                                "connected": {"booleanValue": False},
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            ).encode(),
         ),
     }
     expected = {
@@ -236,6 +293,8 @@ def verify_boundary(project_id: str, token: str, uid: str) -> dict[str, int]:
         "valid_client_report_write": 200,
         "invalid_client_report_write": 403,
         "valid_client_reload_write": 200,
+        "valid_lane_signaling_write": 200,
+        "valid_lane_client_report_write": 200,
     }
     for name, actual in checks.items():
         if actual != expected[name]:

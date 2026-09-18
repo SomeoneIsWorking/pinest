@@ -1,5 +1,4 @@
-/// Which offer in the discovery document the app should answer, and when.
-///
+/// Which offer in the discovery document the app should answer, and when.///
 /// A direct connection is negotiated through data the app does not control: the
 /// machine writes an offer into the shared document. Three mistakes are
 /// possible and all three are silent - answering an offer too old to still be
@@ -10,6 +9,8 @@
 /// This decides from the document's fields alone, so it is testable without a
 /// browser, a socket, or a peer.
 library;
+
+import 'client_lane.dart';
 
 /// How far ahead of this device's clock an offer may be dated before it is
 /// refused. Two clocks disagree by seconds; a larger gap means the timestamp is
@@ -32,18 +33,35 @@ bool looksLikeSdp(Object? value) {
 ///
 /// [answeredTs] is the offer timestamp already answered in this app session, so
 /// a document update that repeats the same offer does not start a second
-/// exchange.
-({String sdp, int ts})? offerToAnswer(
+/// exchange. [laneId] is this client's own lane: its offer is preferred, and the
+/// flat single-client fields are the fallback for a machine that publishes no
+/// lane for it (an older machine, or one that has not yet seen this client's
+/// report).
+AnswerableOffer? offerToAnswer(
   Map<String, dynamic>? document, {
   required int now,
   int? answeredTs,
+  String? laneId,
 }) {
+  final lane = laneOffer(document, laneId);
+  if (lane != null) {
+    return _acceptable(lane.sdp, lane.ts, now, answeredTs, lane.laneId);
+  }
   if (document == null) {
     return null;
   }
   final sdp = document['p2pOffer'];
   final ts = (document['p2pOfferTs'] as num?)?.toInt();
   if (ts == null || !looksLikeSdp(sdp)) {
+    return null;
+  }
+  return _acceptable(sdp, ts, now, answeredTs, null);
+}
+
+/// Whether a candidate offer should be answered, shared by the lane path and
+/// the flat one so the two cannot drift on the rules that matter.
+AnswerableOffer? _acceptable(String sdp, int ts, int now, int? answeredTs, String? laneId) {
+  if (!looksLikeSdp(sdp)) {
     return null;
   }
   if (answeredTs != null && ts <= answeredTs) {
@@ -60,7 +78,7 @@ bool looksLikeSdp(Object? value) {
   if (now - ts < -kOfferClockSkew.inMilliseconds) {
     return null;
   }
-  return (sdp: sdp as String, ts: ts);
+  return (sdp: sdp, ts: ts, laneId: laneId);
 }
 
 /// The fields this app writes back: the description, when it was written, and

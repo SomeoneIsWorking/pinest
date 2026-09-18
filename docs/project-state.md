@@ -248,6 +248,20 @@ otherwise let a 26-frame push sit in front of the user's next command.
 
 An answer identifies the exchange it belongs to instead of being ordered against
 it. The machine's offer timestamp is the only value both sides agree on; the
+
+Multiple concurrent clients each get an independent signaling and transport lane
+(2026-09-18, I-068). An SDP description carries one peer connection's ICE
+credentials, so one offer can only be answered by one peer: previously, the
+first client's answer marked the single exchange delivered and refused any
+second client, or a second client answering caused the two to flap and drop each
+other's connection (measured live: alternating between 6 in / 52 out and 9 in /
+55 out as each client displaced the other). Signaling now maps offers
+(`p2pOffers.<id>`) and answers (`p2pAnswers.<id>`) per client ID, with
+`MAX_LANES = 4` concurrent peer connections and eviction dropping only
+unconnected lanes. Legacy single-client builds continue using flat fields
+(`LEGACY_LANE`). Each client persists a 32-character hex identity in storage
+(`client_identity.dart`), reports under `clients.<id>`, and answers its own
+matching lane in `p2pOffers`.
 app's write time is a different device's clock, and comparing the two refuses a
 perfectly good answer whenever the devices disagree by more than the age of the
 offer - silently, because a refused answer is just a punch that never lands. The

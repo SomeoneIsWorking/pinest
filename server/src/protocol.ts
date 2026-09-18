@@ -236,6 +236,18 @@ export interface DirectTransportWireStatus {
   framesToClient: number;
   /** The loopback socket the bridge carries traffic over, by state name. */
   bridgeSocket: string | null;
+  /** Every lane this machine holds, one per client. The aggregate above answers
+   * "is anything connected"; this answers "which of them", which is the
+   * question a second app on the same account raises. */
+  lanes: {
+    lane: string;
+    channelOpen: boolean;
+    offerAgeMs: number | null;
+    exchanges: number;
+    channelCloses: number;
+    framesToServer: number;
+    framesToClient: number;
+  }[];
 }
 
 /** An image attached by the client to a user_message (paste/upload). */

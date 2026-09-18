@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 import unittest
 
-from reload_client import describe_report, reload_client_command
+from reload_client import describe_report, describe_transport, reload_client_command
 
 
 class ReloadClientCommandTest(unittest.TestCase):
@@ -80,6 +80,48 @@ class DescribeReportTest(unittest.TestCase):
         future = int(time.time() * 1000) + 600_000
         line = describe_report({"read": True, "at": future, "platform": "Zen", "connected": False})
         self.assertIn("0s ago", line)
+
+
+class DescribeTransportTest(unittest.TestCase):
+    def test_missing_or_empty_p2p_explains_absence(self) -> None:
+        self.assertIn("not publishing a transport state", describe_transport({}))
+        self.assertIn("no direct offer at all", describe_transport({"p2p": {}}))
+
+    def test_connected_p2p_reports_traffic_and_bridge_socket(self) -> None:
+        p2p = {
+            "offerTs": 1000,
+            "channelOpen": True,
+            "framesToServer": 5,
+            "framesToClient": 20,
+            "rawIn": 5,
+            "exchanges": 2,
+            "channelCloses": 1,
+            "bridges": 2,
+            "bridgeSocket": "open",
+        }
+        line = describe_transport({"p2p": p2p})
+        self.assertIn("connected now", line)
+        self.assertIn("5 in / 20 out (5 reached the bridge)", line)
+        self.assertIn("the socket to itself is open", line)
+
+    def test_disconnected_p2p_names_earlier_failure_honestly(self) -> None:
+        p2p = {
+            "offerTs": 1000,
+            "offerAgeMs": 3000,
+            "channelOpen": False,
+            "framesToServer": 0,
+            "framesToClient": 0,
+            "rawIn": 0,
+            "exchanges": 1,
+            "channelCloses": 0,
+            "bridges": 0,
+            "lastError": "authentication expired",
+        }
+        line = describe_transport({"p2p": p2p})
+        self.assertIn("nothing connected now", line)
+        self.assertIn("newest offer 3s old", line)
+        self.assertIn("an earlier failure: authentication expired", line)
+
 
 
 if __name__ == "__main__":

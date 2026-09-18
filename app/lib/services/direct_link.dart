@@ -24,26 +24,30 @@ class DirectLink {
   DirectLink({
     required ConnectDirect connect,
     required List<String> iceServers,
-    required Future<void> Function(String sdp, int writtenAt, int offerTs) publishAnswer,
+    required Future<void> Function(String sdp, int writtenAt, int offerTs, String? laneId) publishAnswer,
     required Future<void> Function(ControlChannel channel) open,
     required void Function() onChanged,
     bool Function()? available,
     int Function()? now,
+    String? Function()? clientId,
   })  : _connect = connect,
         _iceServers = iceServers,
         _publishAnswer = publishAnswer,
         _open = open,
         _onChanged = onChanged,
         _available = available ?? (() => true),
-        _now = now ?? (() => DateTime.now().millisecondsSinceEpoch);
+        _now = now ?? (() => DateTime.now().millisecondsSinceEpoch),
+        _clientId = clientId ?? (() => null);
 
   final ConnectDirect _connect;
   final List<String> _iceServers;
-  final Future<void> Function(String sdp, int writtenAt, int offerTs) _publishAnswer;
+  final Future<void> Function(String sdp, int writtenAt, int offerTs, String? laneId) _publishAnswer;
   final Future<void> Function(ControlChannel channel) _open;
   final void Function() _onChanged;
   final bool Function() _available;
   final int Function() _now;
+  /// This client's lane, or null when it has not learned one yet.
+  final String? Function() _clientId;
 
   bool _active = false;
   bool _attemptInFlight = false;
@@ -120,10 +124,16 @@ class DirectLink {
     if (_attemptInFlight) {
       return false;
     }
+    // The lane this client owns, so an offer addressed to it is preferred and
+    // the answer goes back under the same key. Null means the machine has not
+    // published one (an older machine, or it has not read this client's report
+    // yet) and the flat single-client fields are used instead.
+    final laneId = _clientId();
     final offer = offerToAnswer(
       discovery,
       now: _now(),
       answeredTs: _answeredOfferTs,
+      laneId: laneId,
     );
     if (offer == null) {
       return false;
@@ -136,7 +146,7 @@ class DirectLink {
       final channel = await _connect(
         offerSdp: offer.sdp,
         iceServers: _iceServers,
-        publishAnswer: (sdp) => _publishAnswer(sdp, _now(), offer.ts),
+        publishAnswer: (sdp) => _publishAnswer(sdp, _now(), offer.ts, offer.laneId),
       );
       // Marked before the handshake so a command sent during it takes the
       // direct path rather than going to a tunnel origin that may not exist.

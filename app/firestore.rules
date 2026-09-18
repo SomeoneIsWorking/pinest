@@ -53,7 +53,11 @@ service cloud.firestore {
               && data.keys().hasAny(['p2pAnswerOfferTs'])
               && data.p2pAnswerOfferTs is int))
         && (!data.keys().hasAny(['p2pAnswerTs']) || data.p2pAnswerTs is int)
-        && (!data.keys().hasAny(['p2pAnswerOfferTs']) || data.p2pAnswerOfferTs is int);
+        && (!data.keys().hasAny(['p2pAnswerOfferTs']) || data.p2pAnswerOfferTs is int)
+        && (!data.keys().hasAny(['p2pOffers'])
+          || (data.p2pOffers is map && data.p2pOffers.size() <= 8))
+        && (!data.keys().hasAny(['p2pAnswers'])
+          || (data.p2pAnswers is map && data.p2pAnswers.size() <= 8));
     }
 
     // The app's own report about itself: bounded, shape-checked, and carrying
@@ -73,6 +77,8 @@ service cloud.firestore {
               // cannot read, so the rules bound the size rather than freeze the
               // shape of a diagnostic that is expected to grow.
               && data.client.size() <= 20))
+        && (!data.keys().hasAny(['clients'])
+          || (data.clients is map && data.clients.size() <= 8))
         && (!data.keys().hasAny(['clientReload']) || data.clientReload is int);
     }
 
@@ -83,7 +89,8 @@ service cloud.firestore {
         && data.keys().hasOnly(
           ['url', 'online', 'ownerEmail', 'hostname', 'ts',
            'p2pOffer', 'p2pOfferTs', 'p2pAnswer', 'p2pAnswerTs',
-           'p2pAnswerOfferTs', 'client', 'clientReload'])
+           'p2pAnswerOfferTs', 'p2pOffers', 'p2pAnswers',
+           'client', 'clients', 'clientReload'])
         && hasValidHttpsUrl(data.url)
         && data.online is bool
         && (!data.keys().hasAny(['ownerEmail'])
@@ -110,9 +117,10 @@ service cloud.firestore {
       let affected = request.resource.data.diff(resource.data).affectedKeys();
       return affected.hasOnly(
           ['p2pOffer', 'p2pOfferTs', 'p2pAnswer', 'p2pAnswerTs',
-           'p2pAnswerOfferTs'])
+           'p2pAnswerOfferTs', 'p2pOffers', 'p2pAnswers'])
         && (affected.hasAny(
-          ['p2pOffer', 'p2pOfferTs', 'p2pAnswer', 'p2pAnswerTs']));
+          ['p2pOffer', 'p2pOfferTs', 'p2pAnswer', 'p2pAnswerTs',
+           'p2pOffers', 'p2pAnswers']));
     }
 
     // The app's report and the machine's reload request are written on their
@@ -121,8 +129,8 @@ service cloud.firestore {
     // each field has one writer.
     function touchesOnlyClientReport() {
       let affected = request.resource.data.diff(resource.data).affectedKeys();
-      return affected.hasOnly(['client', 'clientReload'])
-        && affected.hasAny(['client', 'clientReload']);
+      return affected.hasOnly(['client', 'clients', 'clientReload'])
+        && affected.hasAny(['client', 'clients', 'clientReload']);
     }
 
     // ── Discovery + signaling doc ─────────────────────────────────────────

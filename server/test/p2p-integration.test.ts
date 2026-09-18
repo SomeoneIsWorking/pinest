@@ -141,12 +141,20 @@ async function joined(
     bothOpen = resolve;
   });
   let answerer: RTCPeerConnection | null = null;
-  let feedAnswer: ((sdp: string) => void) | null = null;
+  // The lane and the offer the answer must name: the driver refuses an answer
+  // that describes an offer its lane has already replaced, so the harness has
+  // to carry both - it is the stand-in for the app, and naming the offer IS the
+  // protocol.
+  let publishedLane = "";
+  let publishedTs = 0;
+  let feedAnswer: ((lane: string, sdp: string, offerTs: number) => void) | null = null;
 
   const transport = await offerDirectTransport({
     port: server.port,
     stunServers: [],
-    publishOffer: async (sdp) => {
+    publishOffer: async (lane, sdp, ts) => {
+      publishedLane = lane;
+      publishedTs = ts;
       answerer = new RTCPeerConnection();
       answerer.ondatachannel = (event) => {
         const channel = event.channel;
@@ -167,7 +175,7 @@ async function joined(
       await answerer.setRemoteDescription(new RTCSessionDescription(sdp, "offer"));
       await answerer.setLocalDescription(await answerer.createAnswer());
       await gather(answerer);
-      feedAnswer?.(answerer.localDescription!.sdp);
+      feedAnswer?.(publishedLane, answerer.localDescription!.sdp, publishedTs);
     },
     onAnswer: (handler) => {
       feedAnswer = handler;
