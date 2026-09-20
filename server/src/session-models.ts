@@ -45,25 +45,51 @@ export class SessionModelService {
   /** Resolve a provider/id, a bare id, or a display name to a real model. */
   async find(spec: string, sessions: Iterable<ModelSessionView>): Promise<any | null> {
     for (const s of sessions) {
+      const currentModel = (s.session as any)?.model;
+      if (currentModel && this.matchesModel(currentModel, spec)) {
+        return currentModel;
+      }
       const sessionRuntime = (s.session as any)?.modelRuntime ?? (s.session as any)?._modelRuntime;
       if (!sessionRuntime) continue;
       let snap = sessionRuntime.getAvailableSnapshot();
-      const match = this.matchIn(snap, spec);
+      let match = this.matchIn(snap, spec);
       if (!match) {
+        await sessionRuntime.refresh?.({ allowNetwork: false }).catch(() => undefined);
         await sessionRuntime.getAvailable?.().catch(() => undefined);
         snap = sessionRuntime.getAvailableSnapshot();
+        match = this.matchIn(snap, spec);
       }
-      const settled = match ?? this.matchIn(snap, spec);
-      if (settled) return settled;
+      if (match) return match;
     }
     const reg = await this.modelRegistry();
-    await ((reg as any).runtime?.getAvailable?.() ?? reg.refresh?.())?.catch(() => undefined);
+    const runtime = (reg as any)?.runtime;
+    if (runtime) {
+      await runtime.refresh?.({ allowNetwork: false }).catch(() => undefined);
+      await runtime.getAvailable?.().catch(() => undefined);
+    } else {
+      await reg.refresh?.().catch(() => undefined);
+    }
     const slash = spec.indexOf("/");
     if (slash !== -1) {
       const exact = reg.find(spec.slice(0, slash), spec.slice(slash + 1));
       if (exact) return exact;
     }
     return this.matchIn(reg.getAvailable(), spec);
+  }
+
+  private matchesModel(m: any, spec: string): boolean {
+    if (!m) return false;
+    const slash = spec.indexOf("/");
+    const provider = slash !== -1 ? spec.slice(0, slash) : null;
+    const id = slash !== -1 ? spec.slice(slash + 1) : null;
+    if (provider && id) {
+      return m.provider === provider && m.id === id;
+    }
+    return (
+      m.id === spec ||
+      m.name?.toLowerCase() === spec.toLowerCase() ||
+      `${m.provider}/${m.id}` === spec
+    );
   }
 
   private matchIn(available: unknown, spec: string): any | null {
@@ -86,20 +112,44 @@ export class SessionModelService {
 
   /** Every model this session can switch to. */
   async list(s: ModelSessionView): Promise<ModelInfo[]> {
+    let result: ModelInfo[] = [];
     const sessionRuntime = (s.session as any)?.modelRuntime ?? (s.session as any)?._modelRuntime;
     if (sessionRuntime) {
+      await sessionRuntime.refresh?.({ allowNetwork: false }).catch(() => undefined);
       const avail = await sessionRuntime.getAvailable?.().catch(() => undefined);
-      if (Array.isArray(avail) && avail.length > 0) return avail.map(mapModel);
-      const snap = sessionRuntime.getAvailableSnapshot();
-      if (Array.isArray(snap) && snap.length > 0) return snap.map(mapModel);
+      if (Array.isArray(avail) && avail.length > 0) {
+        result = avail.map(mapModel);
+      } else {
+        const snap = sessionRuntime.getAvailableSnapshot();
+        if (Array.isArray(snap) && snap.length > 0) result = snap.map(mapModel);
+      }
     }
-    const reg = await this.modelRegistry();
-    const runtime = (reg as any)?.runtime;
-    if (runtime) {
-      const avail = await runtime.getAvailable?.().catch(() => undefined);
-      if (Array.isArray(avail) && avail.length > 0) return avail.map(mapModel);
+    if (result.length === 0) {
+      const reg = await this.modelRegistry();
+      const runtime = (reg as any)?.runtime;
+      if (runtime) {
+        await runtime.refresh?.({ allowNetwork: false }).catch(() => undefined);
+        const avail = await runtime.getAvailable?.().catch(() => undefined);
+        if (Array.isArray(avail) && avail.length > 0) {
+          result = avail.map(mapModel);
+        } else {
+          result = reg.getAvailable().map(mapModel);
+        }
+      } else {
+        await reg.refresh?.().catch(() => undefined);
+        result = reg.getAvailable().map(mapModel);
+      }
     }
-    return reg.getAvailable().map(mapModel);
+    const current = (s.session as any)?.model;
+    if (current?.id && current?.provider) {
+      const hasCurrent = result.some(
+        (m) => m.id === current.id && m.provider === current.provider,
+      );
+      if (!hasCurrent) {
+        result.unshift(mapModel(current));
+      }
+    }
+    return result;
   }
 
   /** Switch a session's model and prove the switch actually took. */
