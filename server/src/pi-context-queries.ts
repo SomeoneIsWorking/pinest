@@ -16,13 +16,13 @@ import { embedImages, extractSessionMessages, historyWithEmbeds, mapModel } from
 export async function listModels(ctx: unknown): Promise<ModelInfo[]> {
   const holder = ctx as {
     modelRegistry?: unknown;
-    session?: { modelRuntime?: unknown };
+    session?: { modelRuntime?: unknown; model?: unknown };
     _modelRuntime?: unknown;
   } | null;
   const reg = holder?.modelRegistry as
     | {
         runtime?: unknown;
-        refresh?: () => Promise<unknown>;
+        refresh?: (opts?: unknown) => Promise<unknown>;
         getAvailable?: () => unknown;
       }
     | undefined;
@@ -32,24 +32,36 @@ export async function listModels(ctx: unknown): Promise<ModelInfo[]> {
     | {
         getAvailable?: () => Promise<unknown>;
         getAvailableSnapshot?: () => unknown;
+        refresh?: (opts?: unknown) => Promise<unknown>;
       }
     | undefined;
+  let result: ModelInfo[] = [];
   try {
     if (runtime) {
+      await runtime.refresh?.({ allowNetwork: false }).catch(() => undefined);
       const available = await runtime.getAvailable?.().catch(() => undefined);
       if (Array.isArray(available) && available.length > 0) {
-        return (available as Parameters<typeof mapModel>[0][]).map(mapModel);
+        result = (available as Parameters<typeof mapModel>[0][]).map(mapModel);
+      } else {
+        result = ((runtime.getAvailableSnapshot?.() ?? []) as Parameters<typeof mapModel>[0][]).map(mapModel);
       }
-      return ((runtime.getAvailableSnapshot?.() ?? []) as Parameters<typeof mapModel>[0][]).map(mapModel);
-    }
-    if (reg) {
-      await reg.refresh?.().catch(() => undefined);
-      return ((reg.getAvailable?.() ?? []) as Parameters<typeof mapModel>[0][]).map(mapModel);
+    } else if (reg) {
+      await reg.refresh?.({ allowNetwork: false }).catch(() => undefined);
+      result = ((reg.getAvailable?.() ?? []) as Parameters<typeof mapModel>[0][]).map(mapModel);
     }
   } catch {
-    return [];
+    result = [];
   }
-  return [];
+  const current = holder?.session?.model as { id?: string; provider?: string } | undefined;
+  if (current?.id && current?.provider) {
+    const hasCurrent = result.some(
+      (m) => m.id === current.id && m.provider === current.provider,
+    );
+    if (!hasCurrent) {
+      result.unshift(mapModel(current as Parameters<typeof mapModel>[0]));
+    }
+  }
+  return result;
 }
 
 /** A session's transcript, with images referenced (never inlined). */
