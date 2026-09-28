@@ -1,4 +1,3 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pinest_app/logic/session_grouping.dart';
 import 'package:pinest_app/models/session.dart';
