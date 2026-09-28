@@ -12,7 +12,7 @@ const TMP = makeTempDir("rc-runtime-test-");
 const SOURCES = join(TMP, "src");
 process.env.RC_RUNTIME_PATH = join(TMP, "runtime.json");
 
-const { recordFactoryEntry, recordLoadOutcome, readRuntimeRecord, sourceFingerprint } =
+const { recordFactoryEntry, recordLoadOutcome, recordTunnelUrl, readRuntimeRecord, sourceFingerprint } =
   await import("../src/runtime-record.ts");
 
 before(() => {
@@ -99,4 +99,49 @@ test("a later failed side-channel does not retract a working host's verdict", ()
   const before = readRuntimeRecord();
   assert.equal(before?.load, "ok");
   assert.equal(before?.at, readRuntimeRecord()?.at, "and nothing moved it");
+});
+
+// ── Where this host can be reached, recorded when it is true (I-070) ────────
+//
+// The load verdict is written at boot, before any tunnel exists, so the URL it
+// recorded was `null` and stayed `null` for the whole life of the tunnel. I
+// spent real time diagnosing a tunnel that was working, because a record that
+// reads `null` is indistinguishable from a host that cannot be reached.
+
+test("the tunnel URL is recorded when it lands, not only at boot", () => {
+  recordLoadOutcome("ok", { wsPort: 4242, owner: "person@example.com" });
+  recordTunnelUrl("https://machine.trycloudflare.com");
+  assert.equal(readRuntimeRecord()?.tunnelUrl, "https://machine.trycloudflare.com");
+});
+
+test("a moved tunnel replaces the old URL rather than adding to it", () => {
+  recordLoadOutcome("ok", { wsPort: 4242 });
+  recordTunnelUrl("https://first.trycloudflare.com");
+  recordTunnelUrl("https://second.trycloudflare.com");
+  assert.equal(
+    readRuntimeRecord()?.tunnelUrl,
+    "https://second.trycloudflare.com",
+    "a stale URL left behind is a dial that cannot work",
+  );
+});
+
+test("a dead tunnel clears the URL instead of leaving a dead one published", () => {
+  recordLoadOutcome("ok", { wsPort: 4242 });
+  recordTunnelUrl("https://machine.trycloudflare.com");
+  recordTunnelUrl(null);
+  assert.equal(readRuntimeRecord()?.tunnelUrl, null);
+});
+
+test("a record from a dead process is not overwritten", () => {
+  // Only the running host may restate where it is; a stale file from a process
+  // that is gone would otherwise be "corrected" by nothing at all.
+  recordLoadOutcome("ok", { wsPort: 4242 });
+  const mine = readRuntimeRecord()!;
+  // Written the way a process that has since exited leaves it behind.
+  writeFileSync(
+    process.env.RC_RUNTIME_PATH!,
+    JSON.stringify({ ...mine, pid: mine.pid + 1, tunnelUrl: "https://other.example" }, null, 2),
+  );
+  recordTunnelUrl("https://mine.trycloudflare.com");
+  assert.equal(readRuntimeRecord()?.tunnelUrl, "https://other.example");
 });

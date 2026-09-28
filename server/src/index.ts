@@ -86,8 +86,7 @@ import { applyCompactThresholdCommand, reconcileStoredThreshold } from "./compac
 import { mergeRegistryRows } from "./state-message.ts";
 import { publishPresence } from "./presence.ts";
 import { StatePublisher } from "./state-publisher.ts";
-import { recordFactoryEntry, recordLoadOutcome } from "./runtime-record.ts";
-
+import { recordFactoryEntry, recordLoadOutcome, recordTunnelUrl } from "./runtime-record.ts";
 const REGISTRY_PATH = process.env.RC_REGISTRY_PATH
   || join(homedir(), ".pi", "agent", "remote-code", "sessions.json");
 
@@ -396,8 +395,7 @@ function adoptReloadedSessions(): number {
   return adopted;
 }
 
-/** Stop everything this instance owns. Used on host shutdown AND on reload
- * (the re-imported instance bootstraps fresh; sessions become resumable). */
+/** Stop everything this instance owns: used on shutdown AND on reload. */
 async function teardownRemote(reason: "reload" | "shutdown" = "shutdown"): Promise<void> {
   _isTornDown = true;
   _bootstrapPromise = null;
@@ -531,6 +529,7 @@ async function bootstrap(): Promise<void> {
   // A moved tunnel URL is only useful once the app can see it: republish the
   // discovery document the app watches, and refresh the local state snapshot.
   _ws.tunnelUrlChanged = () => {
+    recordTunnelUrl(_ws?.tunnelUrl ?? null);
     void publishCurrentPresence(true);
     broadcastState();
   };
@@ -601,6 +600,7 @@ async function bootstrap(): Promise<void> {
       // hung one (see I-021's recovery note).
       renderFooter();
       uiNotify(`[pinest] tunnel up: ${ws.tunnelUrl ?? "no URL — remote access is local-only"}`);
+      recordTunnelUrl(ws.tunnelUrl ?? null);
       return publishCurrentPresence(true);
     })
     .catch((e) => {
@@ -825,10 +825,10 @@ async function dispatchCommand(command: ClientCommand): Promise<void> {
         if (!r.ok) broadcast({ type: "error", message: `[remote-code] ${r.message}` });
       },
       reloadClient: async () => {
-        // One explicit write into the app's own document; the app obeys a
-        // request only when it is newer than the page it is running.
-        // A paired machine has no document to write into, so there is nothing
-        // to reload a browser through: say so rather than reporting a failure.
+        // One write into the app's own document; the app obeys a request only
+        // when it is newer than the page it is running. With no document there
+        // is nothing to reload a browser through, and saying so beats reporting
+        // a failure for a feature this host does not have.
         if (!_fb || !_ownerUid) {
           broadcast(_fb
             ? { type: "error", message: "[pinest] no owner to reload" }

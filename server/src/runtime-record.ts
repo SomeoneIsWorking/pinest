@@ -193,3 +193,21 @@ export function recordLoadOutcome(
   }
   write(updated);
 }
+
+/**
+ * Record where this host can be reached, as soon as it knows.
+ *
+ * Separate from {@link recordLoadOutcome} because it happens at a different
+ * time and for a different reason. The load verdict is written at boot, before
+ * any tunnel exists, so the URL it recorded was `null` and stayed `null` for
+ * the entire life of the tunnel — a stale snapshot indistinguishable from a
+ * host that cannot be reached at all. Measured: a host serving perfectly, with
+ * its record claiming no endpoint, which sent me looking for a tunnel failure
+ * that never happened.
+ */
+export function recordTunnelUrl(tunnelUrl: string | null): void {
+  const record = readRuntimeRecord();
+  if (!record || record.pid !== process.pid) return; // a record from a dead host
+  if (record.tunnelUrl === tunnelUrl) return; // unchanged is not news
+  write({ ...record, tunnelUrl });
+}
