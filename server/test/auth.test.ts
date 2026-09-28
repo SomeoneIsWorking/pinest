@@ -784,3 +784,185 @@ test("an explicitly configured missing service account fails closed", async () =
     delete process.env.RC_SERVICE_ACCOUNT_PATH;
   }
 });
+
+// ── A retracted lane must actually leave the document (I-069) ────────────────
+//
+// The discovery document holds maps the machine rebuilds from its live state so
+// that anything it no longer has DISAPPEARS. Whether it disappears is decided
+// entirely by the merge option, and the two wrong answers look identical from
+// the call site: the write resolves, the document updates, and the stale key
+// survives. The hosted REST path replaces `p2pOffers` outright; the Admin path
+// used `merge: true`, which is a DEEP merge, so a retracted lane could never be
+// removed. Measured live: that map filled to the rules' bound and every client
+// write then failed with PERMISSION_DENIED while the machine went on publishing.
+//
+// So this is a behavioural test, not a shape check: the fake below implements
+// the two merge modes the way Firestore documents them - `true` recursing into
+// maps, a list of field paths overwriting the value at each path - and the
+// assertion is that a lane which is no longer live is gone from the document.
+// A fake that simply recorded the arguments would agree with whatever the code
+// did, which is the mistake this test exists to prevent.
+
+/** The merge behaviour the Admin SDK documents, reduced to what this needs.
+ *
+ * This follows the SDK's OWN branch (write-batch.js, pinned @google-cloud/
+ * firestore 8.7.1):
+ *
+ *     const mergeLeaves = options && 'merge' in options && options.merge;
+ *     const mergePaths  = options && 'mergeFields' in options;
+ *     ...
+ *     if (mergePaths) documentMask = DocumentMask.fromFieldMask(options.mergeFields)
+ *     else if (mergeLeaves) documentMask = DocumentMask.fromObject(firestoreData)
+ *
+ * Two consequences this fake must reproduce, because both are ways to write a
+ * fix that looks right and changes nothing:
+ *   - a LEAF mask (`merge: true`, or ANY truthy `merge`) is a deep merge, so a
+ *     key the caller omitted survives;
+ *   - a truthy non-boolean in `merge` is still just truthy, so passing an ARRAY
+ *     of field paths to `merge` silently gets the deep merge. Only
+ *     `mergeFields` names paths.
+ */
+function fakeFirestore(seed: Record<string, unknown>) {
+  const docs = new Map<string, Record<string, unknown>>([["uid", structuredClone(seed)]]);
+  const calls: { fields: Record<string, unknown>; options: Record<string, unknown> | undefined }[] = [];
+
+  const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+    typeof v === "object" && v !== null && !Array.isArray(v);
+
+  const deepMerge = (into: Record<string, unknown>, from: Record<string, unknown>) => {
+    for (const [key, value] of Object.entries(from)) {
+      into[key] = isPlainObject(value) && isPlainObject(into[key])
+        ? deepMerge({ ...into[key] as Record<string, unknown> }, value)
+        : value;
+    }
+    return into;
+  };
+
+  return {
+    calls,
+    collection(name: string) {
+      assert.equal(name, "users", "the discovery document is the only collection written");
+      return {
+        doc: (uid: string) => ({
+          async set(fields: Record<string, unknown>, options?: Record<string, unknown>) {
+            calls.push({ fields, options });
+            const doc = docs.get(uid)!;
+            // Exactly the SDK's own test, truthiness and all.
+            const mergeLeaves = Boolean(options && "merge" in options && options.merge);
+            const mergePaths = Boolean(options && "mergeFields" in options);
+            const incoming = structuredClone(fields);
+            if (mergePaths) {
+              for (const path of options!.mergeFields as string[]) {
+                doc[path] = incoming[path];
+              }
+            } else if (mergeLeaves) {
+              deepMerge(doc, incoming);
+            } else {
+              Object.assign(doc, incoming);
+            }
+          },
+        }),
+      };
+    },
+    offers(): Record<string, unknown> {
+      return (docs.get("uid")!.p2pOffers ?? {}) as Record<string, unknown>;
+    },
+    read(uid = "uid"): Record<string, unknown> {
+      return docs.get(uid)!;
+    },
+  };
+}
+
+const adminAuthStub = {
+  async getUser() { return adminUser("u-admin"); },
+  async getUserByEmail() { return adminUser("u-admin", { email: "u@example.com" }); },
+  async verifyIdToken() { return adminToken("u-admin"); },
+};
+
+test("a lane the machine no longer offers leaves the document, not just its own key", async () => {
+  const db = fakeFirestore({
+    // Two lanes, as the machine found them.
+    p2pOffers: { "client-a": { sdp: "v=0 a", ts: 1 }, "client-b": { sdp: "v=0 b", ts: 2 } },
+    // A map the CLIENT owns. The machine must not touch it: the mask is named
+    // per field precisely so one writer's update is not judged by another's.
+    clients: { "client-a": { at: 1 } },
+  });
+  const fb = new AdminFirebase(adminAuthStub as never, db as never, "project-a");
+
+  // The machine now believes in one lane only. `p2pOffers` is rebuilt from
+  // those lanes, so client-b must not survive the write.
+  await fb.patchUserDoc("uid", { p2pOffers: { "client-a": { sdp: "v=0 a2", ts: 3 } } });
+
+  assert.deepEqual(
+    Object.keys(db.offers()).sort(),
+    ["client-a"],
+    "a retracted lane must disappear from the map, or it is held for ever",
+  );
+  assert.deepEqual(db.offers()["client-a"], { sdp: "v=0 a2", ts: 3 }, "and the live lane is updated");
+
+  assert.deepEqual(
+    db.read().clients,
+    { "client-a": { at: 1 } },
+    "the client-written map is left exactly as it was",
+  );
+});
+
+test("the merge names the fields it writes, so both backends replace alike", async () => {
+  const db = fakeFirestore({ p2pOffers: { stale: { sdp: "v=0", ts: 1 } } });
+  const fb = new AdminFirebase(adminAuthStub as never, db as never, "project-a");
+
+  await fb.patchUserDoc("uid", { p2pOffers: {}, online: true, url: null });
+
+  const call = db.calls.at(-1)!;
+  const options = call.options ?? {};
+  assert.ok(
+    !("merge" in options),
+    "`merge` is a boolean switch in the SDK: anything truthy there is a LEAF mask, "
+    + "so an array of field paths passed to it is a deep merge wearing a disguise",
+  );
+  assert.ok(
+    "mergeFields" in options,
+    "the fields written must be named in `mergeFields`, which is the option that replaces a path",
+  );
+  assert.deepEqual(
+    [...(options.mergeFields as string[])].sort(),
+    ["online", "p2pOffers", "url"],
+    "exactly the fields this write carries, so the client-owned maps are untouched",
+  );
+});
+
+test("an array of field paths passed to `merge` is NOT a path mask (the real SDK's trap)", async () => {
+  // This is the fix that looks correct, typechecks, and does nothing: the SDK
+  // tests `'merge' in options && options.merge`, so a non-empty array is truthy
+  // and selects the same leaf-level deep merge as `true`. It is pinned here
+  // because it is the mistake this whole change is most likely to repeat.
+  const db = fakeFirestore({ p2pOffers: { "client-a": {}, "client-b": {} } });
+  const doc = db.collection("users").doc("uid");
+  await doc.set({ p2pOffers: { "client-a": {} } }, { merge: ["p2pOffers"] });
+
+  assert.deepEqual(
+    Object.keys(db.offers()).sort(),
+    ["client-a", "client-b"],
+    "a truthy `merge` merges leaves, so the omitted lane survives - which is the bug",
+  );
+
+  await doc.set({ p2pOffers: { "client-a": {} } }, { mergeFields: ["p2pOffers"] });
+  assert.deepEqual(
+    Object.keys(db.offers()),
+    ["client-a"],
+    "and `mergeFields` is what actually replaces the path",
+  );
+});
+
+test("presence fields still merge rather than replace the document", async () => {
+  const db = fakeFirestore({ url: "wss://old", online: false, ts: 1, p2pOffers: { a: {} } });
+  const fb = new AdminFirebase(adminAuthStub as never, db as never, "project-a");
+
+  await fb.publishPresence("uid", { url: "wss://new", online: true, ts: 2, hostname: "box" });
+
+  const doc = db.read();
+  assert.equal(doc.url, "wss://new");
+  assert.equal(doc.online, true);
+  assert.equal(doc.hostname, "box", "a field added by this write is present");
+  assert.deepEqual(doc.p2pOffers, { a: {} }, "and the signaling map is not disturbed by presence");
+});

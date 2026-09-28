@@ -308,13 +308,35 @@ machine's two views of ITSELF - the lane count it reports against the offer map
 it publishes, which disagreed 3 vs 7: a publish that lands after its own
 retraction (candidates are still gathering when the lane is released), and a
 `close()` that released lanes without withdrawing their offers, leaking up to
-`MAX_LANES` entries on every reload. The rules bound is now 16, deliberately
-above `MAX_LANES` and asserted against it from `app/test/`, so a client write can
-never be refused because the machine filled a map. Verified live after the fix:
-a brand-new client registered, was answered with an offer, and completed the
-direct channel - `npm run verify:direct` authenticating over the direct channel
-and receiving state, with the offer/answer pair counting identically on both
-ends. Two clients punching at the same time, each on its own lane and each
+`MAX_LANES` entries on every reload.
+
+**The root cause underneath all of that was one line of the write, not the write's
+callers.** `AdminFirebase.patchUserDoc` used `set(fields, { merge: true })`, and
+`merge: true` is a RECURSIVE merge: for a map field it keeps every key the
+caller did not mention. `p2pOffers` is rebuilt from the live lanes exactly so a
+retracted lane disappears, and under a deep merge it never could - the lease,
+the eviction and the withdrawal were all correct and all ineffective. The hosted
+REST backend writes the same field with `updateMask.fieldPaths`, which replaces,
+so the two backends silently disagreed and the machine ran on the merging one.
+The fix is `mergeFields: Object.keys(fields)`, and the trap inside it is that
+`merge` is a BOOLEAN switch: an array of field paths passed to it is merely
+truthy and selects the same deep merge, which typechecks and does nothing. The
+regression test implements the pinned SDK's own branch
+(`'merge' in options && options.merge`) rather than the semantics the fix
+assumed, and a test named for that trap pins it. The app had the same class of
+bug: its report omits `direct.failure` once a punch succeeds, and `merge: true`
+meant a recovered client went on reporting the failure - which is the very
+contradiction this investigation opened with (`connected: true, ice: connected`
+beside a stale "channels never opened"). Both client writes now name their own
+lane path in `mergeFields`.
+
+The rules bound is now 16, deliberately above `MAX_LANES`, and the Dart rules
+test reads `MAX_LANES` out of the server source and asserts the relationship, so
+the two bounds cannot drift apart again in either direction. Verified live after
+the fix: a brand-new client registered, was answered with an offer, and completed
+the direct channel - `npm run verify:direct` authenticating over the direct
+channel and receiving state, with the offer/answer pair counting identically on
+both ends. Two clients punching at the same time, each on its own lane and each
 carrying its own traffic, is `server/test/p2p-multi-client.test.ts`; with one
 shared offer - the pre-lane design - the second client never receives an offer
 at all. The app now names its OWN refused write on the empty-state screen

@@ -1,11 +1,53 @@
 import 'dart:math';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:cloud_firestore/cloud_firestore.dart' show FieldPath;
 import 'package:pinest_app/logic/client_lane.dart';
 import 'package:pinest_app/services/client_identity.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  // These writes used `SetOptions(merge: true)`, which DEEP merges: a field the
+  // write omits keeps its old value. The report omits `direct.failure` once a
+  // punch succeeds, so a recovered client went on reporting a failure that had
+  // not happened since - a report that said `connected: true, ice: connected`
+  // and, in the same object, that its channels never opened (I-069). Naming the
+  // path replaces this lane's entry and nothing else, so these are the two paths
+  // that must be right, and the maps stay shared between clients.
+  group('what each write replaces', () {
+    test('a report replaces exactly this client\'s own lane', () {
+      final path = clientLaneWritePath('abc123');
+      expect(path, hasLength(1));
+      expect((path.single as FieldPath).components, [kClientsField, 'abc123']);
+    });
+
+    test('an answer replaces exactly this client\'s own answer', () {
+      final path = clientAnswerWritePath('abc123');
+      expect(path, hasLength(1));
+      expect((path.single as FieldPath).components, [kP2PAnswersField, 'abc123']);
+    });
+
+    test('the named path is a path the payload actually carries', () {
+      // A mask naming a path the data does not contain writes nothing, which
+      // would be a silent no-op rather than a refusal.
+      final report = clientLaneFields('abc123', {'connected': true});
+      final path = (clientLaneWritePath('abc123').single as FieldPath).components;
+      expect(report.keys, contains(path.first));
+      expect(report[path.first], isA<Map<String, Object>>());
+      expect((report[path.first] as Map<String, Object>).keys, contains(path[1]));
+
+      final answer = laneAnswerFields('abc123', 'v=0 answer', 7);
+      final answerPath = (clientAnswerWritePath('abc123').single as FieldPath).components;
+      expect(answer.keys, contains(answerPath.first));
+      expect((answer[answerPath.first] as Map<String, Object>).keys,
+          contains(answerPath[1]));
+    });
+
+    test('two clients write two different paths, so neither disturbs the other', () {
+      expect(clientLaneWritePath('a').single, isNot(clientLaneWritePath('b').single));
+    });
+  });
+
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('client_lane', () {

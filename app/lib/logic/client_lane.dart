@@ -15,6 +15,8 @@
 /// that matters.
 library;
 
+import 'package:cloud_firestore/cloud_firestore.dart' show FieldPath;
+
 /// The document fields this app writes its own key into. Mirrored by
 /// `server/src/p2p-signaling.ts`, which owns the same contract.
 const String kP2POffersField = 'p2pOffers';
@@ -77,6 +79,30 @@ Map<String, Object> laneAnswerFields(String clientId, String sdp, int offerTs) =
     clientId: <String, Object>{'sdp': sdp, 'offerTs': offerTs},
   },
 };
+
+/// The document path holding THIS client's own lane entry.
+///
+/// Both of this app's writes name this path in `SetOptions.mergeFields` rather
+/// than passing `merge: true`, and the reason is that the two are not the same
+/// operation. `merge: true` DEEP merges: a field this write omits keeps whatever
+/// value it had. The report omits `direct.failure` once a punch succeeds, so
+/// under a deep merge a recovered client goes on reporting the failure that has
+/// not happened since - which is exactly how a client report came to say
+/// `connected: true, ice: connected` and, in the same object, that its channels
+/// had never opened (I-069).
+///
+/// Naming the path replaces this lane's entry and nothing else, so the maps stay
+/// shared: every other client's lane is untouched, and this app still never
+/// writes a key it does not own.
+List<Object> clientLaneWritePath(String clientId) => [
+  FieldPath([kClientsField, clientId]),
+];
+
+/// The document path holding this client's answer for its own lane. Same
+/// reason as [clientLaneWritePath].
+List<Object> clientAnswerWritePath(String clientId) => [
+  FieldPath([kP2PAnswersField, clientId]),
+];
 
 /// The offer to answer, and the lane it came from.
 typedef AnswerableOffer = ({String sdp, int ts, String laneId});

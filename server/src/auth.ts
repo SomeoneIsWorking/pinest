@@ -651,7 +651,28 @@ export class AdminFirebase implements FirebaseAuth {
   }
 
   async patchUserDoc(uid: string, fields: Record<string, unknown>): Promise<void> {
-    await this.db.collection("users").doc(uid).set(fields, { merge: true });
+    // `merge: true` is a DEEP merge: for a map-valued field it merges the
+    // incoming keys in and leaves every key the caller did not mention exactly
+    // where it was. That is the wrong semantics for this document, and silently
+    // so - the write succeeds and looks correct. `p2pOffers` is rebuilt from
+    // this machine's live lanes precisely so a retracted lane DISAPPEARS, and
+    // under a deep merge it never can: every lane ever published stays in the
+    // document forever. Measured live on this account, that map filled to the
+    // rules' bound and every client write then failed with `PERMISSION_DENIED`
+    // while the machine went on publishing as if nothing were wrong (I-069).
+    //
+    // `mergeFields` names the top-level paths to REPLACE, which is what the
+    // hosted REST path already does with `updateMask.fieldPaths`, so both
+    // backends finally agree. A plain `set(fields)` would replace the whole
+    // document, including the maps the CLIENTS own, which is why the mask is
+    // named per field rather than replacing the document.
+    //
+    // The option is `mergeFields`, NOT an array passed to `merge`: the SDK
+    // decides with `'merge' in options && options.merge`, so an array there is
+    // merely TRUTHY and selects the same leaf-level deep merge as `true` - a
+    // fix that looks right, typechecks, and changes nothing. See the fake in
+    // server/test/auth.test.ts, which implements the SDK's own branch.
+    await this.db.collection("users").doc(uid).set(fields, { mergeFields: Object.keys(fields) });
   }
 
   async readUserDoc(uid: string): Promise<Record<string, unknown> | null> {
