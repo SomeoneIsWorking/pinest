@@ -1,51 +1,49 @@
 /**
- * Who this machine is, and how a client is allowed to prove it.
+ * Who this machine is, and how a client proves it.
  *
- * Two ways to run, and exactly one is in force on any given machine:
+ * Identity is always Google. That is not a choice this module makes, and it is
+ * not negotiable per machine: a client signs in with its own Google account, the
+ * host verifies that ID token through Google's Identity Toolkit, and both sides
+ * are talking about the same person. There is deliberately no second credential
+ * here — a shared pairing secret would be a second opinion on who a client is,
+ * and two opinions that can disagree are how a host ends up trusting a stranger.
  *
- *   - **Firebase** (the default). The host has an owner identity, publishes
- *     presence into a discovery document, and a client proves who it is with a
- *     Firebase token. Everything the client needs to find the host is in that
- *     document, which is also what makes the host dependable on a metered
- *     service: its daily quota can reach zero, and a host that cannot publish
- *     cannot be found.
+ * What IS optional is Firestore, and the separation is the point:
  *
- *   - **Paired.** The host owns its URL and has been handed a secret. There is
- *     nothing to discover and nothing to signal — the tunnel is already the
- *     client's path in — and a client holding the secret needs no identity
- *     provider to be believed. No Google service is touched at all, so there is
- *     no quota to exhaust.
+ *   - **Identity** (who you are) — Google's Identity Toolkit REST API. Free, and
+ *     not a document store, so it has no daily quota to exhaust. Verified above,
+ *     while the project's Firestore quota was at zero and refusing every call.
  *
- * This module owns that choice, so the rest of the host never branches on it and
- * never has to know that "paired" exists. It is deliberately the ONLY place that
- * reads the pairing secret: a second reader would be a second opinion on
- * whether the machine is off Firebase, and the two could disagree.
+ *   - **Discovery** (how a client finds this host) — the Firestore document the
+ *     app watches for a machine's URL. Useful, and the only thing that actually
+ *     depends on the quota.
+ *
+ * A host with `discovery: "none"` serves a URL it owns and is told where it is
+ * once, at pairing time, so it never has to publish presence. It touches no
+ * Google service except the one that answers identity questions.
  */
 
-import { createFirebase, type FirebaseAuth } from "./auth.ts";
-import { ensurePairingToken, PAIRED_OWNER_UID } from "./config.ts";
-import { createPairingVerify } from "./pairing.ts";
+import { createFirebase, verifyGoogleToken, type FirebaseAuth } from "./auth.ts";
+import { readCachedAuth } from "./auth-cache.ts";
+import { loadConfig } from "./config.ts";
 import { verifiedOwnerToken } from "./owner-runtime.ts";
 
 /** The shape the socket's token verifier must have. */
 export type HostVerify = (token: string) => Promise<{ uid: string; expiresAt: number } | null>;
 
-export type HostIdentity =
-  | {
-    kind: "paired";
-    uid: string;
-    email: string;
-    /** Null: a paired host has no Firebase client, and must not acquire one. */
-    fb: null;
-    verify: HostVerify;
-  }
-  | {
-    kind: "firebase";
-    uid: string;
-    email: string;
-    fb: FirebaseAuth;
-    verify: HostVerify;
-  };
+export interface HostIdentity {
+  uid: string;
+  email: string;
+  /** The client's Google ID token, verified by Google. Never anything else. */
+  verify: HostVerify;
+  /**
+   * The Firestore client used for presence, discovery and signaling - or null
+   * when this host is reachable by its own URL and needs to publish nothing.
+   * Null is the whole point of `discovery: "none"`: no client is constructed,
+   * so no metered request can be made by accident.
+   */
+  discovery: FirebaseAuth | null;
+}
 
 export interface ResolveHostIdentityOptions {
   /**
@@ -56,31 +54,41 @@ export interface ResolveHostIdentityOptions {
   interactive: boolean;
 }
 
+/** Google's answer, shaped for the socket: null unless the token is ours and live. */
+async function verify(token: string): Promise<{ uid: string; expiresAt: number } | null> {
+  return verifiedOwnerToken(await verifyGoogleToken(token));
+}
+
 /**
- * Resolve who this machine is.
+ * The owner, from the credential we already hold, without touching Firestore.
  *
- * A paired machine returns without constructing a Firebase client at all, which
- * is the point: constructing one is harmless, but anything that then *uses* it
- * is a metered request, and the whole reason pairing exists is that there are
- * none.
+ * The refresh credential is a Google sign-in that has already happened; reading
+ * it is a local file read, not a network call. This is what lets a
+ * `discovery: "none"` host still know its own uid at boot, which is what the
+ * durable session registry is bound to.
  */
+function cachedOwner(): { uid: string; email: string } | null {
+  const cached = readCachedAuth();
+  if (!cached?.uid) return null;
+  return { uid: cached.uid, email: cached.email ?? cached.uid };
+}
+
 export async function resolveHostIdentity(
   options: ResolveHostIdentityOptions,
 ): Promise<HostIdentity> {
-  const verify = createPairingVerify({ token: ensurePairingToken(), ownerUid: PAIRED_OWNER_UID });
-  if (verify) {
-    return { kind: "paired", uid: PAIRED_OWNER_UID, email: "paired", fb: null, verify };
+  if (loadConfig().discovery === "none") {
+    const owner = cachedOwner();
+    if (!owner) {
+      throw new Error(
+        "discovery is off and this machine has no cached Google sign-in, so there is " +
+        "no owner to bind to. Run /pinest-auth once with a browser to sign in, or " +
+        "set discovery back to \"firestore\".",
+      );
+    }
+    return { ...owner, verify, discovery: null };
   }
-  const fb = await createFirebase();
-  const owner = await fb.resolveOwner({ interactive: options.interactive });
-  return {
-    kind: "firebase",
-    uid: owner.uid,
-    email: owner.email,
-    fb,
-    // A Firebase token is verified by Firebase, through the same check the
-    // socket has always used; pairing is decided above and never re-consulted,
-    // so a client cannot pick which door it comes through.
-    verify: async (token) => verifiedOwnerToken(await fb.verifyToken(token)),
-  };
+
+  const discovery = await createFirebase();
+  const owner = await discovery.resolveOwner({ interactive: options.interactive });
+  return { uid: owner.uid, email: owner.email, verify, discovery };
 }

@@ -214,6 +214,21 @@ export interface RestDeps {
   browserLoginOptions?: BrowserLoginOptions;
 }
 
+/**
+ * Verify a client's Google ID token, with no Firestore anywhere.
+ *
+ * This is the whole reason a host can run without a metered document store:
+ * Google's Identity Toolkit answers "who is this token" over its own REST API,
+ * which is not a document database and has no daily write quota to exhaust. So
+ * identity and discovery are separable, and only discovery is optional.
+ */
+export async function verifyGoogleToken(
+  idToken: string,
+  deps: { fetchImpl?: typeof fetch } = {},
+): Promise<Identity | null> {
+  return identityToolkitLookup(firebaseWebConfig().apiKey, idToken, deps.fetchImpl ?? fetch);
+}
+
 async function identityToolkitLookup(apiKey: string, idToken: string, fetchImpl: typeof fetch): Promise<Identity | null> {
   const res = await fetchImpl(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${apiKey}`, {
     method: "POST",

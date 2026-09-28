@@ -15,7 +15,6 @@
  *    belongs to pi's SessionManager.
  */
 import type { SessionRow } from "./protocol.ts";
-import { PAIRED_OWNER_UID } from "./config.ts";
 import {
   chmodSync,
   lstatSync,
@@ -42,12 +41,6 @@ export class RegistryOwnerError extends RegistryError {
 interface RegistryData {
   version: number;
   ownerUid?: string;
-  /**
-   * The owner this registry was bound to before a deliberate adoption, kept so
-   * the transition is auditable after the fact. Never consulted for access: an
-   * owner is whoever `ownerUid` says it is, and nothing else.
-   */
-  previousOwnerUid?: string;
   sessions: SessionRow[];
 }
 
@@ -124,9 +117,6 @@ export class SessionRegistry {
     this.data = {
       version: parsed.version ?? 1,
       ...(parsed.ownerUid === undefined ? {} : { ownerUid: parsed.ownerUid }),
-      ...(typeof parsed.previousOwnerUid === "string" && parsed.previousOwnerUid.trim() !== ""
-        ? { previousOwnerUid: parsed.previousOwnerUid }
-        : {}),
       sessions: parsed.sessions,
     };
     return this;
@@ -137,38 +127,20 @@ export class SessionRegistry {
    * Legacy registries have no ownerUid: their first authenticated owner claims
    * them atomically without rewriting or duplicating the existing session rows.
    *
-   * A registry owned by SOMEONE ELSE is refused, always. There is exactly one
-   * exception and it is not a caller-supplied flag: the new owner must BE the
-   * pairing placeholder. Pairing changes what an owner is - from a Firebase
-   * identity to a local secret - and that is a change of KIND, provable by
-   * holding the machine's secret, unlike a change of PERSON, which nothing in
-   * this file can prove. So adoption keys off the identity being claimed rather
-   * than off a boolean any caller could pass for any uid, which is the one shape
-   * that would turn this into a hole.
-   *
-   * Every session row is kept, the previous owner is recorded in
-   * `previousOwnerUid`, and the same caller can be refused below just as before:
-   * the new owner is the only one who can read the rows, exactly as always.
+   * A registry owned by SOMEONE ELSE is refused, with no exception. An owner is
+   * a Google uid on every path, including a paired one, so there is never a
+   * second kind of owner to reconcile and never a reason to hand this file to
+   * whoever asks next.
    */
   claimOwner(uid: string): this {
     if (typeof uid !== "string" || uid.trim().length === 0) {
       throw new RegistryOwnerError("invalid-uid", "registry owner UID must be a non-empty string");
     }
     if (this.data.ownerUid !== undefined && this.data.ownerUid !== uid) {
-      // Coming BACK. A registry adopted by pairing remembers the owner it came
-      // from, and that recorded owner is proof enough to restore it - otherwise
-      // pairing a machine would be a one-way door that locks the person out of
-      // their own sessions the moment they decided pairing was not for them.
-      if (this.data.previousOwnerUid === uid && this.data.ownerUid === PAIRED_OWNER_UID) {
-        this.restorePreviousOwner(uid);
-      } else if (uid !== PAIRED_OWNER_UID) {
-        throw new RegistryOwnerError(
-          "mismatch",
-          `registry at ${this.path} belongs to a different authenticated owner; refusing access`,
-        );
-      } else {
-        this.adoptOwner(uid, this.data.ownerUid);
-      }
+      throw new RegistryOwnerError(
+        "mismatch",
+        `registry at ${this.path} belongs to a different authenticated owner; refusing access`,
+      );
     }
     if (this.data.ownerUid === uid) {
       this.claimedOwnerUid = uid;
@@ -188,51 +160,6 @@ export class SessionRegistry {
       throw error;
     }
     return this;
-  }
-
-  /**
-   * Re-bind this registry to a new owner, deliberately, keeping every session.
-   *
-   * Only ever called from `claimOwner` with explicit adoption. The previous owner
-   * is written down before the new one replaces it, so a machine that later goes
-   * back to its Firebase identity is recognisable as the same machine rather
-   * than as a stranger arriving with someone else's file.
-   *
-   * If the write fails the in-memory state is restored exactly, so a failed
-   * adoption leaves the registry owned by whoever owned it before.
-   */
-  private adoptOwner(newUid: string, previousOwnerUid: string): void {
-    const before = { ...this.data };
-    this.data.previousOwnerUid = previousOwnerUid;
-    this.data.ownerUid = newUid;
-    this.claimedOwnerUid = newUid;
-    try {
-      this.save();
-    } catch (error) {
-      this.data = before;
-      this.claimedOwnerUid = null;
-      throw error;
-    }
-  }
-
-  /**
-   * Undo an adoption: give the registry back to the owner it was taken from.
-   * The pairing placeholder is not an owner a person can re-authenticate as, so
-   * it is cleared rather than kept, and the restored uid becomes the current
-   * owner with nothing left pointing at the placeholder.
-   */
-  private restorePreviousOwner(uid: string): void {
-    const before = { ...this.data };
-    delete this.data.previousOwnerUid;
-    this.data.ownerUid = uid;
-    this.claimedOwnerUid = uid;
-    try {
-      this.save();
-    } catch (error) {
-      this.data = before;
-      this.claimedOwnerUid = null;
-      throw error;
-    }
   }
 
   private assertOwnerClaimed(): void {

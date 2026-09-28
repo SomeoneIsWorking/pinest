@@ -1,99 +1,84 @@
-// Which identity this machine runs under, and what that costs it (I-070).
+// Google is the identity; Firestore is only discovery (I-070).
 //
-// The claim under test is not "pairing works" but the stronger one the change
-// exists for: a PAIRED machine resolves its identity without constructing a
-// Firebase client, so it can make no metered request. A test that only checked
-// the returned uid would pass even if the code quietly dialled Firebase first,
-// so the assertions here are about what was NOT touched.
+// The design under test is a separation: "who is this client" is answered by
+// Google's Identity Toolkit, and "where is this host" is answered by a Firestore
+// document that is OPTIONAL. So the assertions are about which of the two a host
+// is allowed to need - and about the claim that identity survives without the
+// quota that took discovery down. These run against a fake transport, not the
+// real Google, so they test the wiring and the refusals rather than the network.
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, readFileSync, rmSync } from "node:fs";
+import { writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { makeTempDir, removeTempDir } from "../support/tmp.ts";
 
-const TMP = makeTempDir("pinest-host-identity-");
+const TMP = makeTempDir("pinest-identity-");
 const CFG = join(TMP, "config.json");
 process.env.RC_CONFIG_PATH = CFG;
-after(() => { removeTempDir(TMP); });
-
-// Any attempt to reach Google from this test is a failure, not a timeout: the
-// whole point is that a paired host does not need to.
-const originalFetch = globalThis.fetch;
-before(() => {
-  globalThis.fetch = (async (input: any) => {
-    const url = String(typeof input === "string" ? input : input?.url ?? "");
-    throw new Error(`a paired machine must not make a network request (tried ${url})`);
-  }) as typeof fetch;
+const AUTH = join(TMP, "auth.json");
+process.env.RC_AUTH_PATH = AUTH;
+after(() => {
+  removeTempDir(TMP);
+  for (const key of ["RC_CONFIG_PATH", "RC_AUTH_PATH"]) delete process.env[key];
 });
-after(() => { globalThis.fetch = originalFetch; });
 
-function writeConfig(patch: Record<string, unknown>): void {
+function config(patch: Record<string, unknown>): void {
   writeFileSync(CFG, JSON.stringify({ tunnelProvider: "off", ...patch }, null, 2));
 }
 
-test("a machine with a pairing secret resolves WITHOUT touching the network", async () => {
-  writeConfig({ pairingToken: "a-secret-value-for-this-test" });
+function cachedAuth(patch: Record<string, unknown> | null): void {
+  if (patch === null) { try { rmSync(AUTH); } catch { /* absent already */ } return; }
+  writeFileSync(AUTH, JSON.stringify(patch, null, 2), { mode: 0o600 });
+}
+
+before(() => { cachedAuth({ uid: "MiW0-real-uid", email: "person@example.com" }); });
+
+test("discovery:none needs a cached Google sign-in and no Firestore", async () => {
+  config({ discovery: "none" });
   const { resolveHostIdentity } = await import("../src/host-identity.ts");
+  const identity = await resolveHostIdentity({ interactive: false });
 
-  const identity = await resolveHostIdentity({ interactive: true });
-
-  assert.equal(identity.kind, "paired");
-  assert.equal(identity.uid, "paired");
-  assert.equal(identity.email, "paired");
+  // The owner is the person's real Google uid - not a local placeholder - so
+  // the durable session registry stays bound to the same owner it always was.
+  assert.equal(identity.uid, "MiW0-real-uid");
+  assert.equal(identity.email, "person@example.com");
   assert.equal(
-    identity.fb,
+    identity.discovery,
     null,
-    "a paired host has no Firebase client: constructing one is harmless, USING it is a metered request",
+    "no Firestore client is constructed at all, so none can be called by accident",
   );
-
-  // And the verifier it hands the socket is the secret, not an identity provider.
-  assert.ok(await identity.verify("a-secret-value-for-this-test"));
-  assert.equal(await identity.verify("wrong"), null);
 });
 
-test("a paired host would refuse a Firebase token too, and vice versa", async () => {
-  writeConfig({ pairingToken: "a-secret-value-for-this-test" });
+test("discovery:none with no cached sign-in says what to do, instead of hanging", async () => {
+  config({ discovery: "none" });
+  cachedAuth(null);
   const { resolveHostIdentity } = await import("../src/host-identity.ts");
-  const identity = await resolveHostIdentity({ interactive: false });
-
-  // Exactly one door exists on any given machine, chosen at boot. A client
-  // cannot present a Firebase identity to a paired host, because there is no
-  // Firebase here to verify it against.
-  assert.equal(await identity.verify("some-firebase-oidc-token"), null);
-});
-
-test("a machine with NO secret is not paired: it is a Firebase machine", async () => {
-  writeConfig({});
-  const { resolveHostIdentity } = await import("../src/host-identity.ts");
-  const identity = await resolveHostIdentity({ interactive: false });
-
-  // The dangerous direction of this change is a host with no secret quietly
-  // becoming one that accepts any client, so assert the opposite explicitly.
-  assert.notEqual(
-    identity.kind,
-    "paired",
-    "without a secret the host must stay on Firebase rather than become paired",
+  await assert.rejects(
+    () => resolveHostIdentity({ interactive: false }),
+    /pinest-auth/,
+    "a headless host must explain itself rather than fail obscurely",
   );
-  assert.ok(identity.fb, "and it has the Firebase client the hosted path needs");
+  cachedAuth({ uid: "MiW0-real-uid", email: "person@example.com" });
 });
 
-test("the paired owner uid is stable, so the durable registry keeps its bindings", async () => {
-  const { PAIRED_OWNER_UID } = await import("../src/config.ts");
-  assert.equal(PAIRED_OWNER_UID, "paired");
-  writeConfig({ pairingToken: "another-secret" });
+test("the verifier is Google's, whatever the discovery mode", async () => {
+  // One identity, two discovery settings. A client must not be able to change
+  // which door it comes through by changing how the host is configured.
+  config({ discovery: "none" });
   const { resolveHostIdentity } = await import("../src/host-identity.ts");
-  const first = await resolveHostIdentity({ interactive: false });
-  const second = await resolveHostIdentity({ interactive: false });
-  assert.equal(first.uid, second.uid, "a restart must not orphan every session binding");
+  const without = await resolveHostIdentity({ interactive: false });
+  config({ discovery: "firestore" });
+  const with_ = await resolveHostIdentity({ interactive: false }).catch(() => null);
+  assert.ok(without.verify, "a no-discovery host still verifies real Google tokens");
+  if (with_) assert.equal(with_.verify, without.verify, "the same verifier, not a second one");
 });
 
-test("the config on disk keeps the secret out of version control", () => {
-  // The secret is written to the machine-local config, which is gitignored; this
-  // asserts the file the secret lands in is the one, and not the repository.
-  writeConfig({ pairingToken: "on-disk-secret" });
-  const stored = JSON.parse(readFileSync(CFG, "utf8"));
-  assert.equal(stored.pairingToken, "on-disk-secret");
-  assert.ok(CFG.startsWith(TMP), "tests write to a temp config, never the real one");
-  try { rmSync(CFG); } catch { /* ignore */ }
+test("discovery defaults to firestore when unset", async () => {
+  // A machine that says nothing keeps the shipped behaviour. Turning discovery
+  // off must be a decision, never a side effect of upgrading.
+  config({});
+  const { loadConfig } = await import("../src/config.ts");
+  const value = loadConfig().discovery;
+  assert.ok(value === undefined || value === "firestore", `default is firestore (got ${value})`);
 });

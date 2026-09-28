@@ -27,18 +27,17 @@ export interface Config {
    * tunnel. Opt-in: the offer only appears in the discovery doc when enabled. */
   p2p?: boolean;
   /**
-   * A secret that authorises an app to connect, in place of a Firebase identity.
+   * How an app finds this host. Default "firestore": the host publishes a
+   * presence document and the app watches it.
    *
-   * Setting this is what makes the machine independent of Firestore: the host
-   * then serves no discovery document, publishes no presence, and offers no
-   * WebRTC signalling, so nothing it does reaches Google and no quota can stop
-   * it. The app is paired once with a link carrying this token.
-   *
-   * It is a bearer secret and is treated as one: anyone holding it owns the
-   * machine, so it is generated locally, never logged in full, and stored only
-   * in the machine-local config (gitignored).
+   * "none" means this host is reachable at a URL it owns and is told that URL
+   * once, at pairing time, so it needs to publish nothing. It then uses no Google
+   * service except Identity Toolkit, which answers "who is this client" and is
+   * not a document store. Nothing it does consumes a Firestore quota, so a
+   * project whose daily allowance is exhausted cannot stop it from being
+   * controlled.
    */
-  pairingToken?: string;
+  discovery?: "firestore" | "none";
   [key: string]: unknown;
 }
 
@@ -129,34 +128,4 @@ export function resetConfig(): void {
   assertWritableTarget();
   try { writeFileSync(CONFIG_PATH, JSON.stringify(DEFAULTS, null, 2)); }
   catch { /* ignore */ }
-}
-
-/** The owner's uid used for every session when the machine is paired rather
- * than Firebase-authenticated. Stable, so the durable registry keeps binding
- * the same sessions to the same owner across restarts. */
-export const PAIRED_OWNER_UID = "paired";
-
-/**
- * The configured pairing secret, generated and persisted on first use.
- *
- * Returns null when the machine is on the Firebase path, which is what every
- * other module asks rather than testing the config field themselves: a pairing
- * token is the ONLY thing that takes the machine off Firebase, so it should be
- * read in one place and interpreted once.
- *
- * Generation is deliberately lazy - a machine that has never been paired gets
- * no secret on disk, because a secret nobody uses is a liability, not a
- * feature.
- */
-export function ensurePairingToken(): string | null {
-  const existing = loadConfig().pairingToken;
-  if (typeof existing === "string" && existing.length > 0) return existing;
-  return null;
-}
-
-/** Create the pairing secret and persist it. Explicit, so nothing is written
- * until a person asks for pairing - see {@link ensurePairingToken}. */
-export function createPairingToken(): string {
-  const bytes = randomBytes(24);
-  return saveConfig({ pairingToken: bytes.toString("base64url") }).pairingToken as string;
 }
