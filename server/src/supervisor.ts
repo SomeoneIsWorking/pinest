@@ -41,11 +41,12 @@ import { StreamSegmenter, type StreamSegmenterState } from "./stream.ts";
 import { submitUserMessage } from "./session-submit.ts";
 import { classifyCompactFailure } from "./compaction-outcome.ts";
 import { createMessageSubmitter, type MessageSubmitter } from "./submit.ts";
-import { resolveThinkingLevel } from "./thinking.ts";
+import { reportThinkingLevel, resolveThinkingLevel } from "./thinking.ts";
 import { dispatchSessionCommand } from "./session-command-handler.ts";
 import { normalizeGoal } from "./session-goal.ts";
 import type { SessionRegistry } from "./registry.ts";
 import { SessionModelService } from "./session-models.ts";
+import { SessionOverlay, type OverlayTarget } from "./session-overlay.ts";
 import type { SessionSnapshot, SessionRow, UserImage } from "./protocol.ts";
 
 function isPinestExtension(path: string, resolvedPath?: string): boolean {
@@ -85,6 +86,12 @@ export interface SpawnCommand {
   name?: string;
   /** provider/model id, e.g. "opencode-go/glm-5.3-flash" */
   model?: string;
+  /**
+   * A thinking level in display form ("default", "high", …) — the same
+   * vocabulary the clients set it with. A subagent inherits its parent's; an
+   * ordinary spawn leaves it to pi.
+   */
+  thinking?: string;
   /**
    * Set when this session is a SUBAGENT: who spawned it and what it was asked
    * to do. Its presence is what makes the session a subagent — the row records
@@ -147,6 +154,10 @@ export interface LiveSession {
   submitter: MessageSubmitter | null;
   /** The session that spawned this one, when it is a subagent. */
   parentSessionId?: string;
+  /** This session's thinking level in display form, tracked where it is set. */
+  thinkingLevel?: string;
+  /** What a subagent could not inherit, when something did not take. */
+  modelWarning?: string;
   /** The subagent run this session is, with the state clients render. */
   subagent?: SubagentRun;
   /** Waiters for this session's CURRENT turn to end. They live on the session
@@ -164,7 +175,13 @@ export interface SupervisorOptions {
    * what a session is: its workspace, its model, and the level it sits at in
    * the subagent tree.
    */
-  hostSession?: () => { id: string; name: string; cwd: string; model?: string | null } | null;
+  hostSession?: () => {
+    id: string;
+    name: string;
+    cwd: string;
+    model?: string | null;
+    thinking?: string;
+  } | null;
 }
 
 /** Fill in fields a parked session may predate (a hot reload IS a version
@@ -212,9 +229,17 @@ export class Supervisor {
    * each session is on" (see session-models.ts). Built in the constructor:
    * a field initializer would run before `agentDir` is assigned. */
   private readonly modelService: SessionModelService;
+  /** What the clients are shown about a session right now: usage, model,
+   * transcript. A read, and a different owner. */
+  private readonly overlay: SessionOverlay;
   private readonly opts: SupervisorOptions;
   /** Who spawned whom, and how deep: the tree's rules, not this class's. */
   private readonly tree: SubagentTree;
+  /** The live overlay the clients read, re-read on every state message. */
+  get view(): SessionOverlay {
+    return this.overlay;
+  }
+
   /** Subagent policy: the brief, the bounds, and the run bookkeeping. One
    * instance per supervisor. */
   readonly subagents: SubagentService;
@@ -227,21 +252,40 @@ export class Supervisor {
     this.agentDir = opts.agentDir;
     this.opts = opts;
     this.modelService = new SessionModelService(this.agentDir);
+    this.overlay = new SessionOverlay({
+      live: () => this.sessions as Map<string, OverlayTarget>,
+      publish: (id, snapshot, notify) => this.callbacks.upsertSession(id, snapshot, notify),
+      persistModel: (id, model, modelName) => this.persistRow(id, { model, modelName }),
+      compactAtTokens: () => this.callbacks.compactAtTokens?.(),
+      embedImages: (text) => this.callbacks.embedImages?.(text) ?? text,
+    });
     this.tree = new SubagentTree({
       live: () => [...this.sessions].map(([id, s]) => ({
-        id, name: s.name, cwd: s.cwd, model: s.model, ...(s.parentSessionId ? { parentSessionId: s.parentSessionId } : {}),
+        id, name: s.name, cwd: s.cwd, model: s.model,
+        // From the agent, not from a stored label: pi applies a level itself
+        // and declines the ones the model lacks, so what was asked for and
+        // what will happen are not the same value.
+        thinking: reportThinkingLevel(
+          (s.session as any)?.model,
+          (s.session as any)?.thinkingLevel,
+        ),
+        ...(s.parentSessionId ? { parentSessionId: s.parentSessionId } : {}),
       })),
       row: (id) => this.registry?.get(id) ?? null,
       host: () => {
         const host = opts.hostSession?.();
-        return host ? { id: host.id, name: host.name, cwd: host.cwd, model: host.model } : null;
+        return host
+          ? { id: host.id, name: host.name, cwd: host.cwd, model: host.model, thinking: host.thinking }
+          : null;
       },
     });
     const bound = bindSubagents({
+      find: (id) => this.sessions.get(id),
       spawnChild: (request) => this.spawn({
         cwd: request.cwd,
         name: request.name,
         model: request.model,
+        thinking: request.thinking,
         parent: { sessionId: request.parentSessionId, task: request.task },
       }),
       startChild: (sessionId, brief) => {
@@ -256,20 +300,16 @@ export class Supervisor {
         return awaitTurnEnd(live);
       },
       tree: this.tree,
-      markRun: (sessionId, run) => this.markSubagentRun(sessionId, run),
-      resolveOwner: (ctx, preferred) => this.rowIdForToolContext(ctx, preferred),
+      markRun: (id, run) => {
+        const child = this.sessions.get(id);
+        if (child) child.subagent = run;
+        this.callbacks.upsertSession(id, { subagent: run });
+        this.persistRow(id, { subagent: run });
+      },
+      resolveOwner: (ctx, preferred) => this.toolCaller(ctx, preferred),
     });
     this.subagents = bound.service;
     this.subagentToolSet = bound.tools;
-  }
-
-  /** Record a subagent run's state: published to the clients now, and persisted
-   * so a row that is not running still says what it was for. */
-  markSubagentRun(sessionId: string, run: SubagentRun): void {
-    const s = this.sessions.get(sessionId);
-    if (s) s.subagent = run;
-    this.callbacks.upsertSession(sessionId, { subagent: run });
-    this.persistRow(sessionId, { subagent: run });
   }
 
   /** The subagent tree's answers, delegated: the rules live in the tree, so a
@@ -291,6 +331,11 @@ export class Supervisor {
   /** The `subagent` tool, bound to this supervisor. */
   subagentTools(preferredOwner?: string): ToolDefinition[] {
     return this.subagentToolSet(preferredOwner);
+  }
+
+  /** The registry row id of the session making a tool call. */
+  private toolCaller(ctx: unknown, preferred?: string): string {
+    return rowIdForToolContext(this.sessions as Map<string, PiSessionRef>, ctx, preferred);
   }
 
   get bgManager(): BackgroundProcessManager | undefined {
@@ -412,6 +457,22 @@ export class Supervisor {
     });
   }
 
+  /** A live session's starting state, in one place. */
+  private newLiveSession(
+    session: AgentSession,
+    cwd: string,
+    name: string,
+    identity: { parentSessionId?: string; subagent?: SubagentRun } = {},
+  ): LiveSession {
+    return {
+      session, currentTurnId: null, unsub: null, cwd, status: "idle", name,
+      model: null, modelName: null, segmenter: new StreamSegmenter(), _compacting: false,
+      pending: [], pendingSteering: [], turnStarted: false, submitter: null,
+      settleWaiters: [],
+      ...identity,
+    };
+  }
+
   async spawn(cmd: SpawnCommand): Promise<string> {
     const id = cmd.sessionId || randomUUID();
     const cwd = cmd.cwd ?? process.cwd();
@@ -429,18 +490,10 @@ export class Supervisor {
       Supervisor.activeSpawning = false;
     }
     const name = deriveSessionName(cwd, cmd.name);
-    const s: LiveSession = {
-      session, currentTurnId: null, unsub: null, cwd, status: "idle", name,
-      model: null, modelName: null, segmenter: new StreamSegmenter(), _compacting: false,
-      pending: [], pendingSteering: [], turnStarted: false, submitter: null,
-      settleWaiters: [],
-      ...(parent
-        ? {
-            parentSessionId: parent.sessionId,
-            subagent: { task: parent.task, status: "running" as const, startedAt: Date.now() },
-          }
-        : {}),
-    };
+    const s = this.newLiveSession(session, cwd, name, parent ? {
+      parentSessionId: parent.sessionId,
+      subagent: { task: parent.task, status: "running" as const, startedAt: Date.now() },
+    } : {});
     this.sessions.set(id, s);
 
     const initialModel = (session as any).model;
@@ -449,20 +502,16 @@ export class Supervisor {
       s.modelName = initialModel.name;
     }
 
-    if (cmd.model) {
-      try {
-        const mdl = await this.modelService.find(cmd.model, this.sessions.values());
-        if (mdl) {
-          await session.setModel(mdl);
-          s.model = `${mdl.provider}/${mdl.id}`;
-          s.modelName = mdl.name;
-        } else {
-          debug(`[remote-code] spawn: model ${cmd.model} not found`);
-        }
-      } catch (e) {
-        debug("[remote-code] spawn setModel:", (e as Error).message);
-      }
-    }
+    // A subagent inherits its parent's model and thinking; an ordinary spawn is
+    // told a model and no level. One call, because both steps are read back and
+    // anything that did not take has to be reported.
+    const inherited = await this.modelService.inheritFrom(
+      s,
+      { model: cmd.model, thinking: cmd.thinking },
+      parent !== undefined,
+      this.sessions.values(),
+    );
+    if (inherited.modelWarning) s.modelWarning = inherited.modelWarning;
 
     const actualModel = (session as any).model;
     if (actualModel) {
@@ -472,6 +521,7 @@ export class Supervisor {
 
     this.callbacks.upsertSession(id, {
       name, cwd, model: s.model, modelName: s.modelName,
+      ...(s.thinkingLevel ? { thinkingLevel: s.thinkingLevel } : {}),
       status: "idle", isInteractive: false, createdAt: Date.now(),
       // The objective this session already works toward, so resuming or
       // respawning it shows the goal on its own tab again.
@@ -483,6 +533,7 @@ export class Supervisor {
     });
     this.persistRow(id, {
       status: "idle", model: s.model, modelName: s.modelName,
+      ...(s.thinkingLevel ? { thinkingLevel: s.thinkingLevel } : {}),
       ...(s.parentSessionId ? { parentSessionId: s.parentSessionId, subagent: s.subagent } : {}),
     });
     this.wire(id, s);
@@ -510,13 +561,12 @@ export class Supervisor {
       Supervisor.activeSpawning = false;
     }
     const name = cmd.name || deriveSessionName(cwd);
-    const s: LiveSession = {
-      session, currentTurnId: null, unsub: null, cwd, status: "idle", name,
-      model: null, modelName: null, segmenter: new StreamSegmenter(), _compacting: false,
-      pending: [], pendingSteering: [], turnStarted: false, submitter: null,
-      settleWaiters: [],
-      ...this.tree.identityFromRow(this.registry?.get(id) ?? null),
-    };
+    const s = this.newLiveSession(
+      session,
+      cwd,
+      name,
+      this.tree.identityFromRow(this.registry?.get(id) ?? null),
+    );
     this.sessions.set(id, s);
 
     const m = (session as any).model;
@@ -634,7 +684,7 @@ export class Supervisor {
         levelOf: (id) => this.levelOf(id),
         wire: (id, sess) => this.wire(id, sess),
         models: (sess) => this.models(sess),
-        getHistory: (sess) => this.getHistory(sess),
+        getHistory: (sess) => this.overlay.historyOf(sess),
         syncQueue: (id, sess) => this.syncQueue(id, sess),
         goalSink: () => ({
           persist: (id, goal) => this.persistRow(id, { goal }),
@@ -787,7 +837,7 @@ export class Supervisor {
           // the delivered message never goes invisible. Queue pops are NOT our
           // job: pi dequeues at message_start and says so via queue_update.
           setTimeout(() => {
-            this.getHistory(s).then((h) =>
+            this.overlay.historyOf(s).then((h) =>
               this.callbacks.broadcast({ type: "history", sessionId: id, ...pageHistory(h) }),
             );
           }, 100);
@@ -861,7 +911,7 @@ export class Supervisor {
         if (s.currentTurnId) s.currentTurnId = null;
         this.callbacks.upsertSession(id, {
           status: "idle",
-          contextUsage: this.usageWithCompactAt(s),
+          contextUsage: this.overlay.usageWithCompactAt(s),
           pendingMessages: [],
           pendingSteering: [],
           pendingImagesByText: {},
@@ -870,7 +920,7 @@ export class Supervisor {
         this.maybeAutoCompact(id, s);
         // Send updated history FIRST so the completed message sticks,
         // then clear the streaming state so there is no gap/blink between stream and history.
-        this.getHistory(s)
+        this.overlay.historyOf(s)
           .then((h) => {
             this.callbacks.broadcast({ type: "history", sessionId: id, ...pageHistory(h) });
             s.segmenter?.reset();
@@ -897,48 +947,15 @@ export class Supervisor {
       s, { provider: cmd.provider, modelId: cmd.modelId }, this.sessions.values(),
     );
     s.model = switched.model; s.modelName = switched.modelName;
+    if (switched.thinkingLevel) s.thinkingLevel = switched.thinkingLevel;
     this.persistRow(cmd.sessionId, { model: switched.model, modelName: switched.modelName });
     // Refresh the context usage NOW so the app's context badge reflects the
     // new model's window immediately (it used to lag until the next turn).
     // "off" may also change meaning with the model — re-report the level.
     this.callbacks.upsertSession(cmd.sessionId, {
-      model: switched.model, modelName: switched.modelName, contextUsage: this.usageWithCompactAt(s),
+      model: switched.model, modelName: switched.modelName, contextUsage: this.overlay.usageWithCompactAt(s),
       thinkingLevel: switched.thinkingLevel,
     });
-  }
-
-  private contextUsage(s: LiveSession): unknown {
-    try { return (s.session as any).getContextUsage?.(); } catch { return undefined; }
-  }
-
-  /** Context usage enriched with the effective auto-compact threshold. */
-  private usageWithCompactAt(s: LiveSession): unknown {
-    const u = this.contextUsage(s) as Record<string, unknown> | undefined;
-    if (!u) return undefined;
-    return { ...u, compactAt: this.callbacks.compactAtTokens?.() ?? null };
-  }
-
-  /**
-   * Cheap sync overlay of live status + context usage for EVERY live session,
-   * called when a state message is built — so each app tab shows context
-   * immediately, not only after that session's next event. The usage carries
-   * the effective auto-compact threshold (compactAt) like the host's does.
-   */
-  refreshUsage(notify = true): void {
-    for (const [id, s] of this.sessions) {
-      const m = (s.session as any)?.model;
-      if (m && !s.model) {
-        s.model = `${m.provider}/${m.id}`;
-        s.modelName = m.name;
-        this.persistRow(id, { model: s.model, modelName: m.name });
-      }
-      const u = this.usageWithCompactAt(s);
-      this.callbacks.upsertSession(id, {
-        status: s.status === "working" ? "working" : "idle",
-        ...(s.model ? { model: s.model, modelName: s.modelName } : {}),
-        ...(u ? { contextUsage: u } : {}),
-      }, notify);
-    }
   }
 
   /** Everything that rewrites a session's transcript behind the client's back
@@ -947,20 +964,20 @@ export class Supervisor {
    * pre-compaction thread and the command looked like a no-op. */
   private afterContextRewrite(id: string, s: LiveSession, notice: string): void {
     s._uncompactedAtTokens = undefined;
-    const u = this.usageWithCompactAt(s);
+    const u = this.overlay.usageWithCompactAt(s);
     this.callbacks.upsertSession(id, { ...(u ? { contextUsage: u } : {}) });
-    void this.getHistory(s).then((h) =>
+    void this.overlay.historyOf(s).then((h) =>
       this.callbacks.broadcast({ type: "history", sessionId: id, ...pageHistory(h), reset: true }),
     );
     this.callbacks.broadcast({ type: "notice", sessionId: id, message: notice });
   }
 
-  /** Auto-compact when the context crosses the configured threshold. */
+  /** Auto-compact when the context crosses the threshold. */
   private maybeAutoCompact(id: string, s: LiveSession): void {
     if (s._compacting) return;
     const at = this.callbacks.compactAtTokens?.();
     if (!at) return;
-    const usage = this.contextUsage(s) as any;
+    const usage = this.overlay.rawUsage(s) as any;
     if (!usage?.tokens || usage.tokens < at) return;
     if (usage.contextWindow && usage.contextWindow <= at) return;
     if (s._uncompactedAtTokens !== undefined && usage.tokens <= s._uncompactedAtTokens) return;
@@ -997,17 +1014,6 @@ export class Supervisor {
     return this.modelService.list(s);
   }
 
-  private async getHistory(s: LiveSession) {
-    try {
-      const sm = (s.session as any)?.sessionManager;
-      const msgs = extractSessionMessages(sm);
-      const fallbackMsgs = msgs.length > 0 ? msgs : ((s.session as any).messages ?? []);
-      return historyWithEmbeds(fallbackMsgs, this.callbacks.embedImages);
-    } catch (e) {
-      debug("[remote-code] getHistory failed:", (e as Error).message);
-      return [];
-    }
-  }
 
   /** Undelivered pending messages for a session — read from the AGENT's own
    * queue, with the last mirrored snapshot as fallback for a parked session
@@ -1024,13 +1030,10 @@ export class Supervisor {
     return [...(s.pending ?? [])];
   }
 
-  /**
-   * Actually stop a live session: abort any in-flight run, then dispose.
-   * The SDK AgentSession has NO shutdown() — the old `(s.session as
-   * any).shutdown?.()` calls were silent no-ops, so hot reload left zombie
-   * runs editing files invisibly while the new instance resumed the same
-   * pi session file in parallel.
-   */
+  /** Actually stop a live session: abort the in-flight run, then dispose. The
+   * SDK AgentSession has NO shutdown() — `(s.session as any).shutdown?.()`
+   * was a silent no-op, so a reload left zombie runs editing files while the
+   * new instance resumed the same transcript in parallel (I-020). */
   private async stopSession(id: string, s: LiveSession): Promise<void> {
     try { await s.session.abort(); } catch (e) { debug(`[remote-code] session ${id}: abort failed:`, (e as Error).message); }
     try { s.session.dispose(); } catch (e) { debug(`[remote-code] session ${id}: dispose failed:`, (e as Error).message); }
@@ -1167,14 +1170,14 @@ export class Supervisor {
         ...(s.parentSessionId ? { parentSessionId: s.parentSessionId, subagent: s.subagent } : {}),
         // pending fields are NOT taken from the parked mirror (stale-drift
         // risk across builds): syncQueue below reads the agent's own queue.
-        contextUsage: this.usageWithCompactAt(s),
+        contextUsage: this.overlay.usageWithCompactAt(s),
       });
       this.syncQueue(id, s);
       this.persistRow(id, { status: s.status === "working" ? "running" : "idle" });
       adopted += 1;
       debug(`[remote-code] reload: adopted session ${id} (${s.name} @ ${s.cwd}, ${s.status})`);
       // Push history so the app thread refills immediately.
-      this.getHistory(s).then((h) =>
+      this.overlay.historyOf(s).then((h) =>
         this.callbacks.broadcast({ type: "history", sessionId: id, ...pageHistory(h) }),
       ).catch(() => { /* */ });
       } catch (e) {

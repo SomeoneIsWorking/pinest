@@ -101,6 +101,9 @@ export async function dispatchSessionCommand(
     case "thinking_set": {
       const r = resolveThinkingLevel((s.session as any).model, cmd.level);
       s.session.setThinkingLevel(r.set);
+      // Tracked on the session so a subagent it spawns inherits the level the
+      // user actually set, not the one it was created with.
+      s.thinkingLevel = r.report;
       ctx.persistRow(cmd.sessionId, { thinkingLevel: r.report });
       ctx.callbacks.upsertSession(cmd.sessionId, { thinkingLevel: r.report });
       break;

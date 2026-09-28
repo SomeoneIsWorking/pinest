@@ -58,6 +58,14 @@ the app's drawer does the same and a subagent's own tab carries a banner with
 the parent, the task and the verdict. A subagent is a session, so opening,
 prompting, stopping and deleting it work with no new plumbing.
 
+A subagent runs on its parent's **model and thinking level**, and cannot choose
+either: the tool takes `task`, `name` and `cwd` only. Both are applied to the
+child and then read back from the child's own session, and anything that did not
+take — a model the child cannot be given, a level its model has no such
+reasoning for — is reported in the run and in the parent's tool result, so a
+subagent never claims a parity it did not get. See
+`docs/issues/0071-subagent-model-inheritance.md`.
+
 Verified with 32 new server tests, 13 client tests, and
 `drills/subagent-fanout.mjs` against real AgentSessions and a real model, whose
 `--negative` control (the same request to a model with no such tool) fails as it
@@ -66,6 +74,11 @@ opened and never given its brief, and a session opened for an already-cancelled
 turn. See `docs/issues/0070-subagent-fan-out.md` for both, and for the gaps
 (no client control of the limits; not yet qualified against a deployed app on a
 phone).
+
+Model and thinking inheritance is verified by 8 further tests
+(`server/test/session-model-inheritance.test.ts`) and by the drill against a
+parent on a model the machine does not default to, with a `--no-inherit`
+control that must fail on the reported symptom.
 
 ### S22 — Host terminal session views
 

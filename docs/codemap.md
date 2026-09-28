@@ -23,7 +23,9 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Outbound payload guard (oversized single message dropped + counted, never misread as a slow client) | `server` | `server/src/wsserver.ts` (`sendSerialized`) |
 | Session-history extraction incl. pre-compaction messages and compaction bubbles | `server` | `server/src/logic.ts` (`extractSessionMessages`, `entriesToSessionMessages`) |
 | Subagent policy: the brief, the tree depth and concurrency bounds, the run to completion, and the result handed back to the parent | `server` | `server/src/subagent.ts` (`SubagentService`, `subagentBrief`, `boundSummary`, `formatOutcome`, the turn waiter) |
-| The `subagent` tool and its binding onto a supervisor (sessions + tool set, wired in one step) | `server` | `server/src/subagent-tools.ts` (`bindSubagents`, `createSubagentTool`, `registerSubagentTools`) |
+| The `subagent` tool and its binding onto a supervisor (the seams it needs, the tool, and the host's own wiring, in one step) | `server` | `server/src/subagent-tools.ts` (`bindSubagents`, `createSubagentTool`, `registerSubagentTools`, `hostSubagentToolDeps`) |
+| Putting a session on a model and a thinking level, and reporting what it actually holds | `server` | `server/src/session-models.ts` (`SessionModelService.applyModelTo`, `applyThinkingTo`, `inheritFrom`) |
+| What "default" means for a thinking level, on a model that can think and one that cannot | `server` | `server/src/thinking.ts` (`resolveThinkingLevel`, `reportThinkingLevel`) |
 | Subagent tree facts: who spawned whom, a session's level, and what a re-opened row must remember it was | `server` | `server/src/subagent-tree.ts` (`SubagentTree`) |
 | The registry row id of a tool call (a spawned session's pi session id is not its row id) | `server` | `server/src/session-identity.ts` (`rowIdForToolContext`) |
 | Sessions in tree order for the host list, and the subagent's row label | `server` | `server/src/sessions-view.ts` (`orderSessionsByParent`, `toItem`, `subagentRunLabel`) |

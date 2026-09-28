@@ -14,13 +14,25 @@ import { join } from "node:path";
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ModelInfo } from "./protocol.ts";
 import { mapModel } from "./logic.ts";
-import { reportThinkingLevel } from "./thinking.ts";
+import { reportThinkingLevel, resolveThinkingLevel } from "./thinking.ts";
+import debug from "./log.ts";
 
 /** The parts of a live session this module needs — nothing else. */
 export interface ModelSessionView {
   session: any;
   model?: string | null;
   modelName?: string | null;
+  /** This session's thinking level in display form, tracked where it is set so
+   * a subagent it spawns can inherit it without a round trip. */
+  thinkingLevel?: string;
+}
+
+/** What a session really holds after a switch, and — when it is a subagent —
+ * why it does not hold what was asked for. */
+export interface AppliedModel {
+  model?: string;
+  modelName?: string;
+  modelWarning?: string;
 }
 
 export class SessionModelService {
@@ -175,4 +187,120 @@ export class SessionModelService {
       thinkingLevel: reportThinkingLevel(found, (s.session as any).thinkingLevel),
     };
   }
+
+  /**
+   * Put a session on a named model and PROVE it took.
+   *
+   * The lookup scope starts with the session being switched, because that is
+   * the one that has to be able to RUN the model: a provider an extension
+   * registered exists only in the runtime that loaded that extension, and the
+   * process-wide registry (models.json plus auth.json) has never heard of it.
+   * Searching the other live sessions and the registry instead found nothing,
+   * the switch was skipped, and the session quietly kept the default — measured
+   * live: a subagent asked to share its parent's model ran on another one, with
+   * nothing anywhere saying so.
+   *
+   * A divergence is reported, never swallowed. A subagent that could not be put
+   * on its parent's model did different work than the one that was asked for,
+   * and the caller has to be able to see that rather than infer it from a label.
+   * An ordinary spawn keeps its old best-effort behaviour, because a user's
+   * explicit "spawn on model X" is a request, not an inheritance.
+   */
+  async applyModelTo(
+    s: ModelSessionView,
+    spec: string,
+    isSubagent: boolean,
+    others: Iterable<ModelSessionView>,
+  ): Promise<AppliedModel> {
+    const heldNow = (): string => {
+      const actual = (s.session as any)?.model;
+      return actual?.provider && actual?.id ? `${actual.provider}/${actual.id}` : "nothing";
+    };
+    let found: any = null;
+    let failure: string | undefined;
+    try {
+      found = await this.find(spec, [s, ...others]);
+    } catch (e) {
+      failure = (e as Error).message;
+    }
+    if (!found) {
+      const reason = failure ?? `${spec} is not available to this session`;
+      debug(`[pinest] model ${spec} not applied (${reason}); session holds ${heldNow()}`);
+      return isSubagent
+        ? { modelWarning: `could not use the parent's model ${spec} (${reason}); it ran on ${heldNow()} instead` }
+        : {};
+    }
+    await s.session.setModel(found);
+    const actual = (s.session as any)?.model;
+    const held = heldNow();
+    s.model = held;
+    s.modelName = actual?.name ?? found.name;
+    if (held !== spec) {
+      debug(`[pinest] model ${spec} was requested but the session holds ${held}`);
+      return isSubagent
+        ? { modelWarning: `the parent's model ${spec} was requested but the session holds ${held}` }
+        : {};
+    }
+    return { model: held, modelName: s.modelName ?? undefined };
+  }
+
+  /**
+   * Put a session on a thinking level, through the SAME rule every other path
+   * uses, so "default" means the same thing on a subagent as on the session
+   * that spawned it and as in the app's selector. Applied after the model,
+   * because whether "default" means "omit the reasoning param" depends on it.
+   *
+   * The level REPORTED is the one the session then holds, read back rather than
+   * assumed. A model that cannot do what was asked settles for something else
+   * — measured: a session asked for `high` on a model with no reasoning levels
+   * held `off`, while the run published "high". pi applies the level itself and
+   * silently declines the ones the model does not have, so asking is not
+   * getting.
+   */
+  applyThinkingTo(
+    s: ModelSessionView,
+    wanted: string,
+  ): { thinkingLevel: string; thinkingWarning?: string } {
+    const model = (s.session as any)?.model;
+    const resolved = resolveThinkingLevel(model, wanted);
+    s.session.setThinkingLevel(resolved.set);
+    const held = reportThinkingLevel(model, (s.session as any)?.thinkingLevel);
+    s.thinkingLevel = held;
+    if (held !== wanted) {
+      const reason = `this model has no '${wanted}' reasoning level; it runs at ${held}`;
+      debug(`[pinest] thinking level ${wanted} not held (${reason})`);
+      return { thinkingLevel: held, thinkingWarning: `could not run at the parent's thinking level — ${reason}` };
+    }
+    debug(`[pinest] thinking level ${wanted} held (set ${resolved.set})`);
+    return { thinkingLevel: held };
+  }
+
+
+  /**
+   * Put a session on its parent's footing — the model, then the thinking level,
+   * which depends on the model — and report anything it could not take.
+   *
+   * Both steps are read back, not assumed, and their warnings are joined into
+   * one: a subagent that ran on something other than its parent's model and
+   * thinking did different work than the one that was asked for, and the caller
+   * must be able to say exactly what diverged.
+   */
+  async inheritFrom(
+    s: ModelSessionView,
+    from: { model?: string; thinking?: string },
+    isSubagent: boolean,
+    others: Iterable<ModelSessionView>,
+  ): Promise<AppliedModel> {
+    const warnings: string[] = [];
+    if (from.model) {
+      const applied = await this.applyModelTo(s, from.model, isSubagent, others);
+      if (applied.modelWarning) warnings.push(applied.modelWarning);
+    }
+    if (from.thinking) {
+      const applied = this.applyThinkingTo(s, from.thinking);
+      if (applied.thinkingWarning) warnings.push(applied.thinkingWarning);
+    }
+    return warnings.length > 0 ? { modelWarning: warnings.join("; ") } : {};
+  }
+
 }
