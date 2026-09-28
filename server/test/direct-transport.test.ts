@@ -12,7 +12,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { OFFER_LIFETIME_MS, offerDirectTransport } from "../src/direct-transport.ts";
+import { LANE_LEASE_MS, MAX_LANES, OFFER_LIFETIME_MS, offerDirectTransport } from "../src/direct-transport.ts";
 import type { P2PExchange } from "../src/p2p.ts";
 
 interface FakeExchange extends P2PExchange {
@@ -29,7 +29,7 @@ interface FakeExchange extends P2PExchange {
   fail(error: Error): void;
 }
 
-function harness(options: { startLanes?: string[] } = {}) {
+function harness(options: { startLanes?: string[]; leaseMs?: number } = {}) {
   let clock = 1_000_000;
   const built: FakeExchange[] = [];
   const published: { lane: string; sdp: string; ts: number }[] = [];
@@ -92,6 +92,7 @@ function harness(options: { startLanes?: string[] } = {}) {
     log: (message) => logs.push(message),
     now: () => clock,
     refreshMs: 1_000_000, // the timer never fires; the test drives refresh
+    leaseMs: options.leaseMs,
     startLanes: options.startLanes ?? [defaultLane],
     startExchange,
   });
@@ -463,5 +464,184 @@ test("the lane cap evicts an unconnected client, never a connected one", async (
   await t.ensureLane("client-5");
   assert.equal(t.status().lanes.length, 4);
   assert.ok(!laneNames().includes("client-5"), "nobody is displaced for it");
+  await t.close();
+});
+
+/**
+ * A lane is a LEASE, and the machine's maps are bounded.
+ *
+ * Measured live on this account: the discovery document had reached the eight
+ * entries the deployed rules allow for `clients`, `p2pOffers` and
+ * `p2pAnswers`, and a brand-new client was refused `PERMISSION_DENIED` on its
+ * very first write — while the machine, whose service account bypasses those
+ * same rules, went on publishing as if nothing were wrong. The app's only
+ * honest description of that state was "Machine online, not reachable".
+ *
+ * The lanes in that document were not eight live clients. They were the residue
+ * of clients that had reported once and gone: a closed tab, an old browser
+ * profile, this repo's own verifier lanes. Nothing ever released them, because
+ * the only API that could (`dropLane`) had no caller outside the tests.
+ */
+test("the lane cap holds when every reported client is admitted at once", async () => {
+  // This is the real call shape: one discovery update, and index.ts admits
+  // every reported client in the same tick through Promise.all. Admission
+  // therefore has to be serialized, or each caller reads the same size, decides
+  // there is room, and inserts.
+  const h = harness({ startLanes: [] });
+  const t = await h.transport;
+  const names = ["a", "b", "c", "d", "e", "f", "g"];
+  await Promise.all(names.map((lane) => t.ensureLane(lane)));
+
+  const lanes = t.status().lanes.map((l) => l.lane);
+  assert.ok(
+    lanes.length <= MAX_LANES,
+    `the cap must survive concurrent admission; got ${lanes.length}: ${lanes.join(", ")}`,
+  );
+  await t.close();
+});
+
+test("a client that stops reporting has its lane released, and the offer withdrawn", async () => {
+  const h = harness({ startLanes: [], leaseMs: 60_000 });
+  const t = await h.transport;
+  await t.ensureLane("gone-client");
+  assert.equal(t.status().lanes.length, 1);
+
+  // It reported once and then went away: the tab closed, the app was
+  // uninstalled, the profile was cleared. Nothing distinguishes that from a
+  // client that merely went quiet except the absence of another report.
+  h.advance(60_001);
+  const released = await t.releaseExpiredLanes();
+
+  assert.deepEqual(released, ["gone-client"], "the silent lane is given back");
+  assert.deepEqual(h.retracted, ["gone-client"], "and its offer leaves the document");
+  assert.equal(t.status().lanes.length, 0, "so it costs nothing and holds no slot");
+  assert.equal(h.built[0]!.closed, true, "and its peer is released");
+  await t.close();
+});
+
+test("a client that keeps reporting keeps its lane indefinitely", async () => {
+  const h = harness({ startLanes: [], leaseMs: 60_000 });
+  const t = await h.transport;
+  await t.ensureLane("quiet-but-alive");
+
+  // Many lease periods pass, and the app reports throughout — as it does in
+  // production, on every state change and at least every 30s.
+  for (let i = 0; i < 10; i++) {
+    h.advance(30_000);
+    await t.ensureLane("quiet-but-alive");
+    await t.releaseExpiredLanes();
+  }
+
+  assert.equal(t.status().lanes.length, 1, "a reporting client is never evicted for being slow");
+  assert.deepEqual(h.retracted, [], "and nothing of its is withdrawn");
+  await t.close();
+});
+
+test("stale lanes are released, so a real client can still be served", async () => {
+  const h = harness({ startLanes: [], leaseMs: 60_000 });
+  const t = await h.transport;
+
+  // Fill the machine with clients that each reported once and vanished: the
+  // exact residue that wedged the real document.
+  for (let i = 0; i < MAX_LANES + 2; i++) {
+    await t.ensureLane(`stale-${i}`);
+  }
+  h.advance(60_001);
+  await t.releaseExpiredLanes();
+
+  // The next real client — a second phone, a laptop — finds the machine able
+  // to serve it, which is the whole point of releasing anything.
+  await t.ensureLane("the-real-client");
+  const lanes = t.status().lanes.map((l) => l.lane);
+  assert.deepEqual(lanes, ["the-real-client"], "the machine is free again");
+  await t.close();
+});
+
+test("a connected client is not released while it is still using the machine", async () => {
+  const h = harness({ startLanes: [], leaseMs: 60_000 });
+  const t = await h.transport;
+  await t.ensureLane("in-use");
+  h.built[0]!.connect();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  // Its report goes stale, but its channel is open: it is demonstrably here.
+  h.advance(60_001);
+  const released = await t.releaseExpiredLanes();
+
+  assert.deepEqual(released, [], "an open channel is evidence enough");
+  assert.equal(t.status().lanes.length, 1);
+  await t.close();
+});
+
+// ── The offer's lifetime is bound to the lane's (I-069) ──────────────────────
+//
+// Both of these leak into the SAME bounded map, and both leak silently: the
+// document ends up holding offers that no lane will ever refresh or withdraw,
+// and the app fills a map that is capped at 8. One leaked offer per reload, and
+// one per lane released mid-gather, is enough to wedge the account permanently.
+
+test("an offer whose lane was released while gathering is withdrawn, not published", async () => {
+  const h = harness({ startLanes: [], leaseMs: 60_000 });
+  const t = await h.transport;
+  assert.deepEqual(h.published, []);
+
+  // A client reports and its candidates start gathering.
+  const releaseGather = h.holdNextGather();
+  const admitting = t.ensureLane("slow-client");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(t.status().lanes.length, 1, "the lane exists while it gathers");
+
+  // The client goes away inside that window, which in production is the lease
+  // expiring or the cap evicting it - gathering a whole description takes
+  // seconds, so the window is wide and ordinary.
+  h.advance(120_000);
+  await t.releaseExpiredLanes();
+  assert.equal(t.status().lanes.length, 0, "the silent client lost its lane");
+  releaseGather();
+  await admitting;
+
+  // The publish lands AFTER the retraction. If it is honoured, the document
+  // gains an entry that nothing will ever remove.
+  assert.deepEqual(
+    h.published.map((p) => p.lane),
+    [],
+    "no offer may be published for a lane that no longer exists",
+  );
+  assert.ok(
+    h.retracted.includes("slow-client"),
+    "and the offer that arrived late must be withdrawn, not left behind",
+  );
+  await t.close();
+});
+
+test("closing the transport withdraws every offer it still holds", async () => {
+  const h = harness({ startLanes: ["a", "b", "c"], leaseMs: 60_000 });
+  const t = await h.transport;
+  assert.deepEqual(
+    h.published.map((p) => p.lane).sort(),
+    ["a", "b", "c"],
+  );
+  assert.deepEqual(h.retracted, []);
+
+  await t.close();
+
+  // A reload closes the transport and immediately re-imports the extension.
+  // Anything left in the document is now an offer with no lane behind it, and
+  // the new instance will never know to withdraw it.
+  assert.deepEqual(
+    h.retracted.slice().sort(),
+    ["a", "b", "c"],
+    "every offer must be withdrawn before the lanes are released",
+  );
+  assert.equal(t.status().lanes.length, 0);
+});
+
+test("an offer published for a live lane is not withdrawn by the guard", async () => {
+  const h = harness({ startLanes: [], leaseMs: 60_000 });
+  const t = await h.transport;
+  await t.ensureLane("stays");
+  assert.deepEqual(h.published.map((p) => p.lane), ["stays"]);
+  assert.deepEqual(h.retracted, [], "a live lane's offer must survive the guard");
   await t.close();
 });

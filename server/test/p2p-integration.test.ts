@@ -181,6 +181,11 @@ async function joined(
     onAnswer: (handler) => {
       feedAnswer = handler;
     },
+    // Required by the transport, and no longer dead: closing a transport
+    // withdraws the offers it published, so a reload cannot leave one behind
+    // in the document. This harness answers everything from the offer it is
+    // given, so it has nothing to withdraw.
+    retractOffer: async () => {},
     log: (message) => {
       if (message.includes("failed") || message.includes("no channel")) failures.push(message);
     },

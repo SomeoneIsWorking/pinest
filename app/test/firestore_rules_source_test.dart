@@ -34,6 +34,34 @@ void main() {
   final rules = File('firestore.rules').readAsStringSync();
   final normalized = rules.replaceAll(RegExp(r'\s+'), ' ');
 
+  // The two bounds are set in different repositories and must not drift: the
+  // machine's own limit lives in server/src/direct-transport.ts, and the rules
+  // limit lives here. Nothing at runtime compares them, and the failure when
+  // they cross is silent and total — the machine keeps publishing through its
+  // service account while every client write is refused, which is exactly the
+  // "Machine online, not reachable" state that sent this to the top of a bug
+  // report. So the relationship is asserted here, across the two files.
+  test('the rules bound leaves headroom above the machine\'s own lane cap', () {
+    final transport = File('../server/src/direct-transport.ts').readAsStringSync();
+    final cap = RegExp(r'export const MAX_LANES = (\d+);').firstMatch(transport);
+    expect(cap, isNotNull, reason: 'MAX_LANES must be declared for this to mean anything');
+    final machineLanes = int.parse(cap!.group(1)!);
+
+    for (final field in [...signalingFields, 'clients']) {
+      final bound = RegExp('data\\.$field is map && data\\.$field.size\\(\\) <= (\\d+)')
+          .firstMatch(normalized);
+      expect(bound, isNotNull, reason: '$field must stay a bounded map');
+      final rulesLimit = int.parse(bound!.group(1)!);
+      expect(
+        rulesLimit,
+        greaterThan(machineLanes),
+        reason: 'the rules cap $field at $rulesLimit, but the machine holds up to '
+            '\$machineLanes lanes and bypasses these rules — a client write must '
+            'never be refused because the machine filled the map',
+      );
+    }
+  });
+
   test('owner can get only the document bound to the token uid', () {
     expect(
       normalized,
@@ -96,8 +124,13 @@ void main() {
         reason: 'signaling key set omitted $field',
       );
     }
-    expect(normalized, contains('data.p2pOffers is map && data.p2pOffers.size() <= 8'));
-    expect(normalized, contains('data.p2pAnswers is map && data.p2pAnswers.size() <= 8'));
+    // The bound must stay ABOVE the machine's own MAX_LANES: the machine
+    // writes with a service account that bypasses these rules, so a bound set
+    // AT its limit fails the moment a client and the machine overlap during a
+    // handover — measured live as PERMISSION_DENIED on every client write
+    // while the machine carried on publishing. See the comment in the rules.
+    expect(normalized, contains('data.p2pOffers is map && data.p2pOffers.size() <= 16'));
+    expect(normalized, contains('data.p2pAnswers is map && data.p2pAnswers.size() <= 16'));
     // Every field a writer may touch must appear in the document key whitelist,
     // or the write is refused no matter which exemption matches it.
     final presenceKeys = _keyList(normalized, 'data.keys().hasOnly(').toSet();
@@ -138,7 +171,10 @@ void main() {
     // Client-supplied state inside the owner's document: shape-checked and
     // size-capped before it is stored at all.
     expect(normalized, contains('function hasValidClientReport()'));
-    expect(normalized, contains('data.clients is map && data.clients.size() <= 8'));
+    // Bounded, with the same headroom as the signaling maps and for the same
+    // reason: this map is written ONLY by clients, so a bound that the
+    // machine can overrun is a bound that eventually refuses every client.
+    expect(normalized, contains('data.clients is map && data.clients.size() <= 16'));
     expect(normalized, contains('data.clientReload is int'));
     expect(normalized, contains('hasValidClientReport()'));
     expect(normalized, contains('touchesOnlyClientReport()'));

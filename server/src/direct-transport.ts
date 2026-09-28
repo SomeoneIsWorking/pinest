@@ -51,8 +51,37 @@ export const REFRESH_TICK_MS = 5_000;
  * a gathered offer, a peer connection, its ICE timers and a bridge, so the
  * number of them is this machine's resource decision - not something the
  * document can impose by mentioning more clients. Reaching the cap evicts the
- * oldest UNCONNECTED lane; a client that is connected is never evicted. */
+ * oldest UNCONNECTED lane; a client that is connected is never evicted.
+ *
+ * Measured against the deployed rules, which cap `clients`, `p2pOffers` and
+ * `p2pAnswers`. That bound has to stay ABOVE this cap, because the machine's
+ * own writes use a service account (which bypasses rules) while the APP's
+ * writes are rule-checked: a machine holding more lanes than the rules allow
+ * fills the map with offers the app can no longer write its answer beside, and
+ * every client write starts failing with a bare 403. The app then reports
+ * "machine online, not reachable" with no reason on either side.
+ * `app/test/firestore_rules_source_test.dart` reads this constant out of this
+ * file and fails if the two ever cross, because nothing at runtime compares
+ * them and the failure is silent and total. */
 export const MAX_LANES = 4;
+
+/** How long a client may go without a report before its lane is released.
+ *
+ * A lane is a claim on this machine's resources and on three bounded maps in
+ * the discovery document, and nothing else ever gives it back: a closed tab, an
+ * uninstalled app, or a browser profile that was cleared all stop writing and
+ * are indistinguishable from a client that merely went quiet. Left alone they
+ * accumulate until the document cannot hold another client at all - measured
+ * live on this account: eight stale lanes, and a brand-new client refused with
+ * `PERMISSION_DENIED` on its very first write while the machine went on
+ * publishing as if nothing were wrong.
+ *
+ * So a lane is a LEASE, renewed by the client's own report, and this is how
+ * long it survives without one. It is generous because a real client only
+ * reports on a change of state and at most every 30s, and a phone that loses
+ * its network for a minute must not lose its lane; it is short enough that the
+ * maps cannot fill between two honest clients. */
+export const LANE_LEASE_MS = 180_000;
 
 /** One lane, as a reader of the status needs it: which client, whether it is
  * connected, and how much has crossed. The aggregate below answers "is anything
@@ -116,6 +145,9 @@ export interface DirectTransportOptions {
   startLanes?: string[];
   /** Stateless STUN servers; defaults to the shared list. */
   stunServers?: string[];
+  /** How long a client may go unheard before its lane is released. Defaults to
+   * `LANE_LEASE_MS`; tests drive a short one rather than waiting minutes. */
+  leaseMs?: number;
   log(message: string): void;
   now?: () => number;
   /** How often to check each offer's lifetime; tests drive it directly. */
@@ -131,10 +163,15 @@ export interface DirectTransport {
   status: () => DirectTransportStatus;
   /** Open a lane for this client if it has none, so a client that has just
    * appeared gets an offer of its own. Idempotent: a client with a lane (open
-   * or not) keeps it. */
+   * or not) keeps it, and every call RENEWS that lane's lease, because a
+   * client report is the only evidence that client is still there. */
   ensureLane: (lane: string) => Promise<void>;
   /** Close a lane and withdraw its offer. Idempotent. */
   dropLane: (lane: string) => Promise<void>;
+  /** Release every lane whose client has not been heard from within the lease,
+   * and return which those were. Called by the timer; exposed so a test can
+   * drive time instead of waiting. */
+  releaseExpiredLanes: () => Promise<string[]>;
   /** Check every lane's offer lifetime and refresh the stale ones. Called by
    * the timer; exposed so a test can drive time instead of waiting. */
   refreshIfStale: () => Promise<void>;
@@ -167,6 +204,10 @@ interface Lane {
   channelCloses: number;
   framesToServer: number;
   framesToClient: number;
+  /** When this client was last heard from, by THIS machine's clock. The lease
+   * that keeps the lane: a client that stops reporting lets it expire, which is
+   * the only thing that ever gives a lane back. */
+  lastSeenAt: number;
 }
 
 export async function offerDirectTransport(
@@ -174,6 +215,7 @@ export async function offerDirectTransport(
 ): Promise<DirectTransport> {
   const { port, log } = options;
   const now = options.now ?? Date.now;
+  const leaseMs = options.leaseMs ?? LANE_LEASE_MS;
   const lanes = new Map<string, Lane>();
   let exchanges = 0;
   let channelCloses = 0;
@@ -184,6 +226,22 @@ export async function offerDirectTransport(
   let framesToClient = 0;
   let bridgeSocket: string | null = null;
   let closed = false;
+
+  /** Serialise lane admission, so the cap is a real count.
+   *
+   * Admission is a read of `lanes.size`, a decision, and a write - and this
+   * function is called concurrently by design, once per reported client in a
+   * single discovery update. Run in parallel, every one of those callers reads
+   * the same size, decides there is room, and inserts: the cap holds for
+   * nobody. Chaining them makes the check and the insert consecutive, which is
+   * the only property the cap actually needs. Failures do not poison the queue:
+   * one client's refusal must not stop the next client being admitted. */
+  let admission: Promise<unknown> = Promise.resolve();
+  const admit = <T>(work: () => Promise<T>): Promise<T> => {
+    const result = admission.then(work, work);
+    admission = result.then(() => undefined, () => undefined);
+    return result;
+  };
 
   const label = (lane: string): string => `lane ${lane}`;
 
@@ -229,7 +287,25 @@ export async function offerDirectTransport(
       stunServers: options.stunServers ?? DEFAULT_STUN,
       log: (message) => log(`direct transport: ${message}`),
     }));
-    const peer = build((sdp, publishedTs) => options.publishOffer(laneId, sdp, publishedTs));
+    // Publishing is BOUND to this lane's life, not to the peer connection's.
+    // Gathering candidates takes seconds, and a lane can be released inside
+    // that window - by the lease expiring, by the cap evicting it, or by the
+    // whole transport closing. The offer then arrives after its own retraction
+    // and stays in the document with nothing left to refresh or withdraw it: a
+    // permanent entry in a bounded map, which is how one account filled eight
+    // slots with offers no client could use (I-069). Withdrawing is the
+    // idempotent direction - if this lane was never published, the retraction
+    // is a no-op rather than an error.
+    const laneRef: { current: Lane | null } = { current: null };
+    const publishIfLive = async (sdp: string, publishedTs: number): Promise<void> => {
+      if (closed || !laneRef.current || lanes.get(laneId) !== laneRef.current) {
+        log(`direct transport: ${label(laneId)} was released while its candidates were gathering; withdrawing its offer`);
+        await options.retractOffer(laneId);
+        return;
+      }
+      await options.publishOffer(laneId, sdp, publishedTs);
+    };
+    const peer = build(publishIfLive);
     const previous = lanes.get(laneId);
     const lane: Lane = {
       id: laneId,
@@ -245,8 +321,12 @@ export async function offerDirectTransport(
       channelCloses: previous?.channelCloses ?? 0,
       framesToServer: previous?.framesToServer ?? 0,
       framesToClient: previous?.framesToClient ?? 0,
+      // A replacement exchange inherits the lane's lease: it is the same
+      // client, still evidenced by the same report.
+      lastSeenAt: previous?.lastSeenAt ?? now(),
     };
     lanes.set(laneId, lane);
+    laneRef.current = lane;
     exchanges += 1;
     // Published before anything can answer it, and kept: a punch that lands
     // after a replacement was gathered puts THIS description back.
@@ -287,6 +367,10 @@ export async function offerDirectTransport(
           }
         }
         lane.channelOpen = true;
+        // A client that is actually connected is obviously still there, so its
+        // lease is renewed on the strongest evidence available rather than
+        // waiting for its next report.
+        lane.lastSeenAt = now();
         log(`direct transport: both channels open on ${label(laneId)}, bridging to the loopback server`);
         bridges += 1;
         const bridge: LoopbackBridge = bridgeToLoopback(channels, port, {
@@ -405,7 +489,37 @@ export async function offerDirectTransport(
     await options.retractOffer(laneId);
   };
 
+  /** Give back every lane whose client has stopped reporting.
+   *
+   * This is the only path that returns a lane. Without it a closed tab, an
+   * uninstalled app, or a cleared browser profile keeps a peer connection, a
+   * gathered offer and a slot in three bounded maps forever, and the document
+   * eventually cannot hold a real client at all - measured live on this
+   * account: a brand-new client refused with `PERMISSION_DENIED` on its first
+   * write while the machine went on publishing as if nothing were wrong.
+   *
+   * A lane whose channel is OPEN is never released, however stale its report:
+   * an open channel is stronger evidence of a live client than a report is,
+   * and a user with a working session must never be disconnected to make room
+   * for someone else. */
+  const releaseExpiredLanes = async (): Promise<string[]> => {
+    if (closed) return [];
+    const expired = [...lanes.values()]
+      .filter((lane) => !lane.channelOpen && now() - lane.lastSeenAt > leaseMs)
+      .map((lane) => lane.id);
+    for (const laneId of expired) {
+      const silentMs = now() - (lanes.get(laneId)?.lastSeenAt ?? 0);
+      log(`direct transport: ${label(laneId)} has not reported for ${Math.round(silentMs / 1000)}s; releasing its lane`);
+      await closeLane(laneId);
+    }
+    return expired;
+  };
+
   const timer = setInterval(() => {
+    void releaseExpiredLanes().catch((error: Error) => {
+      lastError = error.message;
+      log(`direct transport: releasing an expired lane failed: ${error.message}`);
+    });
     void refreshIfStale().catch((error: Error) => {
       lastError = error.message;
       log(`direct transport: refresh failed: ${error.message}`);
@@ -419,26 +533,42 @@ export async function offerDirectTransport(
 
   return {
     refreshIfStale,
+    releaseExpiredLanes,
     ensureLane: async (laneId) => {
-      if (closed || !laneId || lanes.has(laneId)) return;
-      if (lanes.size >= MAX_LANES) {
-        // Over the cap: evict the oldest lane that is NOT connected. A client
-        // is only ever dropped for a newer one, never for its own age, and
-        // never while it is using the connection. If every lane is connected
-        // the newcomer waits, which is the honest answer: the machine is at
-        // capacity rather than pretending it took the connection.
-        const victim = [...lanes.values()]
-          .filter((lane) => !lane.channelOpen)
-          .sort((a, b) => a.offerTs - b.offerTs)[0];
-        if (!victim) {
-          log(`direct transport: ${label(laneId)} is waiting; all ${MAX_LANES} lanes are in use`);
+      if (closed || !laneId) return;
+      // The cap is a COUNT, so admitting a lane is a compare-and-set on that
+      // count. Awaiting anything between the check and the insert lets two
+      // callers both pass the check and both insert, and this is reached by
+      // design from `Promise.all` over every reported client in one discovery
+      // update - measured live: six lanes against a cap of four. The admission
+      // queue is what makes the check and the insert one step.
+      return admit(async () => {
+        const existing = lanes.get(laneId);
+        if (existing) {
+          // Already here: renew the lease. A client that keeps reporting keeps
+          // its lane; that is the whole contract.
+          existing.lastSeenAt = now();
           return;
         }
-        log(`direct transport: at the ${MAX_LANES}-lane cap; dropping ${label(victim.id)} for ${label(laneId)}`);
-        await closeLane(victim.id);
-      }
-      log(`direct transport: opening a lane for ${label(laneId)}`);
-      await beginExchange(laneId);
+        if (lanes.size >= MAX_LANES) {
+          // Over the cap: evict the oldest lane that is NOT connected. A client
+          // is only ever dropped for a newer one, never for its own age, and
+          // never while it is using the connection. If every lane is connected
+          // the newcomer waits, which is the honest answer: the machine is at
+          // capacity rather than pretending it took the connection.
+          const victim = [...lanes.values()]
+            .filter((lane) => !lane.channelOpen)
+            .sort((a, b) => a.offerTs - b.offerTs)[0];
+          if (!victim) {
+            log(`direct transport: ${label(laneId)} is waiting; all ${MAX_LANES} lanes are in use`);
+            return;
+          }
+          log(`direct transport: at the ${MAX_LANES}-lane cap; dropping ${label(victim.id)} for ${label(laneId)}`);
+          await closeLane(victim.id);
+        }
+        log(`direct transport: opening a lane for ${label(laneId)}`);
+        await beginExchange(laneId);
+      });
     },
     dropLane: closeLane,
     status: () => {
@@ -479,8 +609,24 @@ export async function offerDirectTransport(
     close: async () => {
       closed = true;
       clearInterval(timer);
-      for (const lane of lanes.values()) lane.peer.close();
-      lanes.clear();
+      // An offer outlives nothing. Closing the transport while it still holds
+      // lanes would leave their offers in the document with no lane to refresh
+      // or withdraw them, and a reload does exactly this - so a reload used to
+      // leak up to MAX_LANES entries into a map the app can fill, every time,
+      // forever. Withdraw first, then release the peers.
+      //
+      // The peers are released even if a withdrawal FAILS, and the failure is
+      // still reported: a peer left open keeps its ICE timers and the loopback
+      // socket, which is both a resource leak and a reason the process cannot
+      // exit at all.
+      try {
+        for (const laneId of [...lanes.keys()]) {
+          await options.retractOffer(laneId);
+        }
+      } finally {
+        for (const lane of lanes.values()) lane.peer.close();
+        lanes.clear();
+      }
     },
   };
 }

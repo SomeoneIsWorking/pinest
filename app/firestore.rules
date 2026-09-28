@@ -27,12 +27,22 @@ service cloud.firestore {
         ));
     }
 
+    // The maps are bounded so a compromised or buggy client cannot fill the
+    // document, and the bound is deliberately ABOVE what the machine itself
+    // uses: the machine's own writes use a service account and bypass these
+    // rules, while every client write is checked against them. A cap set AT
+    // the machine's own limit therefore fails the moment the two overlap
+    // during a handover - measured live: eight lanes filled `clients`, and
+    // every client write came back PERMISSION_DENIED while the machine went on
+    // publishing as if nothing were wrong. Headroom is what keeps that
+    // impossible; `MAX_LANES` in server/src/direct-transport.ts owns the real
+    // limit, and the lease there keeps the maps far below this bound.
     function hasValidSignaling() {
       let data = request.resource.data;
       return (!data.keys().hasAny(['p2pOffers'])
-          || (data.p2pOffers is map && data.p2pOffers.size() <= 8))
+          || (data.p2pOffers is map && data.p2pOffers.size() <= 16))
         && (!data.keys().hasAny(['p2pAnswers'])
-          || (data.p2pAnswers is map && data.p2pAnswers.size() <= 8));
+          || (data.p2pAnswers is map && data.p2pAnswers.size() <= 16));
     }
 
     // The app's own report about itself: bounded, shape-checked, and carrying
@@ -41,7 +51,7 @@ service cloud.firestore {
     function hasValidClientReport() {
       let data = request.resource.data;
       return (!data.keys().hasAny(['clients'])
-          || (data.clients is map && data.clients.size() <= 8))
+          || (data.clients is map && data.clients.size() <= 16))
         && (!data.keys().hasAny(['clientReload']) || data.clientReload is int);
     }
 
