@@ -12,6 +12,9 @@ import 'control_channel.dart';
 import 'client_identity.dart';
 import '../logic/client_lane.dart';
 import '../logic/client_report.dart';
+import '../logic/builtin_host.dart';
+import 'builtin_host_connector.dart';
+import 'client_report_writer.dart';
 import '../logic/discovery_document.dart';
 import '../logic/discovery_watch.dart';
 import '../logic/command_id.dart';
@@ -117,17 +120,18 @@ class AgentService extends ChangeNotifier {
   /// `_directStatus`; this is the mirror, so both ends are visible in one place.
   String? _machineSeesClient;
 
-  /// The browser's view of itself. Written on every notable transition
-  /// (throttled), and the machine's reload request is obeyed here: it is the
-  /// only way a stale tab gets fixed without a human.
+  /// The browser's view of itself, throttled by the reporter, which also obeys
+  /// the machine's reload request - the only way a stale tab gets fixed without
+  /// a human.
   late final ClientReporter _clientReport = ClientReporter(
     loadedAtMs: _loadedAtMs,
     write: _writeClientReport,
     reload: reloadPage,
   );
 
-  /// This install's unique, persisted lane id in the discovery document.
   final ClientIdentity _clientId = ClientIdentity();
+  late final ClientReportWriter _clientReports =
+      ClientReportWriter(db: FirebaseFirestore.instance, clientId: _clientId);
 
   AgentService() {
     unawaited(_clientId.ensure());
@@ -137,11 +141,9 @@ class AgentService extends ChangeNotifier {
   /// page has already had its effect and must not cause a reload loop.
   final int _loadedAtMs = DateTime.now().millisecondsSinceEpoch;
 
-  /// Whether the machine itself is up, judged from its own published presence
-  /// rather than from whether this app could reach it.
-  ///
-  /// The window is generous on purpose: the machine republishes every ~20s, so
-  /// anything inside two minutes is a live machine rather than a stale record.
+  /// Whether the machine is up, from its own published presence rather than
+  /// from whether this app could reach it. The window is generous on purpose:
+  /// the machine republishes every ~40s, so two minutes is live, not stale.
   bool get machinePublishing =>
       _machineSaidOnline &&
       DateTime.now().millisecondsSinceEpoch - _machineSeenAt < 120000;
@@ -150,16 +152,14 @@ class AgentService extends ChangeNotifier {
   /// Format it with `formatRelativeTime`, not a second formatter here.
   int get machineSeenAt => _machineSeenAt;
 
-  /// The endpoint of the attempt being reported, so the reason can name it.
-  Uri? _dialTarget;
+  Uri? _dialTarget; // the attempt being reported, so the reason can name it
 
   /// Why THIS APP could not read the discovery document, in Google's words.
-  ///
   /// Kept apart from the generic note because it is the one failure where the
-  /// app, not the machine, is the broken end — see machine_presence.dart, which
-  /// owns that distinction and the reasoning behind it.
+  /// app, not the machine, is the broken end (machine_presence.dart).
   String? _discoveryError;
   String? get discoveryError => _discoveryError;
+  final BuiltInHostConnector _builtInHost = const BuiltInHostConnector();
   final MachineDiscoveryWatch _discoveryWatch =
       MachineDiscoveryWatch(db: FirebaseFirestore.instance);
 
@@ -245,24 +245,7 @@ class AgentService extends ChangeNotifier {
     if (uid == null) {
       throw StateError('no uid to report the client state for');
     }
-    // Under this client's own key: several apps can be signed in at once, and a
-    // report written to the flat field would let the last writer speak for all
-    // of them (and cost the others their lanes, since a lane exists while a
-    // report does).
-    //
-    // `mergeFields` names THIS client's own lane, so the entry is replaced
-    // whole while every other client's lane is left alone. `merge: true` would
-    // deep-merge into it, and the report OMITS fields that no longer apply -
-    // `direct.failure` is written when a punch fails and simply left out once it
-    // succeeds. Under a deep merge that failure is then never removed, so a
-    // client that has recovered keeps reporting the failure that has not
-    // happened since, and the machine's own diagnostics - the summary shown to
-    // the user - contradict the live state beside them (I-069).
-    final clientId = await _clientId.ensure();
-    await _db.collection('users').doc(uid).set(
-      clientLaneFields(clientId, payload),
-      SetOptions(mergeFields: clientLaneWritePath(clientId)),
-    );
+    await _clientReports.write(uid, payload);
   }
 
   /// Transient server messages the user must SEE: `notice` (something they
@@ -317,7 +300,26 @@ class AgentService extends ChangeNotifier {
       forgetEndpoint: true,
       clearClientState: true,
     );
-    if (uid != null) _watchDiscovery(uid);
+    if (uid == null) return;
+    // A build given its host up front never looks one up: no discovery document,
+    // so no metered service in the path. The Google credential is unchanged —
+    // only the lookup is gone (builtin_host.dart).
+    if (hasBuiltInHost) {
+      // A build given its host never looks one up: no discovery document, so no
+      // metered service in the path. Google auth is unchanged; only the lookup
+      // is gone (builtin_host.dart, builtin_host_connector.dart).
+      _builtInHost.connect(
+        dial: (endpoint) {
+          _lastEndpoint = endpoint;
+          _dialTarget = endpoint;
+          unawaited(_dial(endpoint));
+        },
+        note: _note,
+      );
+      notifyListeners();
+      return;
+    }
+    _watchDiscovery(uid);
   }
 
   /// The single transition out of a connected/dialing state.
