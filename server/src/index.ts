@@ -1132,10 +1132,11 @@ const remoteCode = (pi: ExtensionAPI): void => {
   });
   registerBashIntegration(pi, { bgManager: _bgManager, sessionId: _sessionId });
   registerBackgroundTools(pi, _bgManager, _sessionId);
-  // The host fans out like any other session. The supervisor is built during
-  // bootstrap, after this wiring runs, so the helper resolves it when the tool
-  // is CALLED rather than capturing one that does not exist yet.
-  registerSubagentTools(pi, hostSubagentToolDeps(() => _supervisor, () => _sessionId), _sessionId);
+  // The host fans out like any other session. Both the supervisor and the host's
+  // own row id are read when the tool is CALLED: this runs before bootstrap,
+  // which rebinds `_sessionId` to the registry's host row, so either one
+  // captured here would name something that does not exist.
+  registerSubagentTools(pi, hostSubagentToolDeps(() => _supervisor, () => _sessionId));
 
   // Chokepoint on HOST message delivery: stale tool closures from before a
   // reload (orphaned managers whose delivery code never updates) still call

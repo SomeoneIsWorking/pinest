@@ -77,6 +77,24 @@ because the caller remembered to pass it.
   - `--no-inherit` — a child that does not inherit runs on the default model and
     the drill fails on exactly that, which is the reported defect.
 
+## Live confirmation
+
+On the reported model, a real `pi` host, one tool call by the real model:
+
+```
+[pinest] thinking level medium held (set medium)
+[pinest] subagent cc9f48ea-… spawned by 8d1fe853-… ("probe2")
+         on opencode/space-bunny-free thinking:medium
+```
+
+and the tool result, quoted by the model verbatim:
+
+> Ran on opencode/space-bunny-free, thinking medium — the same as its parent.
+
+That run also found a second, independent defect — the host's own id was
+captured before bootstrap rebound it, so the host could not fan out at all. It
+is `docs/issues/0072-the-host-could-not-fan-out-at-all.md`.
+
 ## Notes for the next reader
 
 - The parent's own thinking level was being stored as the level that was asked
