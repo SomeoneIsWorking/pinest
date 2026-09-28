@@ -50,7 +50,7 @@ import { registerBackgroundTools, handleJobCommand } from "./background-tools.ts
 import { hostSubagentToolDeps, registerSubagentTools } from "./subagent-tools.ts";
 import { StreamSegmenter } from "./stream.ts";
 import { loadConfig, saveConfig } from "./config.ts";
-import { resolveHostIdentity, type HostVerify } from "./host-identity.ts";
+import { resolveHostIdentity } from "./host-identity.ts";
 import { normalizeGoal } from "./session-goal.ts";
 import type { GoalSink } from "./session-goal.ts";
 import { registerHostCommands, showSessionsFlow, type HostCommandDeps } from "./host-commands.ts";
@@ -98,7 +98,6 @@ const REGISTRY_PATH = process.env.RC_REGISTRY_PATH
 // Either way a failure must not crash the pi host: remote control stays
 // offline with the reason visible.
 let _fb: FirebaseAuth | null = null;
-let _pairing: HostVerify | null = null;
 
 function firebase(): FirebaseAuth {
   if (_fb) return _fb;
@@ -460,11 +459,10 @@ async function bootstrap(): Promise<void> {
   // quota error that can leave the host unable to start.
   const identity = await resolveHostIdentity({ interactive: _ctx?.mode === "tui" });
   const { uid, email } = identity;
-  _fb = identity.fb;
-  _pairing = identity.kind === "paired" ? identity.verify : null;
+  _fb = identity.discovery;
   _ownerUid = uid;
   _ownerEmail = email;
-  debug(`[remote-code] ${identity.kind} identity · owner ${email} · session ${_sessionId}`);
+  debug(`[remote-code] owner ${email} · discovery ${identity.discovery ? "firestore" : "none"}`);
 
   // Persistence and owner binding are authorization authorities, not optional
   // features. An unusable registry aborts remote bootstrap; continuing with
@@ -523,7 +521,8 @@ async function bootstrap(): Promise<void> {
 
   // Start WebSocket server + tunnel
   _ws = new WSServer({ port: 0, expectedUid: uid });
-  _ws.setVerifyFn(async (token) => (_pairing ?? identity.verify)(token));
+  // Always the client's own Google token: there is no second credential.
+  _ws.setVerifyFn(identity.verify);
   _ws.on("command", (cmd) => { void handleCommand(cmd); });
   // The HTTP routes get the same dispatcher, with refusals propagating so they
   // can be answered with a status code instead of an unread push.
@@ -709,7 +708,7 @@ const sessions = createSessionLifecycle({
  * only once the control port is real: the bridge dials it. */
 async function startDirectTransport(): Promise<void> {
   if (loadConfig().p2p !== true) return;
-  if (_pairing) return; // paired: no document to signal in (host-identity.ts)
+  if (!_fb) return; // no discovery document to signal in
   const port = _ws?.controlPort;
   if (!port) {
     debug("[remote-code] p2p: no control port yet, not offering a direct transport");
@@ -830,9 +829,9 @@ async function dispatchCommand(command: ClientCommand): Promise<void> {
         // A paired machine has no document to write into, so there is nothing
         // to reload a browser through: say so rather than reporting a failure.
         if (!_fb || !_ownerUid) {
-          broadcast(_pairing
-            ? { type: "notice", message: "[pinest] reload is a Firebase feature; a paired app reloads by pairing again" }
-            : { type: "error", message: "[pinest] no owner to reload" });
+          broadcast(_fb
+            ? { type: "error", message: "[pinest] no owner to reload" }
+            : { type: "notice", message: "[pinest] reload rides the discovery document; this host publishes none" });
           return;
         }
         const at = Date.now();
