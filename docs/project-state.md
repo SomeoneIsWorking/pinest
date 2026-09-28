@@ -58,7 +58,7 @@ the app's drawer does the same and a subagent's own tab carries a banner with
 the parent, the task and the verdict. A subagent is a session, so opening,
 prompting, stopping and deleting it work with no new plumbing.
 
-Verified with 30 new server tests, 11 client tests, and
+Verified with 32 new server tests, 13 client tests, and
 `drills/subagent-fanout.mjs` against real AgentSessions and a real model, whose
 `--negative` control (the same request to a model with no such tool) fails as it
 must. The drill found two defects the unit tests could not: a child that was

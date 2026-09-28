@@ -58,14 +58,15 @@ terminal instead of being a log line.
 - `server/test/sessions-view.test.ts` (5 new) — the TUI tree, its labels, its
   indent, and that a subagent row opens and filters like any other.
 - `app/test/subagent_view_test.dart` (11) — the model, the grouping, the
-  banner.
+  banner; `app/test/session_store_test.dart` (2 new) — the same on the wire path,
+  because a subagent the state frame does not carry is invisible.
 - `drills/subagent-fanout.mjs` — the chain against **real AgentSessions** and a
   real (local, fake) model: the model's own `subagent` tool call executes, a
   second real session is opened, the child's turn is what the tool waits for,
   the report comes back to the parent, and `running → completed` is published
   with the child's history. `--negative` runs the same request against a model
   with no such tool and must fail, which it does.
-- Gates: `npm test` 619 tests / 615 pass / 0 fail / 4 skipped, `npm run typecheck`
+- Gates: `npm test` 625 tests / 621 pass / 0 fail / 4 skipped, `npm run typecheck`
   clean, `flutter analyze` 0 issues, `flutter test` 216 pass, structure check
   passed (the subagent composition was extracted rather than growing
   `supervisor.ts` past its 1,200-line limit).
