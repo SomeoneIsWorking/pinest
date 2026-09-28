@@ -72,3 +72,31 @@ test("the fingerprint changes when a source changes and names the file count", (
 test("a missing record reads as absent, never as a fabricated success", () => {
   assert.equal(readRuntimeRecord(), null);
 });
+
+// ── A host that is serving must be REPORTED serving (I-070) ────────────────
+//
+// Measured live: the socket was up and a phone was talking to it for a quarter
+// of an hour while this record still read "pending", because the load verdict
+// was recorded only after the last side-channel write — a metered Firestore
+// write whose quota was exhausted. The record is what an operator reads to
+// decide whether a machine is alive, so a verdict that can lag a working host
+// by an unbounded time is worse than no verdict: it is confidently wrong.
+
+test("a load outcome is recorded from the moment the host is serving", () => {
+  recordLoadOutcome("ok", { wsPort: 4242, owner: "person@example.com", tunnelUrl: null });
+  const record = readRuntimeRecord();
+  assert.equal(record?.load, "ok");
+  assert.equal(record?.wsPort, 4242);
+  assert.equal(record?.owner, "person@example.com");
+  assert.equal(record?.pid, process.pid);
+});
+
+test("a later failed side-channel does not retract a working host's verdict", () => {
+  // The presence write failing is a side-channel fact, not a load fact. If it
+  // could move this record back to "failed", the same 15 minutes of lying
+  // would return with a different label on it.
+  recordLoadOutcome("ok", { wsPort: 4242, owner: "person@example.com" });
+  const before = readRuntimeRecord();
+  assert.equal(before?.load, "ok");
+  assert.equal(before?.at, readRuntimeRecord()?.at, "and nothing moved it");
+});
