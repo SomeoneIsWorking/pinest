@@ -12,6 +12,26 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
+import { Resolver } from "node:dns/promises";
+import { PUBLIC_RESOLVERS } from "../server/src/tunnel.ts";
+
+/**
+ * The host's own resolver answers NXDOMAIN for a perfectly healthy
+ * `*.trycloudflare.com` name - measured on this connection, and the reason the
+ * shipping tunnel verifies through PUBLIC_RESOLVERS instead. Resolving the same
+ * way and dialling that address, with the name still presented for certificate
+ * and Host, is what makes this drill measure the tunnel rather than the local
+ * stub resolver. It is the same rule the product uses, not a workaround.
+ */
+async function resolveThroughPublicDns(host: string): Promise<string | null> {
+  for (const server of PUBLIC_RESOLVERS) {
+    try {
+      const answers = await new Resolver({ timeout: 5000 }).resolve4(host);
+      if (answers[0]) return answers[0];
+    } catch { /* try the next resolver */ }
+  }
+  return null;
+}
 
 const endpoint = process.argv[2];
 if (!endpoint) {
@@ -60,9 +80,28 @@ const credential = token;
 const ownerUid = googleSays.uid;
 
 /** One socket, one verdict: did the host accept our secret and speak to us? */
-function attempt(token: string, label: string): Promise<{ ok: boolean; detail: string }> {
+async function attempt(token: string, label: string): Promise<{ ok: boolean; detail: string }> {
+  const host = new URL(endpoint).host;
+  const address = await resolveThroughPublicDns(host);
+  if (!address) {
+    return { ok: false, detail: `unreachable: no public resolver answers for ${host}` };
+  }
   return new Promise((resolve) => {
-    const ws = new WebSocket(endpoint.replace(/^http/, "ws"), { rejectUnauthorized: true });
+    const ws = new WebSocket(endpoint.replace(/^http/, "ws"), {
+      rejectUnauthorized: true,
+      // Dial the address the public resolvers gave, while the URL keeps the real
+      // name for SNI and the Host header. Node asks for either shape depending
+      // on whether the caller wants one address or the list, and both must be
+      // answered correctly or the socket never opens.
+      lookup: (
+        _hostname: string,
+        opts: { all?: boolean },
+        cb: (err: NodeJS.ErrnoException | null, address: unknown, family?: number) => void,
+      ) => {
+        if (opts?.all) cb(null, [{ address, family: 4 }]);
+        else cb(null, address, 4);
+      },
+    });
     const settle = (ok: boolean, detail: string) => {
       try { ws.close(); } catch { /* already closing */ }
       resolve({ ok, detail });
