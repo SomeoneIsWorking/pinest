@@ -645,3 +645,94 @@ test("an offer published for a live lane is not withdrawn by the guard", async (
   assert.deepEqual(h.retracted, [], "a live lane's offer must survive the guard");
   await t.close();
 });
+
+// ── A report is a heartbeat only while it ADVANCES (I-069) ──────────────────
+//
+// The entry a client leaves under `clients.<id>` is never deleted - only the
+// client could do that, and a closed tab cannot - so a report from a client that
+// left is still in the document and is redelivered on every discovery update.
+// Renewing a lane's lease on delivery alone therefore renewed DEAD CLIENTS'
+// LEASES FOREVER, and the cap filled with lanes whose clients had been gone for
+// over an hour. Measured live: four such lanes, and the owner's own browser -
+// reporting every 30 seconds, and never once given an offer because every slot
+// was held by something that had left.
+//
+// So a report renews the lease only while its own timestamp advances. That test
+// is safe between devices because it only ever compares a client's timestamps
+// with its own earlier ones; no two clocks are ever subtracted.
+
+test("a report redelivered from the document does NOT renew a departed client's lease", async () => {
+  const h = harness({ startLanes: [], leaseMs: 60_000 });
+  const t = await h.transport;
+
+  // The client reports, and is given a lane.
+  await t.ensureLane("gone", 1_000);
+  assert.equal(t.status().lanes.length, 1);
+
+  // Well past the lease, the SAME report is redelivered three times, exactly as
+  // the discovery watch does on every update. The client said nothing new: the
+  // value in the document is the value it left there an hour ago.
+  h.advance(90_000);
+  await t.ensureLane("gone", 1_000);
+  await t.ensureLane("gone", 1_000);
+  await t.ensureLane("gone", 1_000);
+
+  const released = await t.releaseExpiredLanes();
+  assert.deepEqual(
+    released,
+    ["gone"],
+    "redelivering an old report must not keep a departed client alive - this is "
+    + "what filled the cap with lanes whose clients were long gone",
+  );
+  assert.equal(t.status().lanes.length, 0);
+  assert.ok(h.retracted.includes("gone"), "and its offer is withdrawn with it");
+  await t.close();
+});
+
+test("a report that ADVANCES keeps a live client's lane", async () => {
+  const h = harness({ startLanes: [], leaseMs: 60_000 });
+  const t = await h.transport;
+
+  await t.ensureLane("here", 1_000);
+  // A heartbeat: the client keeps reporting, and its timestamps move.
+  for (let beat = 1; beat <= 6; beat++) {
+    h.advance(30_000);
+    await t.ensureLane("here", 1_000 + beat * 30_000);
+  }
+
+  assert.equal(
+    t.status().lanes.length,
+    1,
+    "a client that keeps reporting keeps its lane, however long the run is",
+  );
+  assert.deepEqual(await t.releaseExpiredLanes(), [], "and is never released while reporting");
+  await t.close();
+});
+
+test("a client that reports after a long silence is served again", async () => {
+  const h = harness({ startLanes: [], leaseMs: 60_000 });
+  const t = await h.transport;
+
+  // The cap is full of clients that have left.
+  await t.ensureLane("dead-1", 1_000);
+  await t.ensureLane("dead-2", 1_000);
+  h.advance(120_000);
+  await Promise.all([t.ensureLane("dead-1", 1_000), t.ensureLane("dead-2", 1_000)]);
+  assert.equal((await t.releaseExpiredLanes()).length, 2, "both stale lanes are released");
+  assert.equal(t.status().lanes.length, 0);
+
+  // The owner's browser, reporting right now, gets a lane and an offer.
+  await t.ensureLane("live", 999_000);
+  assert.equal(t.status().lanes.length, 1);
+  assert.equal(
+    h.published.at(-1)?.lane,
+    "live",
+    "and it is the one being offered now, not starved behind the departed",
+  );
+  assert.deepEqual(
+    t.status().lanes.map((l) => l.lane),
+    ["live"],
+    "the machine's own view holds only the live client",
+  );
+  await t.close();
+});
