@@ -600,9 +600,7 @@ async function bootstrap(): Promise<void> {
       // state that ended minutes ago — which is how a WORKING host reads as a
       // hung one (see I-021's recovery note).
       renderFooter();
-      uiNotify(ws.tunnelUrl
-        ? `[pinest] tunnel up: ${ws.tunnelUrl}`
-        : `[pinest] tunnel started via ${used ?? "(none)"} but reported no URL — remote access is local-only`);
+      uiNotify(`[pinest] tunnel up: ${ws.tunnelUrl ?? "no URL — remote access is local-only"}`);
       return publishCurrentPresence(true);
     })
     .catch((e) => {
@@ -659,8 +657,11 @@ async function bootstrap(): Promise<void> {
   if (_activeSessionId !== configuredActive) {
     saveConfig({ activeSessionId: _activeSessionId });
   }
-  await publishCurrentPresence(true).catch((e) =>
-    debug("[remote-code] initial presence publish failed:", (e as Error).message));
+  // NOT awaited: a metered side-channel must never sit between the host being
+  // usable and being REPORTED usable. An exhausted quota hung this write, so
+  // bootstrap never resolved and the record read "pending" for a quarter of an
+  // hour while the machine worked perfectly. The heartbeat republishes soon.
+  void publishCurrentPresence(true).catch((e) => debug("[remote-code] initial presence publish failed:", (e as Error).message));
 
     // Footer
     getFooter().startTimer(3000);
