@@ -9,7 +9,9 @@ import '../services/attachment_selection.dart';
 import '../services/paste_bridge.dart';
 import '../services/user_preferences.dart';
 import '../models/session.dart';
+import '../models/subagent_run.dart';
 import './goal_banner.dart';
+import './subagent_banner.dart';
 import '../models/chat_item.dart';
 import 'app_toast.dart';
 import 'session_actions.dart';
@@ -46,6 +48,36 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Session? _session(AgentService svc) =>
       svc.sessions.where((s) => s.id == widget.sessionId).firstOrNull;
+
+  /// The subagent run this session IS, when it is one. Null for every session
+  /// that was not spawned by another, which is why the banner is conditional.
+  SubagentRun? get subagentRun => _session(context.read<AgentService>())?.subagent;
+
+  /// Who spawned this session, by name — the banner must not ask the user to
+  /// match an id to a row themselves.
+  String? parentNameOf(String? sessionId) {
+    if (sessionId == null) return null;
+    final svc = context.read<AgentService>();
+    final session = svc.sessions.where((s) => s.id == sessionId).firstOrNull;
+    final parentId = session?.parentSessionId;
+    if (parentId == null) return null;
+    return svc.sessions.where((s) => s.id == parentId).firstOrNull?.name;
+  }
+
+  /// How deep this session sits in the subagent tree (1 = not a subagent).
+  int subagentLevelOf(String? sessionId) {
+    if (sessionId == null) return 1;
+    final svc = context.read<AgentService>();
+    var level = 1;
+    var current = svc.sessions.where((s) => s.id == sessionId).firstOrNull;
+    while (level < 3) {
+      final parentId = current?.parentSessionId;
+      if (parentId == null) break;
+      level += 1;
+      current = svc.sessions.where((s) => s.id == parentId).firstOrNull;
+    }
+    return level;
+  }
 
   /// Removes this screen's clipboard listener (web only).
   void Function()? _disposePaste;
@@ -491,6 +523,12 @@ class _ChatScreenState extends State<ChatScreen> {
             goal: svc.goalFor(widget.sessionId)!,
             onEdit: () => _editGoal(svc),
             onClear: () => _clearGoal(svc),
+          ),
+        if (subagentRun != null)
+          SubagentBanner(
+            run: subagentRun!,
+            parentName: parentNameOf(widget.sessionId) ?? 'its parent',
+            level: subagentLevelOf(widget.sessionId),
           ),
         ComposerBar(
           input: _input,

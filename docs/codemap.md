@@ -22,13 +22,21 @@ Goals/status/work live in the other `docs/` registries, not here.
 | History image references + on-demand fetch (LRU store; base64 never travels with history) | `server`, `app` | `registerImage`/`lookupImage` in `server/src/logic.ts`; `get_image` in `server/src/index.ts` + `server/src/supervisor.ts`; `app/lib/services/image_store.dart`, `app/lib/widgets/lazy_image_tile.dart` |
 | Outbound payload guard (oversized single message dropped + counted, never misread as a slow client) | `server` | `server/src/wsserver.ts` (`sendSerialized`) |
 | Session-history extraction incl. pre-compaction messages and compaction bubbles | `server` | `server/src/logic.ts` (`extractSessionMessages`, `entriesToSessionMessages`) |
+| Subagent policy: the brief, the tree depth and concurrency bounds, the run to completion, and the result handed back to the parent | `server` | `server/src/subagent.ts` (`SubagentService`, `subagentBrief`, `boundSummary`, `formatOutcome`, the turn waiter) |
+| The `subagent` tool and its binding onto a supervisor (sessions + tool set, wired in one step) | `server` | `server/src/subagent-tools.ts` (`bindSubagents`, `createSubagentTool`, `registerSubagentTools`) |
+| Subagent tree facts: who spawned whom, a session's level, and what a re-opened row must remember it was | `server` | `server/src/subagent-tree.ts` (`SubagentTree`) |
+| The registry row id of a tool call (a spawned session's pi session id is not its row id) | `server` | `server/src/session-identity.ts` (`rowIdForToolContext`) |
+| Sessions in tree order for the host list, and the subagent's row label | `server` | `server/src/sessions-view.ts` (`orderSessionsByParent`, `toItem`, `subagentRunLabel`) |
+| One subagent run as the clients see it (task, verdict, report) | `app` | `app/lib/models/subagent_run.dart` |
+| Sessions in tree order for the app's drawer and tabs | `app` | `app/lib/logic/session_grouping.dart` (`buildSessionTree`, `subagentsOf`) |
+| The banner on a subagent's own tab: whose child, what for, and how it went | `app` | `app/lib/screens/subagent_banner.dart` |
 | Headless session spawn/resume/kill/route/stream (SDK sessions in-process) | `server` | `server/src/supervisor.ts`, `server/src/session-command-handler.ts` |
 | Model lookup/switch + available-model listing (per-session runtime preferred, registry fallback) | `server` | `server/src/session-models.ts` (`SessionModelService`) |
 | Background-task ownership identity and process management | `server` | `ownerFromContext` + `SessionTasks` in `server/src/bash-tool.ts`; `server/src/process-util.ts`; `scopeFor` in `server/src/background-tools.ts` |
 | Orphan background-task routing (no owner id → most specific cwd, then host, else a visible notice) | `server` | `server/src/bg-routing.ts` (`routeOrphanTask`), wired as `BackgroundProcessManager.resolveOrphan` |
 | Owner-bound session registry persistence (private sessions.json, atomic writes/history deletion, corrupt/symlink refusal) | `server` | `server/src/registry.ts` |
 | Harness source-change watcher (debounced file watch → pending-change notice; never reloads) | `server` | `server/src/watch.ts` |
-| Repeatable evidence drills (explicit-reload contract, mid-run handoff, steer delivery timing, compact/clear observability) | `drills` | `drills/` (`*.mjs`) |
+| Repeatable evidence drills (explicit-reload contract, mid-run handoff, steer delivery timing, compact/clear observability, subagent fan-out) | `drills` | `drills/` (`*.mjs`) |
 | Reload safety gate (syntax-check watched sources; broken edits don't tear down the host) | `server` | `firstSyntaxError` in `server/src/index.ts` |
 | Host-interactive session commands and filesystem inspection | `server` | `server/src/host-interactive-commands.ts` |
 | Auto-background bash tool execution (>30s) and background process management | `server` | `server/src/bash-tool.ts` (`BackgroundProcessManager`, `createAutoBackgroundBashTool`) |

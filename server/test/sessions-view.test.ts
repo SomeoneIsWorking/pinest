@@ -11,7 +11,7 @@ import { initTheme } from "@earendil-works/pi-coding-agent";
 
 import { visibleWidth } from "@earendil-works/pi-tui";
 
-import { createSessionsView, shortenPath, visibleRows } from "../src/sessions-view.ts";
+import { createSessionsView, orderSessionsByParent, shortenPath, visibleRows } from "../src/sessions-view.ts";
 
 // Pi's own hint formatter reads the global theme; the running terminal has it
 // initialized, a headless test has to put it there.
@@ -497,4 +497,111 @@ test("ctrl-n defers the directory to the host instead of assuming this one", () 
   h.view.handleInput("\x0e"); // ctrl+n
   assert.deepEqual(h.calls, ["new"]);
   assert.equal(h.selected(), null, "and it opens nothing until the host answers");
+});
+
+// ── subagents ──────────────────────────────────────────────────────────────
+// A subagent is a session, so it is openable and killable exactly like any
+// other; what is new is that the list says whose child it is and how its run
+// went, and that a child appears under the parent whose turn is waiting on it.
+
+function tree(): SessionSummary[] {
+  return orderSessionsByParent([
+    { id: "host", name: "this terminal", cwd: "/srv/checkout/pinest", status: "idle", isHost: true },
+    {
+      id: "sub-a",
+      name: "parser audit",
+      cwd: "/srv/checkout/agent-a",
+      status: "working",
+      isHost: false,
+      parentSessionId: "agent-0",
+      parentName: "agent-0",
+      subagent: { status: "running" },
+      level: 2,
+    },
+    {
+      id: "agent-0",
+      name: "agent-0",
+      cwd: "/srv/checkout/agent-0",
+      status: "working",
+      isHost: false,
+    },
+    {
+      id: "sub-sub",
+      name: "caller sweep",
+      cwd: "/srv/checkout/agent-a",
+      status: "idle",
+      isHost: false,
+      parentSessionId: "sub-a",
+      parentName: "parser audit",
+      subagent: { status: "completed" },
+      level: 3,
+    },
+  ]);
+}
+
+test("a subagent is listed under its parent, named as its child, and shows how the run went", () => {
+  const h = harness(tree(), 30, 110);
+  const lines = h.lines();
+  const rendered = lines.join("\n");
+
+  assert.match(rendered, /subagent running of agent-0/, "the row says whose child it is and that it is running");
+  assert.match(rendered, /subagent done of parser audit/, "a sub-subagent names ITS parent, not the top session");
+  assert.match(rendered, /parser audit/, "the subagent itself is listed");
+
+  // Indentation is what makes the tree legible; the deepest row is the most
+  // indented. The frame's own border and pointer prefix are the same on every
+  // row, so the measure is the gap between the status glyph and the name.
+  const indentOf = (name: string): number => {
+    const row = lines.find((l) => l.includes(name));
+    assert.ok(row, `no row for ${name}`);
+    const match = new RegExp(`[⚡○](\\s+)${name}`).exec(row!);
+    assert.ok(match, `${name} is not rendered as a row: ${JSON.stringify(row)}`);
+    return match![1].length;
+  };
+  assert.equal(indentOf("agent-0"), 1, "a top-level session sits right after its glyph");
+  assert.ok(indentOf("parser audit") > indentOf("agent-0"), "a child is indented past its parent");
+  assert.ok(indentOf("caller sweep") > indentOf("parser audit"), "a sub-subagent is indented past its child");
+});
+
+test("the fan-out is reachable: a subagent row opens like any other session", () => {
+  const h = harness(tree(), 30, 110);
+  // Type to the child, then Enter — the same path any session takes.
+  for (const ch of "caller") h.view.handleInput(ch);
+  h.view.handleInput("\r");
+  assert.equal(h.selected(), "sub-sub", "a subagent is a session: open it and prompt it like any other");
+});
+
+test("typing the run's outcome finds the subagent that is running it", () => {
+  const h = harness(tree(), 30, 110);
+  for (const ch of "running") h.view.handleInput(ch);
+  const rendered = h.lines().join("\n");
+  assert.match(rendered, /parser audit/);
+  assert.doesNotMatch(rendered, /caller sweep/, "the finished sibling is filtered out");
+});
+
+test("a subagent whose run failed says so, and one with no result is not dressed up as one", () => {
+  const h = harness(
+    [
+      ...tree(),
+      { id: "failed", name: "flaky test hunt", cwd: "/w", status: "idle", isHost: false, parentSessionId: "host", parentName: "this terminal", subagent: { status: "failed" }, level: 2 },
+      { id: "silent", name: "never reported", cwd: "/w", status: "idle", isHost: false, parentSessionId: "host", parentName: "this terminal", level: 2 },
+    ],
+    30,
+    120,
+  );
+  const rendered = h.lines().join("\n");
+  assert.match(rendered, /subagent failed of this terminal/);
+  assert.match(rendered, /subagent no result of this terminal/, "no verdict is not dressed up as success");
+});
+
+test("children are ordered under their parent, and a child whose parent is gone is still shown", () => {
+  const ordered = orderSessionsByParent(tree());
+  const ids = ordered.map((s) => s.id);
+  assert.deepEqual(ids, ["host", "agent-0", "sub-a", "sub-sub"]);
+
+  const orphan = orderSessionsByParent([
+    { id: "parent", name: "p", cwd: "/w", status: "idle", isHost: false },
+    { id: "lost", name: "lost child", cwd: "/w", status: "working", isHost: false, parentSessionId: "deleted" },
+  ]);
+  assert.deepEqual(orphan.map((s) => s.id), ["parent", "lost"], "a running agent is never hidden because its parent went");
 });

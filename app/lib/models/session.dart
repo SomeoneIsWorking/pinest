@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'background_job.dart';
 import 'session_goal.dart';
+import 'subagent_run.dart';
 
 /// A live session, as seen in the ephemeral state doc.
 /// Not a stored record — just a snapshot of what's running right now.
@@ -106,6 +107,15 @@ class Session {
   /// on purpose: a goal belongs to the tab it was stated on, not to the machine.
   final SessionGoal? goal;
 
+  /// The session that spawned this one, when it is a subagent. A subagent is an
+  /// ordinary session — open it, prompt it, stop it — that also says whose
+  /// child it is, so the fan-out is legible instead of a row of strangers.
+  final String? parentSessionId;
+
+  /// What this subagent was asked to do, and how its run went. Null for every
+  /// session that is not a subagent.
+  final SubagentRun? subagent;
+
   Session({
     required this.id,
     required this.name,
@@ -125,6 +135,8 @@ class Session {
     this.isHost = false,
     required this.createdAt,
     this.isResumable = false,
+    this.parentSessionId,
+    this.subagent,
     this.pendingMessages = const [],
     this.pendingSteering = const [],
     this.pendingImagesByText = const {},
@@ -178,6 +190,10 @@ class Session {
       isHost: map['isHost'] == true,
       createdAt: (map['createdAt'] as num?)?.toInt() ?? 0,
       isResumable: registry && map['piSessionPath'] != null,
+      parentSessionId: (map['parentSessionId'] as String?)?.trim().isEmpty ?? true
+          ? null
+          : map['parentSessionId'] as String?,
+      subagent: SubagentRun.fromJson(map['subagent']),
       pendingMessages: registry
           ? const []
           : (map['pendingMessages'] as List?)?.cast<String>() ?? const [],
@@ -198,4 +214,7 @@ class Session {
 
   bool get isWorking => status == 'working';
   bool get isOnline => status != 'offline';
+
+  /// True when this session was spawned by another one.
+  bool get isSubagent => parentSessionId != null;
 }

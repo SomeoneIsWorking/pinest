@@ -47,6 +47,15 @@ export interface SessionSummary {
   thinking?: string;
   /** Queued messages waiting for this session, if any. */
   pending?: number;
+  /** The session that spawned this one, when it is a subagent. */
+  parentSessionId?: string;
+  /** The name of the parent, resolved where the list is built so a row can say
+   * whose child it is without the view having to resolve ids. */
+  parentName?: string;
+  /** How this subagent's run went. */
+  subagent?: { status: "running" | "completed" | "failed" | "stopped" };
+  /** How deep in the subagent tree this session sits (1 = top level). */
+  level?: number;
 }
 
 export interface SessionsViewOptions {
@@ -134,6 +143,9 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
       s.modelName ?? s.model ?? "",
       s.thinking ?? "",
       s.status,
+      // A subagent's run is what someone looking for it is searching for
+      // ("which one is still running?"), and it is on the row to read.
+      s.subagent?.status ?? "",
     ]
       .join(" ")
       .toLowerCase();
@@ -412,13 +424,74 @@ export function toItem(s: SessionSummary): SelectItem {
   const model = s.modelName ?? s.model ?? "";
   const thinking = s.thinking ? `thinking:${s.thinking}` : "";
   const where = shortenPath(s.cwd);
+  // A subagent is indented under its parent and says which run it is, so the
+  // fan-out is visible in the terminal and not just in the app.
+  const indent = s.parentSessionId ? "  ".repeat(Math.max(0, (s.level ?? 2) - 1)) : "";
+  const child = s.parentSessionId
+    ? `subagent ${subagentRunLabel(s)} of ${s.parentName ?? s.parentSessionId}`
+    : "";
   return {
     value: s.id,
-    label: `${glyph} ${s.name}${host}`,
-    description: [where, model, thinking, s.status, queued]
+    label: `${glyph} ${indent}${s.name}${host}`,
+    description: [where, model, thinking, s.status, queued, child]
       .filter((part) => part.length > 0)
       .join("  ·  "),
   };
+}
+
+/** How a subagent's run reads in a list row: what happened, not a code. */
+export function subagentRunLabel(s: SessionSummary): string {
+  switch (s.subagent?.status) {
+    case "running":
+      return "running";
+    case "completed":
+      return "done";
+    case "failed":
+      return "failed";
+    case "stopped":
+      return "stopped";
+    default:
+      return "no result";
+  }
+}
+
+/**
+ * Sessions in the order a person reads them: every session first, then its
+ * subagents under it. Without this the rows arrive in start order, so a
+ * subagent opened three minutes ago appears far from the parent whose turn is
+ * waiting on it.
+ *
+ * A subagent whose parent is not in the list (a resumed child whose parent was
+ * deleted) is kept and shown at the end as a top-level row, because dropping
+ * it would hide a running agent.
+ */
+export function orderSessionsByParent<T extends { id: string; parentSessionId?: string }>(sessions: T[]): T[] {
+  const present = new Set(sessions.map((s) => s.id));
+  const byParent = new Map<string, T[]>();
+  for (const s of sessions) {
+    if (!s.parentSessionId || !present.has(s.parentSessionId)) continue;
+    const siblings = byParent.get(s.parentSessionId) ?? [];
+    siblings.push(s);
+    byParent.set(s.parentSessionId, siblings);
+  }
+  const ordered: T[] = [];
+  const placed = new Set<string>();
+  // Depth-first from each root, so a subagent is listed under its parent even
+  // when it started first, and a sub-subagent is listed under its own parent
+  // rather than beside it.
+  const emit = (s: T): void => {
+    if (placed.has(s.id)) return;
+    placed.add(s.id);
+    ordered.push(s);
+    for (const child of byParent.get(s.id) ?? []) emit(child);
+  };
+  for (const s of sessions) {
+    if (!s.parentSessionId || !present.has(s.parentSessionId)) emit(s);
+  }
+  // Anything left is part of a cycle, which no run can produce; listing it beats
+  // dropping a session the user cannot see.
+  for (const s of sessions) emit(s);
+  return ordered;
 }
 
 /** Keep the tail of a path: the directory a session runs in is the interesting
