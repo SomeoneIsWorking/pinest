@@ -19,6 +19,7 @@ import {
   type SubagentHost,
 } from "./subagent.ts";
 import type { SubagentTree } from "./subagent-tree.ts";
+import { rowIdForToolContext, type PiSessionRef } from "./session-identity.ts";
 
 /** Stated in the parameter description, where the bound is actually chosen. */
 const TASK_LIMIT_NOTE = ` Limited to ${MAX_TASK_CHARS} characters.`;
@@ -47,12 +48,20 @@ export interface SubagentToolDeps {
  * one step, so the policy and its tool set cannot be wired up half of the way.
  */
 export interface SubagentSource {
+  /** The live session behind an id — the only way this module ever looks at
+   * one, so it can never hold a copy of something that is still changing. */
+  find: (id: string) => SubagentSessionView | undefined;
+  /** Record a run's state on the live session, publish it and persist it. */
+  markRun: (id: string, run: SubagentRun) => void;
+  /** Open a session whose parent is `parentSessionId`, on the parent's model and
+   * thinking. */
   spawnChild(request: {
     parentSessionId: string;
     task: string;
     name: string;
     cwd: string;
     model?: string;
+    thinking?: string;
   }): Promise<string>;
   /** Hand a session its first message. Throws when it cannot be reached, so a
    * child that was opened but not started is torn down rather than left idle. */
@@ -62,9 +71,19 @@ export interface SubagentSource {
   whenSettled(sessionId: string): Promise<SettledRun>;
   /** Who spawned whom, and how deep. */
   tree: SubagentTree;
-  markRun(sessionId: string, run: SubagentRun): void;
   /** The registry row id of the session making a tool call. */
   resolveOwner(ctx: unknown, preferred?: string): string;
+}
+
+/** What the composition needs to see of a live session to answer "what is this
+ * child actually running on, and is its run still in flight". A live session
+ * satisfies it; it is declared here so this module never reaches into the
+ * supervisor's own type. */
+export interface SubagentSessionView {
+  model?: string | null;
+  thinkingLevel?: string;
+  modelWarning?: string;
+  subagent?: SubagentRun;
 }
 
 export interface BoundSubagents {
@@ -80,6 +99,14 @@ export function bindSubagents(
 ): BoundSubagents {
   const host: SubagentHost = {
     spawnChild: (request) => source.spawnChild(request),
+    childRunsOn: (sessionId) => {
+      const child = source.find(sessionId);
+      return {
+        model: child?.model ?? undefined,
+        thinking: child?.thinkingLevel,
+        warning: child?.modelWarning,
+      };
+    },
     startChild: (sessionId, brief) => source.startChild(sessionId, brief),
     stopChild: (sessionId) => source.stopChild(sessionId),
     whenSettled: (sessionId) => source.whenSettled(sessionId),
@@ -88,6 +115,7 @@ export function bindSubagents(
     parentOf: (sessionId) => source.tree.find(sessionId)?.parentSessionId,
     levelOf: (sessionId) => source.tree.levelOf(sessionId),
     modelOf: (sessionId) => source.tree.find(sessionId)?.model ?? undefined,
+    thinkingOf: (sessionId) => source.tree.find(sessionId)?.thinking,
     cwdOf: (sessionId) => source.tree.find(sessionId)?.cwd,
     nameOf: (sessionId) => source.tree.find(sessionId)?.name,
     markRun: (sessionId, run) => source.markRun(sessionId, run),
@@ -98,6 +126,27 @@ export function bindSubagents(
     tools: (preferredOwner) => [
       createSubagentTool({ service: () => service, resolveOwner: source.resolveOwner }, preferredOwner),
     ],
+  };
+}
+
+/** The host's own tool wiring: the service is resolved when the tool is CALLED,
+ * because the supervisor is built during bootstrap, after the extension is
+ * wired, and a captured one would belong to the previous runtime. */
+export function hostSubagentToolDeps(
+  supervisor: () => { sessions: Map<string, PiSessionRef>; subagents: SubagentService } | null,
+  hostSessionId: () => string,
+): SubagentToolDeps {
+  return {
+    service: () => {
+      const live = supervisor();
+      if (!live) throw new Error("the session supervisor is not up yet; try again in a moment");
+      return live.subagents;
+    },
+    resolveOwner: (ctx, preferred) => {
+      const fallback = preferred ?? hostSessionId();
+      const live = supervisor();
+      return live ? rowIdForToolContext(live.sessions, ctx, fallback) : fallback;
+    },
   };
 }
 
@@ -117,9 +166,6 @@ const SubagentParams = Type.Object({
       description: "Workspace directory for the subagent. Defaults to this session's own directory.",
     }),
   ),
-  model: Type.Optional(
-    Type.String({ description: "provider/model id, e.g. opencode-go/glm-5.3-flash. Defaults to this session's model." }),
-  ),
 });
 
 function textContent(text: string) {
@@ -137,7 +183,7 @@ export function createSubagentTool(
     _onUpdate: unknown,
     ctx?: unknown,
   ) => {
-    const p = (params ?? {}) as { task?: string; name?: string; cwd?: string; model?: string };
+    const p = (params ?? {}) as { task?: string; name?: string; cwd?: string };
     const service = deps.service();
     const parentSessionId = deps.resolveOwner(ctx, preferredOwner);
     const parentName = service.nameOf(parentSessionId);
@@ -146,7 +192,6 @@ export function createSubagentTool(
       task: p.task ?? "",
       name: p.name,
       cwd: p.cwd,
-      model: p.model,
       signal,
     });
     return {
@@ -158,6 +203,9 @@ export function createSubagentTool(
           parentSessionId,
           status: outcome.status,
           durationMs: outcome.durationMs,
+          model: outcome.model,
+          thinking: outcome.thinking,
+          warning: outcome.warning,
         },
       },
     };
@@ -169,8 +217,9 @@ export function createSubagentTool(
     description:
       "Spawn a pi session that does one bounded task unattended and reports its final message back. " +
       "Use it to fan work out — independent investigations, parallel reviews, one file each — and when the " +
-      "user asks for subagents. The subagent runs in the app as its own session under its parent's, so its " +
-      "work stays readable and you can steer it. It cannot ask questions; the task must be self-contained.",
+      "user asks for subagents. It runs on YOUR model at YOUR thinking level, in the app as its own session " +
+      "under yours, so its work stays readable and you can steer it. It cannot ask questions, and it cannot " +
+      "change model: the task must be self-contained.",
     parameters: SubagentParams,
     execute,
   };

@@ -61,6 +61,13 @@ export interface SubagentRun {
   /** The child's final message, bounded. Absent while running. */
   summary?: string;
   error?: string;
+  /** The model and thinking the child actually ran on. A subagent shares its
+   * parent's; these are here so a divergence is visible rather than inferred. */
+  model?: string;
+  thinking?: string;
+  /** Why the child could not run on what its parent runs on. Never hidden: a
+   * result produced on a different model is a different result. */
+  modelWarning?: string;
 }
 
 export interface SettledRun {
@@ -102,7 +109,10 @@ export interface SubagentHost {
     name: string;
     cwd: string;
     model?: string;
+    thinking?: string;
   }): Promise<string>;
+  /** What the child actually ended up on, as opposed to what was asked for. */
+  childRunsOn(sessionId: string): { model?: string; thinking?: string; warning?: string };
   /**
    * Hand the child its brief and start its turn. Separate from the spawn on
    * purpose: a session that exists but has not been told what to do is an
@@ -122,6 +132,9 @@ export interface SubagentHost {
   /** 1 for a top-level session, +1 per generation below it. */
   levelOf(sessionId: string): number;
   modelOf(sessionId: string): string | undefined;
+  /** The parent's thinking level in display form ("default", "high", …), which
+   * is the vocabulary the app and the terminal set it with. */
+  thinkingOf(sessionId: string): string | undefined;
   cwdOf(sessionId: string): string | undefined;
   nameOf(sessionId: string): string | undefined;
   /** Record the run's state on the child (published to clients + persisted). */
@@ -149,6 +162,11 @@ export interface SubagentOutcome {
   summary: string;
   error?: string;
   durationMs: number;
+  /** The model and thinking the child actually ran on. */
+  model?: string;
+  thinking?: string;
+  /** Set when the child could not run on its parent's model or thinking. */
+  warning?: string;
 }
 
 /** A short label for a subagent session: the requested name, else the task's
@@ -264,11 +282,21 @@ export class SubagentService {
       throw new Error(`session ${parentSessionId} has no workspace; refusing to spawn a subagent`);
     }
     const name = subagentName(task, request.name);
-    const model = request.model ?? this.host.modelOf(parentSessionId);
+    // A subagent is the same agent on the same footing as its parent: the same
+    // model, the same thinking level. Nothing here can choose otherwise — the
+    // tool has no such parameter — because a fan-out across models is a
+    // different kind of work and not one the caller asked for.
+    const model = this.host.modelOf(parentSessionId);
+    const thinking = this.host.thinkingOf(parentSessionId);
 
     const startedAt = Date.now();
-    const sessionId = await this.host.spawnChild({ parentSessionId, task, name, cwd, model });
-    debug(`[pinest] subagent ${sessionId} spawned by ${parentSessionId} ("${name}")`);
+    const sessionId = await this.host.spawnChild({ parentSessionId, task, name, cwd, model, thinking });
+    const ran = this.host.childRunsOn(sessionId);
+    debug(
+      `[pinest] subagent ${sessionId} spawned by ${parentSessionId} ("${name}") on ` +
+        `${ran.model ?? "the default model"}${ran.thinking ? ` thinking:${ran.thinking}` : ""}` +
+        (ran.warning ? ` — ${ran.warning}` : ""),
+    );
 
     // The brief is what makes the child do the work; a spawn alone is an idle
     // agent, and the parent would wait for it until its own turn was cancelled.
@@ -296,12 +324,14 @@ export class SubagentService {
         startedAt,
         finishedAt: Date.now(),
         error: "stopped: the session that spawned it ended its turn",
+        ...inheritance(ran, "modelWarning"),
       });
       debug(`[pinest] subagent ${sessionId} stopped with its parent ${parentSessionId}`);
       return {
         ok: false, sessionId, name, status: "stopped", durationMs,
         summary: "",
         error: "stopped: the session that spawned it ended its turn before the task finished",
+        ...inheritance(ran),
       };
     }
 
@@ -313,6 +343,7 @@ export class SubagentService {
       finishedAt: Date.now(),
       summary: text,
       ...(settled.run.error ? { error: settled.run.error } : {}),
+      ...inheritance(ran, "modelWarning"),
     });
     debug(
       `[pinest] subagent ${sessionId} ${settled.run.ok ? "completed" : "failed"} ` +
@@ -326,6 +357,7 @@ export class SubagentService {
       summary: truncated ? `${text}\n\n[truncated — the full transcript is in the subagent's session ${sessionId}]` : text,
       ...(settled.run.error ? { error: settled.run.error } : {}),
       durationMs,
+      ...inheritance(ran),
     };
   }
 
@@ -355,6 +387,20 @@ export class SubagentService {
   }
 }
 
+/** The fields that record what the child actually ran on. Spread rather than
+ * assigned, so an empty result adds nothing, and named per destination because
+ * the run and the outcome call the warning different things. */
+function inheritance(
+  ran: { model?: string; thinking?: string; warning?: string },
+  warningField: "warning" | "modelWarning" = "warning",
+) {
+  return {
+    ...(ran.model ? { model: ran.model } : {}),
+    ...(ran.thinking ? { thinking: ran.thinking } : {}),
+    ...(ran.warning ? { [warningField]: ran.warning } : {}),
+  };
+}
+
 /** What the calling agent is told. Names the child, says how long it ran, and
  * carries the child's own words — plus where the full transcript is, so a
  * result that was truncated is never mistaken for a complete one. */
@@ -367,6 +413,12 @@ export function formatOutcome(outcome: SubagentOutcome, parentName: string): str
   return [
     head,
     `Session: ${outcome.sessionId} — a child of "${parentName}", open it in the app to read the full transcript.`,
+    // Provenance is part of a result: a subagent that ran on a different model
+    // produced a different answer, whether or not the parent noticed.
+    `Ran on ${outcome.model ?? "this machine's default model"}`
+      + (outcome.thinking ? `, thinking ${outcome.thinking}` : "")
+      + " — the same as its parent.",
+    ...(outcome.warning ? [`WARNING: ${outcome.warning}`] : []),
     "",
     body || "(the subagent returned no summary)",
   ].join("\n");

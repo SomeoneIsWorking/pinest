@@ -20,13 +20,24 @@ Session session(
       'subagent': ?subagent,
     });
 
-Map<String, dynamic> run(String status, {String? summary, String? error}) => {
+Map<String, dynamic> run(
+  String status, {
+  String? summary,
+  String? error,
+  String? model,
+  String? thinking,
+  String? warning,
+}) =>
+    {
       'task': 'count the callers of parseConfig',
       'status': status,
       'startedAt': 1000,
       'finishedAt': status == 'running' ? null : 5000,
       'summary': ?summary,
       'error': ?error,
+      'model': ?model,
+      'thinking': ?thinking,
+      'warning': ?warning,
     };
 
 void main() {
@@ -152,5 +163,35 @@ void main() {
       )));
       expect(find.text('Provider error'), findsOneWidget);
     });
+
+    testWidgets('a run that could not inherit says so, with what it ran on',
+        (tester) async {
+      final r = SubagentRun.fromJson(run(
+        'completed',
+        model: 'other/cheap',
+        thinking: 'default',
+        warning: "could not use the parent's model spacebunny/free; it ran on other/cheap instead",
+      ))!;
+      expect(r.diverged, isTrue);
+
+      await tester.pumpWidget(host(SubagentBanner(run: r, parentName: 'the agent')));
+      // The model and level it ACTUALLY held, next to what went wrong: a run
+      // that only claimed "high" would be the lie this surface exists to stop.
+      expect(find.textContaining('other/cheap'), findsOneWidget);
+      expect(find.textContaining('at default'), findsOneWidget);
+      expect(find.textContaining("could not use the parent's model"), findsOneWidget);
+    });
+
+    testWidgets('a run that inherited cleanly says nothing about it',
+        (tester) async {
+      final r = SubagentRun.fromJson(
+        run('completed', model: 'spacebunny/free', thinking: 'high'),
+      )!;
+      expect(r.diverged, isFalse);
+
+      await tester.pumpWidget(host(SubagentBanner(run: r, parentName: 'the agent')));
+      expect(find.byIcon(Icons.warning_amber_rounded), findsNothing);
+    });
   });
+
 }
