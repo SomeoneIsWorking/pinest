@@ -40,6 +40,9 @@ MachinePresence describeMachinePresence({
   String? machinePresenceError,
   String? machineSignalingError,
   String? clientReportError,
+  /// Why THIS app could not read the discovery document. Distinct from a
+  /// machine-side refusal: here the app is the broken end, and it can say so.
+  String? discoveryError,
   DateTime? now,
 }) {
   if (connected) {
@@ -74,13 +77,27 @@ MachinePresence describeMachinePresence({
   // only true when the machine is the one that could not speak; when this app's
   // own write was refused the machine is fine and cannot even know.
   final appRefused = clientReportError != null && clientReportError.isNotEmpty;
-  final headline = appRefused
-      ? 'This app cannot be seen'
-      : refusal != null
-          ? 'Machine cannot be found'
-          : machinePublishing
-              ? 'Machine online, not reachable'
-              : 'Supervisor offline';
+  // This app's own read failed. Nothing it knows about the machine is worth
+  // anything, so it must not be reported as news about the machine: the
+  // headline names the end that is actually broken.
+  final selfRefused = discoveryError != null && discoveryError.trim().isNotEmpty;
+  final headline = selfRefused
+      ? 'This app cannot reach Firebase'
+      : appRefused
+          ? 'This app cannot be seen'
+          : refusal != null
+              ? 'Machine cannot be found'
+              : machinePublishing
+                  ? 'Machine online, not reachable'
+                  : 'Supervisor offline';
+  if (selfRefused) {
+    return MachinePresence(
+      headline: headline,
+      detail: 'This app could not read the machine list, so everything it would '
+          'say about the machine is unknown — not evidence that it is down.\n'
+          'Google said: $discoveryError',
+    );
+  }
   if (refusal != null) {
     return MachinePresence(
       headline: headline,

@@ -12,6 +12,8 @@ import 'control_channel.dart';
 import 'client_identity.dart';
 import '../logic/client_lane.dart';
 import '../logic/client_report.dart';
+import '../logic/discovery_document.dart';
+import '../logic/discovery_watch.dart';
 import '../logic/command_id.dart';
 import 'client_reporter.dart';
 import 'link_bridge.dart';
@@ -42,7 +44,6 @@ class AgentService extends ChangeNotifier {
   final _store = SessionStore();
   AuthService? _auth;
   String? _boundUid;
-  StreamSubscription? _urlSub;
   ControlChannel? _ws;
 
   String? _tunnelUrl;
@@ -151,6 +152,16 @@ class AgentService extends ChangeNotifier {
 
   /// The endpoint of the attempt being reported, so the reason can name it.
   Uri? _dialTarget;
+
+  /// Why THIS APP could not read the discovery document, in Google's words.
+  ///
+  /// Kept apart from the generic note because it is the one failure where the
+  /// app, not the machine, is the broken end — see machine_presence.dart, which
+  /// owns that distinction and the reasoning behind it.
+  String? _discoveryError;
+  String? get discoveryError => _discoveryError;
+  final MachineDiscoveryWatch _discoveryWatch =
+      MachineDiscoveryWatch(db: FirebaseFirestore.instance);
 
   void _note(String note) {
     if (_connectionNote == note) {
@@ -331,8 +342,7 @@ class AgentService extends ChangeNotifier {
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     if (stopDiscovery) {
-      _urlSub?.cancel();
-      _urlSub = null;
+      _discoveryWatch.cancel();
     }
     final socket = _ws;
     _ws = null;
@@ -369,76 +379,65 @@ class AgentService extends ChangeNotifier {
   Future<String> _token() async => (await _auth!.user!.getIdToken())!;
 
   void _watchDiscovery(String uid) {
-    _urlSub?.cancel();
-    // Watch the URL doc — when the server publishes a URL, connect via WebSocket
-    _urlSub = _db
-        .collection('users')
-        .doc(uid)
-        .snapshots()
-        .listen(
-          (doc) async {
-            if (_boundUid != uid) return;
-            try {
-              // The machine's request for this tab to reload rides the document
-              // this listener already watches: a stale bundle is otherwise
-              // something only a human can fix. Honoured once per request, and
-              // only when it is newer than this page.
-              _clientReport.offerReload(doc.data()?[kClientReloadField]);
-              await _applyDiscovery(doc);
-            } catch (e) {
-              // This body is async and the listener swallows what it throws: a
-              // defect in here looked exactly like a machine that was simply
-              // offline, with nothing recorded and no further attempt.
-              _note('the connection could not be started: $e');
-              notifyListeners();
-            }
-          },
-          onError: (e) {
-            // A listener that dies silently is the worst case: the app looks
-            // offline and nothing anywhere says the updates stopped arriving.
-            _note('the machine\'s updates stopped reaching this app: $e');
-            notifyListeners();
-          },
-        );
+    // The watch owns the subscription and the failure; what to DO about a
+    // document stays here, because only this service can dial and report.
+    _discoveryWatch.watch(
+      uid,
+      stillCurrent: () => _boundUid == uid,
+      onDocument: (doc) async {
+        // The machine's reload request rides the document this listener already
+        // watches; honoured once, and only if newer than this page.
+        _clientReport.offerReload(doc.data()?[kClientReloadField]);
+        await _applyDiscovery(doc);
+      },
+      onFailure: (error) {
+        _note(error is StateError || error is ArgumentError
+            ? 'the connection could not be started: $error'
+            : 'the machine\'s updates stopped reaching this app: $error');
+        notifyListeners();
+      },
+    );
+    // Mirror the watch's own failure into the one the UI reads.
+    final failure = _discoveryWatch.lastError;
+    if (failure != null && '$failure' != _discoveryError) {
+      _discoveryError = '$failure';
+      notifyListeners();
+    }
   }
 
   /// Apply one discovery update: pick an endpoint, dial it, try direct beside it.
   Future<void> _applyDiscovery(DocumentSnapshot<Map<String, dynamic>> doc) async {
-    if (!doc.exists) {
+    final data = doc.data();
+    final reading = readDiscoveryDocument(data, exists: doc.exists);
+    if (reading is NoMachinePublished) {
       _note('the machine has not published anything for this account yet');
       _transitionToDisconnected(forgetEndpoint: true);
       return;
     }
-    final data = doc.data();
-    if (data == null) {
+    if (reading is UnreadableDocument) {
       _note('the machine published an update this app could not read');
       return;
     }
-    final ts = (data['ts'] as num?)?.toInt() ?? 0;
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final age = now - ts;
-    final fresh = age >= -30000 && age < 60000;
-    final endpoint = secureDiscoveryWebSocketUri(data['url']);
-
-    if (!fresh) {
-      _note("the machine's last update is ${(age / 1000).round()}s old, so it is not being used");
+    if (reading is StaleMachine) {
+      _note("the machine's last update is ${(reading.age.inMilliseconds / 1000).round()}s old, so it is not being used");
       _transitionToDisconnected(forgetEndpoint: true);
       return;
     }
-    // Record the machine's own claim while it is fresh, before deciding
-    // anything about reaching it: this is what lets "offline" mean the machine,
-    // not merely this app's last dial.
-    _machineSeenAt = DateTime.now().millisecondsSinceEpoch;
-    _machineSaidOnline = data['online'] == true;
-
-    // A published URL that is not a safe WSS endpoint is refused outright:
-    // nothing may receive the Firebase token instead.
-    if (data['url'] != null && endpoint == null) {
+    if (reading is InsecureEndpointRefused) {
+      // A published URL that is not a safe WSS endpoint is refused outright:
+      // nothing may receive the Firebase token instead.
       _transitionToDisconnected(forgetEndpoint: true, notify: false);
       _error = 'Rejected insecure discovery URL';
       notifyListeners();
       return;
     }
+    final live = reading as LiveMachine;
+    final endpoint = live.endpoint;
+    // Record the machine's own claim while it is fresh, before deciding
+    // anything about reaching it: this is what lets "offline" mean the machine,
+    // not merely this app's last dial.
+    _machineSeenAt = DateTime.now().millisecondsSinceEpoch;
+    _machineSaidOnline = live.online;
     if (endpoint != null) _lastEndpoint = endpoint;
 
     // The tunnel is dialled FIRST and the direct attempt runs beside it: a

@@ -706,6 +706,7 @@ class _EmptySessions extends StatelessWidget {
       machinePresenceError: svc.machinePresenceError,
       machineSignalingError: svc.machineSignalingError,
       clientReportError: svc.clientReportError,
+      discoveryError: svc.discoveryError,
     );
     return Center(
       child: Column(
