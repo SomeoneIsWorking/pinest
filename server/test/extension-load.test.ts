@@ -147,6 +147,23 @@ test("factory registers the reload_runtime agent tool", async () => {
   assert.ok(pi.tools.includes("reload_runtime"), "registers reload_runtime tool");
 });
 
+test("the host session is handed the subagent tool, so the terminal's agent can fan out", async () => {
+  // The registration surface, checked against the real factory: a subagent tool
+  // that exists only on spawned sessions would make the terminal's own agent —
+  // the one the user is typing at — unable to use the capability at all.
+  const mod = await freshModule();
+  const pi = stubPi();
+  mod.default(pi);
+  assert.ok(
+    pi.tools.includes("subagent"),
+    `the host must be able to spawn subagents; registered: ${pi.tools.join(", ")}`,
+  );
+  assert.ok(
+    pi.tools.includes("bg_run"),
+    "and the subagent tool must not have displaced the background tools",
+  );
+});
+
 test("reload-safety: a FRESH pi (after /reload) re-registers all commands", async () => {
   const mod = await freshModule();
   const pi1 = stubPi();

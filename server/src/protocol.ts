@@ -82,6 +82,11 @@ export interface SessionRow {
   status?: "running" | "idle" | "closed";
   isInteractive?: boolean;
   isHost?: boolean;
+  /** The session that spawned this one, when it is a subagent. Durable, so a
+   * child that is not running right now still reads as that parent's child. */
+  parentSessionId?: string | null;
+  /** The subagent run this row is, when it is one. */
+  subagent?: SubagentRun | null;
   createdAt?: number;
   updatedAt?: number;
   // overlay fields added by session_list (mergedRegistryRows)
@@ -104,6 +109,10 @@ export interface SessionSnapshot {
   thinkingLevel?: string;
   isInteractive?: boolean;
   isHost?: boolean;
+  /** The session that spawned this one, when it is a subagent. */
+  parentSessionId?: string;
+  /** What this subagent was asked to do, and how its run went. */
+  subagent?: SubagentRun;
   createdAt?: number;
   resumed?: boolean;
   /** Messages submitted but not yet delivered into the session (server-authoritative queue). */
@@ -142,6 +151,18 @@ export interface BackgroundJobSummary {
   error?: string;
   logPath: string;
   totalBytes: number;
+}
+
+/** One subagent run, as the clients see it: what the child was asked to do,
+ * whether it is still running, and what it reported back. */
+export interface SubagentRun {
+  task: string;
+  status: "running" | "completed" | "failed" | "stopped";
+  startedAt: number;
+  finishedAt?: number;
+  /** The child's final message, bounded. Absent while running. */
+  summary?: string;
+  error?: string;
 }
 
 export type ServerMessage =

@@ -11,6 +11,7 @@ import '../services/deploy_version.dart';
 import '../services/link_bridge.dart';
 import '../services/user_preferences.dart';
 import '../models/session.dart';
+import '../logic/session_grouping.dart';
 import 'chat_screen.dart';
 import 'spawn_dialog.dart';
 import 'settings_screen.dart';
@@ -127,7 +128,10 @@ class _MainShellState extends State<MainShell> {
     final width = MediaQuery.sizeOf(context).width;
     final wide = width >= 720;
 
-    final sessions = svc.sessions;
+    // Grouped, so a subagent is listed under the session that spawned it and
+    // not wherever it happened to land in start order.
+    final tree = buildSessionTree(svc.sessions);
+    final sessions = tree.map((row) => row.session).toList();
     // Keep selection valid
     if (_selectedId != null && !sessions.any((s) => s.id == _selectedId)) {
       _selectedId = sessions.isNotEmpty ? sessions.first.id : null;
@@ -140,12 +144,13 @@ class _MainShellState extends State<MainShell> {
     }
 
     if (wide) {
-      return _wide(context, svc, sessions);
+      return _wide(context, svc, tree);
     }
-    return _narrow(context, svc, sessions);
+    return _narrow(context, svc, tree);
   }
 
-  Widget _wide(BuildContext context, AgentService svc, List<Session> sessions) {
+  Widget _wide(BuildContext context, AgentService svc, List<SessionTreeRow> tree) {
+    final sessions = tree.map((row) => row.session).toList();
     final active = _activeSession(sessions);
     // TabBar + TabBarView require a TabController ancestor; without it they
     // throw a null-check crash the moment sessions render. DefaultTabController
@@ -207,10 +212,13 @@ class _MainShellState extends State<MainShell> {
               : TabBar(
                   isScrollable: true,
                   tabs: sessions
+                      .asMap()
+                      .entries
                       .map(
-                        (s) => _SessionTab(
-                          session: s,
-                          onEdit: () => _editSession(context, svc, s),
+                        (entry) => _SessionTab(
+                          session: entry.value,
+                          level: tree[entry.key].level,
+                          onEdit: () => _editSession(context, svc, entry.value),
                         ),
                       )
                       .toList(),
@@ -233,8 +241,9 @@ class _MainShellState extends State<MainShell> {
   Widget _narrow(
     BuildContext context,
     AgentService svc,
-    List<Session> sessions,
+    List<SessionTreeRow> tree,
   ) {
+    final sessions = tree.map((row) => row.session).toList();
     final selected = _selectedId != null
         ? sessions.where((s) => s.id == _selectedId).firstOrNull
         : null;
@@ -307,7 +316,7 @@ class _MainShellState extends State<MainShell> {
       ),
       drawer: Drawer(
         child: _SessionList(
-          sessions: sessions,
+          rows: tree,
           selectedId: _selectedId,
           onTap: (id) {
             _selectSession(svc, id);
@@ -460,8 +469,9 @@ class _MainShellState extends State<MainShell> {
 
 class _SessionTab extends StatelessWidget {
   final Session session;
+  final int level;
   final VoidCallback onEdit;
-  const _SessionTab({required this.session, required this.onEdit});
+  const _SessionTab({required this.session, required this.onEdit, this.level = 1});
 
   @override
   Widget build(BuildContext context) {
@@ -484,6 +494,15 @@ class _SessionTab extends StatelessWidget {
             const Padding(
               padding: EdgeInsets.only(right: 4),
               child: Icon(Icons.dns, size: 14, color: Colors.purple),
+            )
+          else if (session.isSubagent)
+            Padding(
+              padding: const EdgeInsets.only(right: 4),
+              child: Icon(
+                Icons.hub_outlined,
+                size: 14,
+                color: session.subagent?.isFinished == true ? Colors.grey : Colors.orange,
+              ),
             ),
           Text(session.isHost ? '🖥 ${session.name}' : session.name),
           const SizedBox(width: 2),
@@ -501,12 +520,13 @@ class _SessionTab extends StatelessWidget {
 }
 
 class _SessionList extends StatelessWidget {
-  final List<Session> sessions;
+  /// The sessions in TREE order: each session, then the subagents it spawned.
+  final List<SessionTreeRow> rows;
   final String? selectedId;
   final ValueChanged<String> onTap;
   final ValueChanged<Session> onEdit;
   const _SessionList({
-    required this.sessions,
+    required this.rows,
     required this.selectedId,
     required this.onTap,
     required this.onEdit,
@@ -514,8 +534,9 @@ class _SessionList extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final selected = sessions.cast<Session?>().firstWhere(
-      (s) => s?.id == selectedId,
+    final sessions = rows.map((r) => r.session).toList();
+    final selected = rows.cast<SessionTreeRow?>().firstWhere(
+      (r) => r?.session.id == selectedId,
       orElse: () => null,
     );
     return ListView(
@@ -537,14 +558,27 @@ class _SessionList extends StatelessWidget {
             ],
           ),
         ),
-        ...sessions.map((s) {
+        ...rows.map((row) {
+          final s = row.session;
           final dot = s.isWorking
               ? Colors.orange
               : s.isOnline
               ? Colors.green
               : Colors.grey;
+          final parentName = s.parentSessionId == null
+              ? null
+              : sessions
+                  .where((p) => p.id == s.parentSessionId)
+                  .map((p) => p.name)
+                  .firstOrNull;
           return ListTile(
             selected: s.id == selectedId,
+            // A subagent is indented under the session that spawned it, so a
+            // fan-out reads as a tree rather than as a list of strangers.
+            contentPadding: EdgeInsets.only(
+              left: 16.0 + 14.0 * (row.level - 1),
+              right: 8,
+            ),
             leading: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -552,6 +586,15 @@ class _SessionList extends StatelessWidget {
                   const Padding(
                     padding: EdgeInsets.only(right: 6),
                     child: Icon(Icons.dns, size: 16, color: Colors.purple),
+                  )
+                else if (s.isSubagent)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: Icon(
+                      Icons.hub_outlined,
+                      size: 16,
+                      color: s.subagent?.isFinished == true ? Colors.grey : Colors.orange,
+                    ),
                   ),
                 Container(
                   width: 10,
@@ -562,8 +605,12 @@ class _SessionList extends StatelessWidget {
             ),
             title: Text(s.isHost ? '🖥 ${s.name} (host)' : s.name),
             subtitle: Text(
-              s.cwd,
-              maxLines: 1,
+              [
+                s.cwd,
+                if (parentName != null) 'subagent of $parentName',
+                if (s.subagent != null) s.subagent!.label,
+              ].join('\n'),
+              maxLines: 3,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 11),
             ),
@@ -591,10 +638,16 @@ class _SessionList extends StatelessWidget {
           ListTile(
             leading: const Icon(Icons.account_tree_outlined),
             title: const Text('Session Tree'),
-            subtitle: const Text('Explore and jump across branch points (/tree)'),
+            subtitle: Text(
+              subagentsOf(sessions, selected.session.id).isEmpty
+                  ? 'Explore and jump across branch points (/tree)'
+                  : '${subagentsOf(sessions, selected.session.id).length} subagent(s) \u00b7 '
+                      'explore and jump across branch points (/tree)',
+            ),
             onTap: () {
               Navigator.pop(context);
-              showTreeDialog(context, context.read<AgentService>(), selected);
+              showTreeDialog(
+                  context, context.read<AgentService>(), selected.session);
             },
           ),
         ListTile(
@@ -725,11 +778,19 @@ class SessionHistorySheet extends StatelessWidget {
           else
             ...resumable.map(
               (s) => ListTile(
-                leading: const Icon(Icons.inventory_2_outlined),
+                leading: Icon(
+                  s.isSubagent ? Icons.hub_outlined : Icons.inventory_2_outlined,
+                ),
                 title: Text(s.isHost ? '${s.name} (host)' : s.name),
                 subtitle: Text(
-                  '${s.cwd}\n${s.modelName ?? s.model ?? ''}',
-                  maxLines: 2,
+                  [
+                    s.cwd,
+                    s.modelName ?? s.model ?? '',
+                    // A subagent is durable too: a child whose run is over is
+                    // still that parent's child when it is resumed.
+                    if (s.isSubagent) 'subagent${s.subagent == null ? '' : ' · ${s.subagent!.label}'}',
+                  ].join('\n'),
+                  maxLines: 3,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontSize: 11),
                 ),

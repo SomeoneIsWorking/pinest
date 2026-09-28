@@ -23,6 +23,9 @@ function parkedSession(segmenter: unknown): LiveSession {
     cwd: "/tmp",
     status: "idle",
     segmenter,
+    // A session this build parked itself carries every field it added; the
+    // tests below that are about "an older build" remove it explicitly.
+    settleWaiters: [],
   } as unknown as LiveSession;
 }
 
@@ -81,4 +84,38 @@ test("an instance that already belongs to this build is kept, so a live run keep
 
   assert.equal(session.segmenter, live, "same-build handoff must not disturb an in-flight stream");
   assert.deepEqual(missing, []);
+});
+
+test("a session parked before subagents existed gets a waiter list, and the gap is reported", () => {
+  const session = parkedSession(new StreamSegmenter());
+  // A build that predates the subagent feature parked the session without it.
+  delete (session as Partial<LiveSession>).settleWaiters;
+
+  const missing = normaliseAdopted("s5", session, undefined);
+
+  assert.deepEqual(session.settleWaiters, [], "a subagent run waits on this field");
+  assert.ok(missing.includes("settleWaiters"), `the gap must be reported: ${missing.join(",")}`);
+});
+
+test("a subagent run that was in flight when the runtime went away reads as stopped", () => {
+  const session = parkedSession(new StreamSegmenter());
+  session.subagent = { task: "audit the parser", status: "running", startedAt: 1 };
+  (session as unknown as { session: { isIdle: boolean } }).session = { isIdle: true };
+
+  normaliseAdopted("s6", session, undefined);
+
+  assert.equal(session.subagent?.status, "stopped", "nothing is running it any more");
+  assert.equal(session.subagent?.error, "stopped by a host reload");
+  assert.equal(session.subagent?.task, "audit the parser", "what it was for is kept");
+});
+
+test("a subagent that finished before the reload keeps its verdict", () => {
+  const session = parkedSession(new StreamSegmenter());
+  session.subagent = { task: "audit the parser", status: "completed", startedAt: 1, summary: "done" };
+  (session as unknown as { session: { isIdle: boolean } }).session = { isIdle: true };
+
+  normaliseAdopted("s7", session, undefined);
+
+  assert.equal(session.subagent?.status, "completed");
+  assert.equal(session.subagent?.summary, "done");
 });

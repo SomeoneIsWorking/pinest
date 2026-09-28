@@ -37,7 +37,35 @@ cited), `partial`, `blocked`, `missing`. One current focus at the bottom.
 | S20 | The objective belongs to the session it was set for, and shows only on that tab | verified | S1, S8 | G1, G2 |
 | S21 | Instructions the harness injects are never shown as the user's own words | verified | S6, S9 | G1 |
 | S22 | The host terminal lists its sessions, opens any of them, and prompts it from there | partial | S1, S8, S9 | G1, G2 |
+| S23 | An agent can fan work out to subagents, and both clients show and drive them | verified | S1, S2, S8 | G1, G2 |
 Atomic work and findings live in `docs/issues/`.
+
+### S23 — Subagent fan-out
+
+An agent spawns a subagent with the `subagent` tool, and the subagent is a real
+in-process pi session with a parent: its own transcript, context and model, a
+durable registry row. The parent's tool call waits for the child's turn and
+returns the child's final message (bounded, with a pointer to the full
+transcript). The tree is three levels deep — a session, its subagents, and their
+subagents — and what bounds it inside that is concurrency: four live subagents
+per session, twelve per machine, each a refusal that names the limit. An
+aborted parent stops its child; a turn cancelled before the spawn never opens
+one.
+
+Both clients show the tree rather than a flat roster: the host list indents each
+subagent under its parent and names the run (`subagent running of <parent>`),
+the app's drawer does the same and a subagent's own tab carries a banner with
+the parent, the task and the verdict. A subagent is a session, so opening,
+prompting, stopping and deleting it work with no new plumbing.
+
+Verified with 30 new server tests, 11 client tests, and
+`drills/subagent-fanout.mjs` against real AgentSessions and a real model, whose
+`--negative` control (the same request to a model with no such tool) fails as it
+must. The drill found two defects the unit tests could not: a child that was
+opened and never given its brief, and a session opened for an already-cancelled
+turn. See `docs/issues/0070-subagent-fan-out.md` for both, and for the gaps
+(no client control of the limits; not yet qualified against a deployed app on a
+phone).
 
 ### S22 — Host terminal session views
 

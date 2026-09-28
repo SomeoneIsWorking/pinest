@@ -3,7 +3,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { loadConfig, saveConfig } from "./config.ts";
 import { PROVIDERS } from "./tunnel.ts";
 import { createAttachView } from "./attach-view.ts";
-import { createSessionsView, type SessionSummary } from "./sessions-view.ts";
+import { createSessionsView, orderSessionsByParent, type SessionSummary } from "./sessions-view.ts";
 import { resolvePathInput, deriveSessionName, statSyncSafe } from "./logic.ts";
 import { DEFAULT_MODEL } from "./product-defaults.ts";
 import { reauthenticateRemoteOwner } from "./owner-runtime.ts";
@@ -188,7 +188,7 @@ export async function showSessionsFlow(
     const hostSnap = sessions.get(sessionId);
     const liveSessions: [string, any][] = supervisor ? Array.from(supervisor.sessions.entries()) : [];
 
-    const summaries: SessionSummary[] = [
+    const summaries: SessionSummary[] = orderSessionsByParent([
       {
         id: sessionId,
         name: hostSnap?.name ?? "this terminal",
@@ -210,8 +210,16 @@ export async function showSessionsFlow(
         modelName: s.modelName,
         thinking: thinkingOf(s.session, sessions.get(id)),
         pending: sessions.get(id)?.pendingMessages?.length ?? s.pending?.length,
+        ...(s.parentSessionId
+          ? {
+              parentSessionId: s.parentSessionId,
+              parentName: sessions.get(s.parentSessionId)?.name ?? hostSnap?.name,
+              subagent: s.subagent,
+              level: supervisor?.levelOf(id) ?? 2,
+            }
+          : {}),
       })),
-    ];
+    ]);
 
     // A holder object rather than a bare `let`: the step is written from inside
     // the overlay's callbacks, and a variable initialized to `null` narrows back

@@ -25,6 +25,17 @@ import { statSync } from "node:fs";
 import { mapModel, deriveSessionName, messagesToHistory, pageHistory, historyWithEmbeds, extractSessionMessages, extractUserText, extractText, extractToolResult, popPending, lookupImage } from "./logic.ts";
 import { createAutoBackgroundBashTool, type BackgroundProcessManager } from "./bash-tool.ts";
 import { createBackgroundTools } from "./background-tools.ts";
+import { bindSubagents } from "./subagent-tools.ts";
+import { SubagentTree } from "./subagent-tree.ts";
+import { rowIdForToolContext, type PiSessionRef } from "./session-identity.ts";
+import {
+  MAX_SUBAGENT_LEVEL,
+  type SubagentService,
+  awaitTurnEnd,
+  settleTurn,
+  type SettledRun,
+  type SubagentRun,
+} from "./subagent.ts";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { StreamSegmenter, type StreamSegmenterState } from "./stream.ts";
 import { submitUserMessage } from "./session-submit.ts";
@@ -74,6 +85,14 @@ export interface SpawnCommand {
   name?: string;
   /** provider/model id, e.g. "opencode-go/glm-5.3-flash" */
   model?: string;
+  /**
+   * Set when this session is a SUBAGENT: who spawned it and what it was asked
+   * to do. Its presence is what makes the session a subagent — the row records
+   * the parent, the run is published from the first broadcast rather than only
+   * once a caller gets round to marking it, and the tree level decides whether
+   * the `subagent` tool is handed to this session at all.
+   */
+  parent?: { sessionId: string; task: string };
 }
 
 export interface ResumeCommand {
@@ -126,11 +145,26 @@ export interface LiveSession {
   /** True between a run's message_start and agent_end (submission gate). */
   turnStarted: boolean;
   submitter: MessageSubmitter | null;
+  /** The session that spawned this one, when it is a subagent. */
+  parentSessionId?: string;
+  /** The subagent run this session is, with the state clients render. */
+  subagent?: SubagentRun;
+  /** Waiters for this session's CURRENT turn to end. They live on the session
+   * object, not in a module, so a parked session keeps the waiters it had and
+   * whichever build's event handler is attached can settle them. */
+  settleWaiters: Array<(run: SettledRun) => void>;
 }
 
 export interface SupervisorOptions {
   /** Redirect pi's state dir (PI_AGENT_DIR) — used by tests. */
   agentDir?: string;
+  /**
+   * The HOST session's own facts. The host is pi's own session, so it is not in
+   * `sessions` — but it is a session like any other for everything that asks
+   * what a session is: its workspace, its model, and the level it sits at in
+   * the subagent tree.
+   */
+  hostSession?: () => { id: string; name: string; cwd: string; model?: string | null } | null;
 }
 
 /** Fill in fields a parked session may predate (a hot reload IS a version
@@ -147,6 +181,14 @@ export function normaliseAdopted(id: string, s: LiveSession, segmenterState?: St
   fix("pendingSteering", [], Array.isArray(s.pendingSteering));
   fix("name", s.name || id, typeof s.name === "string" && s.name.length > 0);
   fix("cwd", s.cwd || process.cwd(), typeof s.cwd === "string" && s.cwd.length > 0);
+  fix("settleWaiters", [], Array.isArray(s.settleWaiters));
+  if (s.subagent?.status === "running" && typeof (s.session as any)?.isIdle === "boolean") {
+    // A run that was in flight when the runtime went away is NOT running any
+    // more; the badge would otherwise sit on "running" forever.
+    if ((s.session as any).isIdle) {
+      s.subagent = { ...s.subagent, status: "stopped", finishedAt: Date.now(), error: "stopped by a host reload" };
+    }
+  }
   fix("status", s.status === "working" ? "working" : "idle", s.status === "idle" || s.status === "working");
   // Rebuild the segmenter rather than carrying the parked instance: a reload
   // that added a method to StreamSegmenter otherwise throws on every delta
@@ -170,12 +212,85 @@ export class Supervisor {
    * each session is on" (see session-models.ts). Built in the constructor:
    * a field initializer would run before `agentDir` is assigned. */
   private readonly modelService: SessionModelService;
+  private readonly opts: SupervisorOptions;
+  /** Who spawned whom, and how deep: the tree's rules, not this class's. */
+  private readonly tree: SubagentTree;
+  /** Subagent policy: the brief, the bounds, and the run bookkeeping. One
+   * instance per supervisor. */
+  readonly subagents: SubagentService;
+  /** The `subagent` tool, bound to this supervisor's policy. */
+  private readonly subagentToolSet: (preferredOwner?: string) => ToolDefinition[];
   constructor(ownerUid: string, callbacks: SupervisorCallbacks, registry: SessionRegistry | null = null, opts: SupervisorOptions = {}) {
     this.ownerUid = ownerUid;
     this.callbacks = callbacks;
     this.registry = registry;
     this.agentDir = opts.agentDir;
+    this.opts = opts;
     this.modelService = new SessionModelService(this.agentDir);
+    this.tree = new SubagentTree({
+      live: () => [...this.sessions].map(([id, s]) => ({
+        id, name: s.name, cwd: s.cwd, model: s.model, ...(s.parentSessionId ? { parentSessionId: s.parentSessionId } : {}),
+      })),
+      row: (id) => this.registry?.get(id) ?? null,
+      host: () => {
+        const host = opts.hostSession?.();
+        return host ? { id: host.id, name: host.name, cwd: host.cwd, model: host.model } : null;
+      },
+    });
+    const bound = bindSubagents({
+      spawnChild: (request) => this.spawn({
+        cwd: request.cwd,
+        name: request.name,
+        model: request.model,
+        parent: { sessionId: request.parentSessionId, task: request.task },
+      }),
+      startChild: (sessionId, brief) => {
+        if (!this.submitUserMessage(sessionId, brief, undefined, "followUp")) {
+          throw new Error(`session ${sessionId} is not running here`);
+        }
+      },
+      stopChild: (sessionId) => this.despawn(sessionId),
+      whenSettled: async (sessionId) => {
+        const live = this.sessions.get(sessionId);
+        if (!live) throw new Error(`unknown session ${sessionId}`);
+        return awaitTurnEnd(live);
+      },
+      tree: this.tree,
+      markRun: (sessionId, run) => this.markSubagentRun(sessionId, run),
+      resolveOwner: (ctx, preferred) => this.rowIdForToolContext(ctx, preferred),
+    });
+    this.subagents = bound.service;
+    this.subagentToolSet = bound.tools;
+  }
+
+  /** Record a subagent run's state: published to the clients now, and persisted
+   * so a row that is not running still says what it was for. */
+  markSubagentRun(sessionId: string, run: SubagentRun): void {
+    const s = this.sessions.get(sessionId);
+    if (s) s.subagent = run;
+    this.callbacks.upsertSession(sessionId, { subagent: run });
+    this.persistRow(sessionId, { subagent: run });
+  }
+
+  /** The subagent tree's answers, delegated: the rules live in the tree, so a
+   * caller holds a supervisor and not a second copy of them. */
+  levelOf(sessionId: string): number {
+    return this.tree.levelOf(sessionId);
+  }
+
+  subagentIds(): string[] {
+    return this.tree.subagentIds();
+  }
+
+  /** The registry row id of the session making a tool call. The mapping itself
+   * is a pure function of the session map, so it is not this class's rule. */
+  rowIdForToolContext(ctx: unknown, preferred?: string): string {
+    return rowIdForToolContext(this.sessions as Map<string, PiSessionRef>, ctx, preferred);
+  }
+
+  /** The `subagent` tool, bound to this supervisor. */
+  subagentTools(preferredOwner?: string): ToolDefinition[] {
+    return this.subagentToolSet(preferredOwner);
   }
 
   get bgManager(): BackgroundProcessManager | undefined {
@@ -185,6 +300,7 @@ export class Supervisor {
   private async createSessionOpts(
     cwd: string,
     sessionManager?: SessionManager,
+    session: { level?: number } = {},
   ): Promise<{
     cwd: string; agentDir?: string; sessionManager?: SessionManager; resourceLoader?: ResourceLoader;
     modelRuntime?: ModelRuntime; customTools?: any[];
@@ -231,6 +347,12 @@ export class Supervisor {
         ...createBackgroundTools(this.callbacks.bgManager),
       ];
     }
+    // A session at the LAST level of the tree is given no `subagent` tool at
+    // all, so the depth rule holds for a session that never asks; the service
+    // refuses it again by name, for a definition that predates the rule.
+    if ((session.level ?? 1) < MAX_SUBAGENT_LEVEL) {
+      opts.customTools = [...(opts.customTools ?? []), ...this.subagentTools()];
+    }
     return opts;
   }
 
@@ -241,7 +363,7 @@ export class Supervisor {
    * same object identity, then refresh the registry so the wrappers
    * re-capture. Ownership is not re-armed because it was never captured: the
    * tools read it from the live execution context. */
-  private rearmSessionTools(s: LiveSession): void {
+  private rearmSessionTools(id: string, s: LiveSession): void {
     const manager = this.callbacks.bgManager;
     if (!manager) return;
     const session = s.session as any;
@@ -252,6 +374,9 @@ export class Supervisor {
     const fresh = [
       createAutoBackgroundBashTool({ bgManager: manager, cwd: s.cwd }),
       ...createBackgroundTools(manager),
+      // A session at the last level of the tree gets none: re-arming is where
+      // an adopted session would otherwise gain the tool back.
+      ...(this.levelOf(id) < MAX_SUBAGENT_LEVEL ? this.subagentTools() : []),
     ];
     const freshByName = new Map(fresh.map((tool) => [tool.name, tool]));
     let reamed = 0;
@@ -290,13 +415,14 @@ export class Supervisor {
   async spawn(cmd: SpawnCommand): Promise<string> {
     const id = cmd.sessionId || randomUUID();
     const cwd = cmd.cwd ?? process.cwd();
+    const parent = cmd.parent;
     let isDirectory = false;
     try { isDirectory = statSync(cwd).isDirectory(); } catch { /* checked below */ }
     if (!isDirectory) throw new Error(`workspace directory does not exist: ${cwd}`);
     Supervisor.activeSpawning = true;
     let session: AgentSession;
     try {
-      const opts = await this.createSessionOpts(cwd);
+      const opts = await this.createSessionOpts(cwd, undefined, { level: parent ? this.levelOf(parent.sessionId) + 1 : 1 });
       const res = await createAgentSession(opts);
       session = res.session;
     } finally {
@@ -307,6 +433,13 @@ export class Supervisor {
       session, currentTurnId: null, unsub: null, cwd, status: "idle", name,
       model: null, modelName: null, segmenter: new StreamSegmenter(), _compacting: false,
       pending: [], pendingSteering: [], turnStarted: false, submitter: null,
+      settleWaiters: [],
+      ...(parent
+        ? {
+            parentSessionId: parent.sessionId,
+            subagent: { task: parent.task, status: "running" as const, startedAt: Date.now() },
+          }
+        : {}),
     };
     this.sessions.set(id, s);
 
@@ -343,8 +476,15 @@ export class Supervisor {
       // The objective this session already works toward, so resuming or
       // respawning it shows the goal on its own tab again.
       goal: normalizeGoal(this.registry?.get(id)?.goal),
+      // A subagent's identity travels in its FIRST broadcast, not after a
+      // second call marks it: a client that saw the row before the mark would
+      // show a stranger session.
+      ...(s.parentSessionId ? { parentSessionId: s.parentSessionId, subagent: s.subagent } : {}),
     });
-    this.persistRow(id, { status: "idle", model: s.model, modelName: s.modelName });
+    this.persistRow(id, {
+      status: "idle", model: s.model, modelName: s.modelName,
+      ...(s.parentSessionId ? { parentSessionId: s.parentSessionId, subagent: s.subagent } : {}),
+    });
     this.wire(id, s);
     debug(`[remote-code] Spawned session ${id} in ${cwd}`);
     return id;
@@ -363,7 +503,7 @@ export class Supervisor {
     Supervisor.activeSpawning = true;
     let session: AgentSession;
     try {
-      const opts = await this.createSessionOpts(cwd, sessionManager);
+      const opts = await this.createSessionOpts(cwd, sessionManager, { level: this.levelOf(id) });
       const res = await createAgentSession(opts);
       session = res.session;
     } finally {
@@ -374,6 +514,8 @@ export class Supervisor {
       session, currentTurnId: null, unsub: null, cwd, status: "idle", name,
       model: null, modelName: null, segmenter: new StreamSegmenter(), _compacting: false,
       pending: [], pendingSteering: [], turnStarted: false, submitter: null,
+      settleWaiters: [],
+      ...this.tree.identityFromRow(this.registry?.get(id) ?? null),
     };
     this.sessions.set(id, s);
 
@@ -488,7 +630,8 @@ export class Supervisor {
         persistRow: (id, patch) => this.persistRow(id, patch),
         afterContextRewrite: (id, sess, notice) => this.afterContextRewrite(id, sess, notice),
         stopSession: (id, sess) => this.stopSession(id, sess),
-        createSessionOpts: (cwd) => this.createSessionOpts(cwd),
+        createSessionOpts: (cwd, level) => this.createSessionOpts(cwd, undefined, { level }),
+        levelOf: (id) => this.levelOf(id),
         wire: (id, sess) => this.wire(id, sess),
         models: (sess) => this.models(sess),
         getHistory: (sess) => this.getHistory(sess),
@@ -689,6 +832,16 @@ export class Supervisor {
           }
         } catch { /* */ }
         debug(`[remote-code] session ${id} status: working -> idle (agent_end)`);
+        // A waiter is answered by the event handler that is ATTACHED, whoever
+        // built it: a subagent run parked across a reload settles when the
+        // adopting instance sees the same agent_end.
+        const lastMessage = Array.isArray(event.messages) ? event.messages[event.messages.length - 1] : undefined;
+        const failed = lastMessage?.role === "assistant" && (lastMessage.stopReason === "error" || !!lastMessage.errorMessage);
+        settleTurn(s, {
+          ok: !failed,
+          summary: extractText(lastMessage?.content) || extractText(lastMessage),
+          ...(failed ? { error: lastMessage?.errorMessage || "provider error" } : {}),
+        });
         if (Array.isArray(event.messages)) {
           const last = event.messages[event.messages.length - 1];
           if (last?.role === "assistant" && (last.stopReason === "error" || last.errorMessage)) {
@@ -998,7 +1151,7 @@ export class Supervisor {
       s.status = working ? "working" : "idle";
       // A session still mid-run keeps its submission gate closed.
       this.wire(id, s, { resumeTurn: working });
-      this.rearmSessionTools(s);
+      this.rearmSessionTools(id, s);
       // The new instance starts with an EMPTY snapshot map, so this must carry
       // the session's IDENTITY too. Reporting only status/model is what made
       // adopted sessions show up as "session" with a blank workspace.
@@ -1011,6 +1164,7 @@ export class Supervisor {
         isInteractive: false,
         isHost: false,
         resumed: true,
+        ...(s.parentSessionId ? { parentSessionId: s.parentSessionId, subagent: s.subagent } : {}),
         // pending fields are NOT taken from the parked mirror (stale-drift
         // risk across builds): syncQueue below reads the agent's own queue.
         contextUsage: this.usageWithCompactAt(s),

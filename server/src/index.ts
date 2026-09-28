@@ -47,6 +47,7 @@ import { SessionRegistry } from "./registry.ts";
 import { deriveSessionName, extractToolResult, listPaths, resolvePathInput, pageHistory, lookupImage, embedImages } from "./logic.ts";
 import { createDefaultBackgroundManager, registerBashIntegration, toJobSummary, type BackgroundProcessManager } from "./bash-tool.ts";
 import { registerBackgroundTools, handleJobCommand } from "./background-tools.ts";
+import { registerSubagentTools } from "./subagent-tools.ts";
 import { StreamSegmenter } from "./stream.ts";
 import { loadConfig, saveConfig } from "./config.ts";
 import { normalizeGoal } from "./session-goal.ts";
@@ -487,7 +488,17 @@ async function bootstrap(): Promise<void> {
       }
     },
     bgManager: _bgManager ?? undefined,
-  }, _registry);
+  }, _registry, {
+    // The host is pi's own session, so it is not in the supervisor's map — but
+    // it is a session like any other for anything that asks what a session is.
+    // The host can fan out too, so it needs a workspace, a model and a level.
+    hostSession: () => ({
+      id: _sessionId,
+      name: _publisher.get(_sessionId)?.name ?? deriveSessionName(process.cwd(), process.env.RC_NAME),
+      cwd: process.cwd(),
+      model: _publisher.get(_sessionId)?.model ?? null,
+    }),
+  });
 
   // Re-attach runs parked by the previous instance FIRST — before the WS
   // server, tunnel, or registry restore. They are executing right now.
@@ -1110,6 +1121,21 @@ const remoteCode = (pi: ExtensionAPI): void => {
   });
   registerBashIntegration(pi, { bgManager: _bgManager, sessionId: _sessionId });
   registerBackgroundTools(pi, _bgManager, _sessionId);
+  // The host fans out like any other session. The supervisor is built during
+  // bootstrap, after this wiring runs, so both the service and the caller's
+  // row id are resolved when the tool is actually CALLED.
+  registerSubagentTools(
+    pi,
+    {
+      service: () => {
+        if (!_supervisor) throw new Error("the session supervisor is not up yet; try again in a moment");
+        return _supervisor.subagents;
+      },
+      resolveOwner: (ctx, preferred) =>
+        _supervisor?.rowIdForToolContext(ctx, preferred ?? _sessionId) ?? (preferred ?? _sessionId),
+    },
+    _sessionId,
+  );
 
   // Chokepoint on HOST message delivery: stale tool closures from before a
   // reload (orphaned managers whose delivery code never updates) still call

@@ -14,8 +14,10 @@ export interface SessionCommandHandlerContext {
   persistRow: (id: string, patch: Partial<SessionRow>) => void;
   afterContextRewrite: (id: string, s: LiveSession, notice: string) => void;
   stopSession: (id: string, s: LiveSession) => Promise<void>;
-  createSessionOpts: (cwd: string) => Promise<any>;
+  createSessionOpts: (cwd: string, subagentLevel?: number) => Promise<any>;
   wire: (id: string, s: LiveSession) => void;
+  /** How deep in the subagent tree a session sits; decides its tool set. */
+  levelOf: (sessionId: string) => number;
   models: (s: LiveSession) => Promise<ModelInfo[]>;
   getHistory: (s: LiveSession) => Promise<any[]>;
   syncQueue: (id: string, s: LiveSession) => void;
@@ -131,7 +133,7 @@ export async function dispatchSessionCommand(
       ctx.setSpawningFlag?.(true);
       let session: AgentSession;
       try {
-        const opts = await ctx.createSessionOpts(s.cwd);
+        const opts = await ctx.createSessionOpts(s.cwd, ctx.levelOf(id));
         const res = await createAgentSession(opts);
         session = res.session;
       } finally {
