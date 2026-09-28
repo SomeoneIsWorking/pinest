@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pinest_app/logic/session_grouping.dart';
 import 'package:pinest_app/models/session.dart';
 import 'package:pinest_app/services/outgoing_queue.dart';
 import 'package:pinest_app/services/session_store.dart';
@@ -11,6 +12,61 @@ void main() {
     setUp(() {
       store = SessionStore();
       outgoing = OutgoingQueue();
+    });
+
+    test('a state frame carrying a fan-out groups the way the user reads it', () {
+      // The wire path, not the model: a subagent is only visible in the UI if
+      // the state push that announces it is parsed into a parent link.
+      store.applyState(
+        {
+          'online': true,
+          'hostname': 'my-host',
+          'sessions': [
+            {'id': 'child', 'name': 'parser audit', 'cwd': '/w', 'status': 'working',
+             'parentSessionId': 's1',
+             'subagent': {'task': 'count the callers', 'status': 'running', 'startedAt': 5}},
+            {'id': 's1', 'name': 'the agent', 'cwd': '/w', 'status': 'working'},
+          ],
+          'registry': <Map<String, dynamic>>[],
+        },
+        outgoing: outgoing,
+        onSessionFinished: (_) {},
+      );
+
+      final child = store.sessions.firstWhere((s) => s.id == 'child');
+      expect(child.isSubagent, isTrue);
+      expect(child.parentSessionId, 's1');
+      expect(child.subagent!.label, 'running');
+      expect(child.subagent!.isFinished, isFalse);
+      // Grouped: the child is listed under the session that spawned it.
+      expect(
+        buildSessionTree(store.sessions).map((r) => r.session.id).toList(),
+        ['s1', 'child'],
+      );
+    });
+
+    test('a durable subagent row keeps saying whose child it is after the run', () {
+      store.applyState(
+        {
+          'online': true,
+          'hostname': 'my-host',
+          'sessions': <Map<String, dynamic>>[],
+          'registry': [
+            {'id': 'child', 'name': 'parser audit', 'cwd': '/w', 'status': 'closed',
+             'piSessionPath': '/w/session.jsonl', 'parentSessionId': 's1',
+             'subagent': {'task': 'count the callers', 'status': 'completed',
+                          'startedAt': 5, 'finishedAt': 9, 'summary': 'three of them'}},
+          ],
+        },
+        outgoing: outgoing,
+        onSessionFinished: (_) {},
+      );
+
+      final row = store.resumableSessions.single;
+      expect(row.isResumable, isTrue, reason: 'a subagent is resumable like any session');
+      expect(row.isSubagent, isTrue);
+      expect(row.subagent!.label, 'done');
+      expect(row.subagent!.summary, 'three of them');
     });
 
     test('applyState populates sessions, registry, and streaming properties', () {
