@@ -101,10 +101,21 @@ void main() {
       expect(decide(null), isA<NoEndpointPublished>());
     });
 
-    test('a stale record is not dialable, however good its url is', () {
-      // A machine that stopped saying so is not a machine that is up: the record
-      // is the only evidence, and old evidence is not evidence.
-      expect(decide(record(ageSeconds: 600, url: 'https://machine.example')),
+    test('a record written days ago is still dialled, because that is normal here', () {
+      // The host publishes on CHANGE, so a record a day old is what a healthy
+      // machine looks like. This assertion exists because the opposite was true
+      // and it rejected every real record: the app reported "has not published"
+      // for a machine that was up, for no reason other than that it had been up
+      // for longer than 90 seconds.
+      expect(decide(record(ageSeconds: 60 * 60 * 24, url: 'https://machine.example')),
+          isA<EndpointDialable>());
+    });
+
+    test('a record old enough to be worthless is still refused', () {
+      // The bound still exists, it is just no longer a freshness race. A dead
+      // machine's record is dealt with by the dial failing, which is honest:
+      // "cannot reach" is true, whereas refusing to try would say "not found".
+      expect(decide(record(ageSeconds: 60 * 60 * 24 * 60, url: 'https://machine.example')),
           isA<NoEndpointPublished>());
     });
 

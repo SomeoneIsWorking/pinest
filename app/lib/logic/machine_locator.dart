@@ -33,7 +33,12 @@ abstract class MachineLocatorSink {
   void onDialable(Uri? secureUrl, {required bool fromRealtimeDatabase});
 
   /// A machine is not to be found here. [why] is in words a person can act on.
-  void onMissing(String why, {required bool fromRealtimeDatabase});
+  ///
+  /// [lookupFailed] says the SERVICE was the problem, which is the only case
+  /// where the app may say it cannot reach Firebase. A lookup that succeeded and
+  /// simply found nothing is an answer, and calling it a failure tells the
+  /// person looking at the screen that something is broken that is not.
+  void onMissing(String why, {required bool fromRealtimeDatabase, required bool lookupFailed});
 }
 
 class MachineLocator {
@@ -62,7 +67,7 @@ class MachineLocator {
       // with no record anywhere that updates stopped arriving.
       onError: (Object error) => sink.onMissing(
         "the machine's updates stopped reaching this app: $error",
-        fromRealtimeDatabase: false,
+        fromRealtimeDatabase: false, lookupFailed: true,
       ),
     );
   }
@@ -85,10 +90,10 @@ class MachineLocator {
         await _askRealtimeDatabase(uid);
       case UnreadableDocument():
         sink.onMissing('the machine published an update this app could not read',
-            fromRealtimeDatabase: false);
+            fromRealtimeDatabase: false, lookupFailed: false);
       case InsecureEndpointRefused():
         sink.onMissing('the machine published an address this app will not dial',
-            fromRealtimeDatabase: false);
+            fromRealtimeDatabase: false, lookupFailed: false);
     }
   }
 
@@ -109,11 +114,11 @@ class MachineLocator {
           sink.onDialable(secureUrl, fromRealtimeDatabase: true);
         case NoEndpointPublished():
           sink.onMissing('the machine has not published anywhere this app can see',
-              fromRealtimeDatabase: true);
+              fromRealtimeDatabase: true, lookupFailed: false);
       }
     } catch (error) {
       sink.onMissing('this app could not reach the machine list: $error',
-          fromRealtimeDatabase: true);
+          fromRealtimeDatabase: true, lookupFailed: true);
     }
   }
 }
