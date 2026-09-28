@@ -28,6 +28,8 @@ interface FakeSession {
   thinking?: string;
   /** What a child could not inherit. */
   warning?: string;
+  /** Whether the session is executing a turn. */
+  status: "idle" | "working";
 }
 
 interface Spawned extends FakeSession {
@@ -50,9 +52,13 @@ class FakeHost implements SubagentHost {
   private next = 0;
   hostSession: FakeSession | null = null;
 
-  add(session: FakeSession): FakeSession {
-    this.sessions.set(session.id, session);
-    return session;
+  add(session: Omit<FakeSession, "status"> & { status?: "idle" | "working" }): FakeSession {
+    // A hand-placed child defaults to WORKING, because a child exists to be
+    // doing something; a test that wants an idle one says so. Defaulting to idle
+    // would make the concurrency caps pass vacuously.
+    const full: FakeSession = { status: "working", ...session } as FakeSession;
+    this.sessions.set(full.id, full);
+    return full;
   }
 
   async spawnChild(request: {
@@ -78,6 +84,7 @@ class FakeHost implements SubagentHost {
         ? `could not use the parent's model ${request.model} (not available to this session); it ran on other/whatever instead`
         : undefined,
       task: request.task,
+      status: "working" as const,
       settle: (run) => this.finish(id, run),
     };
     void parent;
@@ -88,6 +95,8 @@ class FakeHost implements SubagentHost {
 
   /** Settle a run that is already registered (from a spawn the test started). */
   finish(sessionId: string, run: SettledRun): void {
+    const s = this.sessions.get(sessionId);
+    if (s) s.status = "idle";
     const waiters = this.waiters.get(sessionId) ?? [];
     this.waiters.delete(sessionId);
     for (const resolve of waiters) resolve(run);
@@ -123,6 +132,20 @@ class FakeHost implements SubagentHost {
 
   subagentIds(): string[] {
     return [...this.sessions.values()].filter((s) => s.parentSessionId !== undefined).map((s) => s.id);
+  }
+
+  /** A child counts as running until its run has a verdict, then it is idle. */
+  runningChildrenOf(parentSessionId: string): string[] {
+    return this.childrenOf(parentSessionId).filter((id) => this.isWorking(id));
+  }
+
+  runningSubagentIds(): string[] {
+    return this.subagentIds().filter((id) => this.isWorking(id));
+  }
+
+  private isWorking(sessionId: string): boolean {
+    return (this.sessions.get(sessionId)?.status === "working"
+      || this.runs.get(sessionId)?.status === "running");
   }
 
   parentOf(sessionId: string): string | undefined {
@@ -161,8 +184,16 @@ class FakeHost implements SubagentHost {
     return this.sessions.get(sessionId)?.name;
   }
 
+  statusOf(sessionId: string): "idle" | "working" | undefined {
+    return this.sessions.get(sessionId)?.status;
+  }
+
   markRun(sessionId: string, run: SubagentRun): void {
     this.runs.set(sessionId, run);
+    // Settling a run is what frees its slot; the real supervisor marks the
+    // session idle as the agent stops working.
+    const s = this.sessions.get(sessionId);
+    if (s) s.status = "idle";
   }
 }
 
@@ -198,46 +229,96 @@ test("a run spawns a real child in the parent's workspace and returns its words"
   assert.equal(host.runs.get(child.id)?.task, "Audit the retry policy.\nOnly that file.");
 });
 
-test("a finished subagent gives its slot back, so a parent can keep fanning out", async () => {
-  // THE CAP COUNTS LIVE SESSIONS, and `stopChild` is the only thing that removes one. So a child
-  // whose run has ended still holds its slot until something releases it, and a parent that fans
-  // out `maxPerParent` times in one session can never fan out again — permanently, for the life of
-  // the process, with no error and nothing to wait for. The refusal then names four subagents that
-  // finished hours ago as "already running".
+test("a FINISHED subagent stays reachable, and stops costing a slot", async () => {
+  // Both halves are the same requirement: a parent can keep fanning out, and can
+  // still reach what it fanned out.
   //
-  // The aborted path already released its child, so the asymmetry is the tell: an ABORTED child is
-  // the one you least want left running, and it was the only one being cleaned up. This pins the
-  // normal path to match.
+  // The slot half was already fixed, and the fix was to DESPAWN finished children.
+  // That made the count honest by destroying the child: once despawned it is gone
+  // from live sessions, so its parent could no longer talk to it, resume it, or
+  // kill it — only read a summary it had already received. Delegation you spawn
+  // work for and then cannot reach is not delegation.
+  //
+  // The cap is now spent on work that is still RUNNING, so nothing has to be
+  // destroyed to account for it, and a finished child stays alive and idle.
   const host = new FakeHost();
   const service = new SubagentService(host, { maxPerParent: 2 });
   const parent = parentSession(host);
 
-  for (const task of ["first", "second"]) {
-    const running = service.run({ parentSessionId: parent.id, task });
-    await new Promise((r) => setImmediate(r));
-    host.spawned[host.spawned.length - 1].settle({ ok: true, summary: `${task} done` });
-    const outcome = await running;
-    assert.equal(outcome.status, "completed", `${task} ran to completion`);
-  }
+  const first = service.run({ parentSessionId: parent.id, task: "first" });
+  await new Promise((r) => setImmediate(r));
+  host.spawned[host.spawned.length - 1].settle({ ok: true, summary: "first done" });
+  const one = await first;
 
   assert.deepEqual(
     host.stopped,
-    ["child-1", "child-2"],
-    "each finished child was stopped, in the order it finished",
-  );
-  assert.deepEqual(
-    service.host.childrenOf(parent.id),
     [],
-    "no finished child is still holding a slot",
+    "a child that finished on its own is NOT stopped - its parent still owns it",
+  );
+  assert.ok(
+    host.sessions.has(one.sessionId),
+    "the finished child is still a live session, so it can be talked to, resumed, or killed",
+  );
+  assert.equal(host.statusOf(one.sessionId), "idle", "and it is idle, not working");
+  assert.deepEqual(
+    service.host.runningChildrenOf(parent.id),
+    [],
+    "an idle child costs no slot, which is what a finished run means",
   );
 
-  // The symptom, stated as the user sees it: a third fan-out is refused by a cap that nothing is
-  // at any more.
-  const third = service.run({ parentSessionId: parent.id, task: "third" });
+  // The symptom the cap half exists to prevent: four completed runs used to make
+  // every later fan-out refuse, naming runs that had ended hours earlier.
+  const outcomes = [];
+  for (const task of ["second", "third", "fourth"]) {
+    const run = service.run({ parentSessionId: parent.id, task });
+    await new Promise((r) => setImmediate(r));
+    host.spawned[host.spawned.length - 1].settle({ ok: true, summary: `${task} done` });
+    outcomes.push(await run);
+  }
+  assert.equal(outcomes.length, 3, "a parent can keep fanning out past its own cap");
+  assert.ok(
+    outcomes.every((o) => o.status === "completed"),
+    "and each of those finished, rather than being refused",
+  );
+  assert.equal(
+    host.childrenOf(parent.id).length,
+    4,
+    "all four children are still live and reachable",
+  );
+});
+
+test("a cap is spent on work that is RUNNING, so a live but idle child is not refused", async () => {
+  // The counter-case, and the reason the cap reads a busy state rather than a
+  // list of children: a child the parent kept and may want to resume must not
+  // block new work, or the bound grows with the conversation instead of with
+  // concurrency.
+  const host = new FakeHost();
+  const service = new SubagentService(host, { maxPerParent: 1 });
+  const parent = parentSession(host);
+  const done = host.add({ id: "finished", parentSessionId: parent.id, name: "old", cwd: "/w", status: "idle" });
+
+  const run = service.run({ parentSessionId: parent.id, task: "fresh" });
   await new Promise((r) => setImmediate(r));
-  host.spawned[host.spawned.length - 1].settle({ ok: true, summary: "third done" });
-  assert.equal((await third).status, "completed", "a completed subagent does not consume the cap");
-  assert.equal(host.spawned.length, 3, "all three ran");
+  host.spawned[host.spawned.length - 1].settle({ ok: true, summary: "done" });
+  assert.equal((await run).status, "completed", "an idle child did not consume the only slot");
+  assert.ok(host.sessions.has(done.id), "and that child is still there to be resumed");
+});
+
+test("a cap counts a child between spawn and its first turn", async () => {
+  // A cap that blinks is not a cap: there is a window after spawn where the
+  // child has work and is not yet marked busy, and it must not be a free slot.
+  const host = new FakeHost();
+  const service = new SubagentService(host, { maxPerParent: 1 });
+  const parent = parentSession(host);
+  host.add({ id: "unmarked", parentSessionId: parent.id, name: "unmarked", cwd: "/w", status: "idle" });
+  // No verdict yet: the run was started, and `running` is the only evidence.
+  host.runs.set("unmarked", { task: "t", status: "running", startedAt: Date.now() });
+
+  await assert.rejects(
+    () => service.run({ parentSessionId: parent.id, task: "another" }),
+    /already running/,
+    "a started run with no verdict still holds its slot",
+  );
 });
 
 test("the tool reports the result and names where the full transcript lives", async () => {
@@ -413,8 +494,8 @@ test("a session at the last level of the tree may not fan out further", async ()
   const host = new FakeHost();
   const service = new SubagentService(host);
   const root = parentSession(host);
-  const child = host.add({ id: "sub-1", parentSessionId: root.id, name: "sub", cwd: "/w" });
-  const grandchild = host.add({ id: "sub-2", parentSessionId: child.id, name: "subsub", cwd: "/w" });
+  const child = host.add({ id: "sub-1", parentSessionId: root.id, name: "sub", cwd: "/w", status: "working" });
+  const grandchild = host.add({ id: "sub-2", parentSessionId: child.id, name: "subsub", cwd: "/w", status: "working" });
 
   assert.equal(service.levelOf(root.id), 1);
   assert.equal(service.levelOf(child.id), 2);
@@ -448,7 +529,7 @@ test("fanning out past the machine cap is refused, and says what the limit is", 
   const host = new FakeHost();
   const service = new SubagentService(host, { maxTotal: 2 });
   const first = parentSession(host, "parent-a");
-  const second = host.add({ id: "parent-b", name: "other", cwd: "/w2" });
+  const second = host.add({ id: "parent-b", name: "other", cwd: "/w2", status: "idle" });
   host.add({ id: "a", parentSessionId: first.id, name: "a", cwd: "/w" });
   host.add({ id: "b", parentSessionId: second.id, name: "b", cwd: "/w2" });
 

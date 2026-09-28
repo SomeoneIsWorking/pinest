@@ -124,9 +124,10 @@ export interface SubagentHost {
   /** Abort and dispose a run in flight. */
   stopChild(sessionId: string): Promise<void>;
   /** Live sessions whose parent is this one. */
-  childrenOf(parentSessionId: string): string[];
+  /** Children that are still doing work — the cap's unit, not every child ever born. */
+  runningChildrenOf(parentSessionId: string): string[];
   /** Every live subagent on this machine, whatever its level. */
-  subagentIds(): string[];
+  runningSubagentIds(): string[];
   /** The parent of a session, when it has one. */
   parentOf(sessionId: string): string | undefined;
   /** 1 for a top-level session, +1 per generation below it. */
@@ -265,13 +266,13 @@ export class SubagentService {
           "do the work here, or report back to the agent that spawned you",
       );
     }
-    if (this.host.childrenOf(parentSessionId).length >= this.maxPerParent) {
+    if (this.host.runningChildrenOf(parentSessionId).length >= this.maxPerParent) {
       throw new Error(
         `${this.maxPerParent} subagents are already running for this session; ` +
           "wait for one to finish, or stop one, before fanning out further",
       );
     }
-    if (this.host.subagentIds().length >= this.maxTotal) {
+    if (this.host.runningSubagentIds().length >= this.maxTotal) {
       throw new Error(
         `${this.maxTotal} subagents are already running on this machine; each is a full agent with its own ` +
           "context, so wait for one to finish rather than adding another",
@@ -345,17 +346,15 @@ export class SubagentService {
       ...(settled.run.error ? { error: settled.run.error } : {}),
       ...inheritance(ran, "modelWarning"),
     });
-    // Release the slot. The per-session and machine caps count LIVE sessions, and stopping the child
-    // is the only thing that makes it not-live, so a child that finished without this kept its slot
-    // for the life of the process: four completed subagents and every later fan-out refused with
-    // "4 subagents are already running for this session", naming runs that had ended hours earlier.
-    // The aborted path below already did this, which is the tell that the omission was an oversight
-    // rather than a decision — an ABORTED child is the one you least want left running.
+    // The child is LEFT ALIVE on purpose, and this is the second half of the slot fix.
     //
-    // AFTER markRun, because markRun records the verdict on the live session and despawning first
-    // would drop it. The durable row outlives the session (despawn keeps the registry entry), so the
-    // transcript the summary points at is still listable and resumable afterwards.
-    await this.host.stopChild(sessionId);
+    // It used to be despawned here, to stop a finished run from holding a cap slot forever. That
+    // worked and cost the thing the whole feature is for: once despawned, the child is gone from
+    // live sessions, so its parent could no longer talk to it, resume it, or kill it — only read a
+    // summary of it. "Spawn work I can then never reach again" is not delegation.
+    //
+    // The cap is now spent correctly, on work that is still running, so nothing needs destroying to
+    // account for it. An ABORTED child IS stopped, below, which is right: that one is still going.
     debug(
       `[pinest] subagent ${sessionId} ${settled.run.ok ? "completed" : "failed"} ` +
         `after ${Math.round(durationMs / 1000)}s`,
