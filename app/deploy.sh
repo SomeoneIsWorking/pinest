@@ -26,7 +26,8 @@ BUILD_ID="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)-$(date +%s)"
 flutter build web --release --pwa-strategy=none --no-tree-shake-icons \
   --dart-define=FIREBASE_WEB_API_KEY="$FIREBASE_WEB_API_KEY" \
   --dart-define=FIREBASE_ANDROID_API_KEY="${FIREBASE_ANDROID_API_KEY:-$FIREBASE_WEB_API_KEY}" \
-  --dart-define=WEB_BUILD_ID="$BUILD_ID"
+  --dart-define=WEB_BUILD_ID="$BUILD_ID" \
+  ${PINEST_HOST_URL:+--dart-define=PINEST_HOST_URL="$PINEST_HOST_URL"}
 
 printf '{"id": "%s"}\n' "$BUILD_ID" > build/web/version.json
 
