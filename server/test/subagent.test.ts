@@ -198,6 +198,48 @@ test("a run spawns a real child in the parent's workspace and returns its words"
   assert.equal(host.runs.get(child.id)?.task, "Audit the retry policy.\nOnly that file.");
 });
 
+test("a finished subagent gives its slot back, so a parent can keep fanning out", async () => {
+  // THE CAP COUNTS LIVE SESSIONS, and `stopChild` is the only thing that removes one. So a child
+  // whose run has ended still holds its slot until something releases it, and a parent that fans
+  // out `maxPerParent` times in one session can never fan out again — permanently, for the life of
+  // the process, with no error and nothing to wait for. The refusal then names four subagents that
+  // finished hours ago as "already running".
+  //
+  // The aborted path already released its child, so the asymmetry is the tell: an ABORTED child is
+  // the one you least want left running, and it was the only one being cleaned up. This pins the
+  // normal path to match.
+  const host = new FakeHost();
+  const service = new SubagentService(host, { maxPerParent: 2 });
+  const parent = parentSession(host);
+
+  for (const task of ["first", "second"]) {
+    const running = service.run({ parentSessionId: parent.id, task });
+    await new Promise((r) => setImmediate(r));
+    host.spawned[host.spawned.length - 1].settle({ ok: true, summary: `${task} done` });
+    const outcome = await running;
+    assert.equal(outcome.status, "completed", `${task} ran to completion`);
+  }
+
+  assert.deepEqual(
+    host.stopped,
+    ["child-1", "child-2"],
+    "each finished child was stopped, in the order it finished",
+  );
+  assert.deepEqual(
+    service.host.childrenOf(parent.id),
+    [],
+    "no finished child is still holding a slot",
+  );
+
+  // The symptom, stated as the user sees it: a third fan-out is refused by a cap that nothing is
+  // at any more.
+  const third = service.run({ parentSessionId: parent.id, task: "third" });
+  await new Promise((r) => setImmediate(r));
+  host.spawned[host.spawned.length - 1].settle({ ok: true, summary: "third done" });
+  assert.equal((await third).status, "completed", "a completed subagent does not consume the cap");
+  assert.equal(host.spawned.length, 3, "all three ran");
+});
+
 test("the tool reports the result and names where the full transcript lives", async () => {
   const host = new FakeHost();
   const service = new SubagentService(host);
