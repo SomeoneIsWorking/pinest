@@ -322,6 +322,11 @@ export class Supervisor {
     return this.tree.subagentIds();
   }
 
+  /** [parentSessionId]'s subagents that are still working: the cap's unit. */
+  runningChildrenOf(parentSessionId: string): string[] {
+    return this.tree.runningChildrenOf(parentSessionId);
+  }
+
   /** The registry row id of the session making a tool call. The mapping itself
    * is a pure function of the session map, so it is not this class's rule. */
   rowIdForToolContext(ctx: unknown, preferred?: string): string {

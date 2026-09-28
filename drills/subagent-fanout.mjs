@@ -179,6 +179,36 @@ try {
     + `run=${JSON.stringify(child?.subagent)}`);
   if (childMessages < 2) throw new Error("the subagent never ran a turn of its own");
 
+  say("── step 3b: the FINISHED child is still reachable — the actual complaint");
+  // The child settled its run in step 3. It used to be despawned at that exact
+  // moment, so the parent could no longer talk to it, resume it, or kill it: a
+  // summary and nothing else. This is that, checked on the live host.
+  const settled = sup.sessions.get(childId);
+  if (!settled) {
+    throw new Error(
+      "the child is gone from live sessions once its run finished, so its parent cannot talk to it, "
+      + "resume it, or kill it — it is a summary and nothing else",
+    );
+  }
+  if (settled.status !== "idle") {
+    throw new Error(`a finished subagent is still marked ${settled.status}; it should be idle, not working`);
+  }
+  const verdict = settled.subagent?.status;
+  say(`child still live: status=${settled.status}, run=${verdict}, subagent rows on this host=${sup.subagentIds().length}`);
+  if (!settled.subagent?.summary) throw new Error("the child's verdict is not on the live session, so the app cannot show it");
+
+  // It is not just present: it is still a session the host will act on.
+  const before = (settled.session.messages ?? []).length;
+  settled.session.prompt?.("Reply with exactly: reachable");
+  await until(() => (sup.sessions.get(childId)?.session.messages ?? []).length > before, 30000,
+    "the finished child to accept a new message");
+  say(`the finished child accepted a follow-up message: ${sup.sessions.get(childId).session.messages.length} message(s) now`);
+
+  // And it does not cost a slot: the cap counts running work, so this parent can
+  // still fan out with the finished child sitting right there.
+  say(`running children of the parent: ${sup.runningChildrenOf("s-parent").length} `
+    + `of ${sup.subagentIds().length} subagent(s) on this host`);
+
   say("── step 4: what the clients were told, in order");
   const events = after(mark);
   const upserts = events.filter((e) => e.kind === "upsert");
