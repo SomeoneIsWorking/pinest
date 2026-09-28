@@ -38,8 +38,13 @@ a drill in BOTH directions (`--negative`) before trusting its verdict.
 If the extension ever fails to LOAD, nothing of ours is running and it cannot
 recover itself — fix the source, then use pi's built-in `/reload` in the host
 TUI (`/pinest-reload` is our command; it does not exist then, and pi would send
-it to the model as text). `ls /proc/<pi-pid>/fd | grep -c socket` = 0 is the
-tell; the pi status bar keeps showing stale values from the last good instance.
+it to the model as text). The tell is the LISTENING SOCKET, and the check has to
+resolve the symlinks: `ls -l /proc/<pi-pid>/fd | grep -c 'socket:\['` = 0 is the
+tell. Plain `ls /proc/<pi-pid>/fd` lists fd NUMBERS and never contains the word
+"socket", so the obvious form of this check returns 0 for a perfectly healthy
+host — it cost a real misdiagnosis here. Cross-check the port with
+`ss -ltnp | grep <pi-pid>`, and the pi status bar keeps showing stale values from
+the last good instance.
 
 Reload is EXPLICIT, never automatic: the watcher records changed files, the
 agent reloads itself with `reload_runtime` when its edits are complete. Do not

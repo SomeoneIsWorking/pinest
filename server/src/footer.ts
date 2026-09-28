@@ -50,8 +50,13 @@ export class FooterManager {
     }
   }
 
+  /** What each status key last said, so an unchanged line is not repainted. */
+  private readonly lastStatus = new Map<string, string | undefined>();
+
   private setStatus(key: string, text: string | undefined): void {
     if (this.disposed || !this.ui) return;
+    if (this.lastStatus.has(key) && this.lastStatus.get(key) === text) return;
+    this.lastStatus.set(key, text);
     const original = this.ui[PINEST_ORIGINAL_SET_STATUS] ?? this.ui.setStatus?.bind(this.ui);
     try {
       original?.(key, text);
@@ -90,7 +95,18 @@ export class FooterManager {
     }
   }
 
-  startTimer(intervalMs = 3000): void {
+  /**
+   * The poll is a SAFETY NET, not the update path.
+   *
+   * It used to be the update path: every 3s, four `setStatus` calls, each one a
+   * full TUI repaint whether or not anything had changed. On a long session that
+   * is a host pegging a core to redraw a status line that says the same thing —
+   * measured at 2 cores with 27 KB read in 15s: pure layout, no work.
+   *
+   * State changes call `render()` directly (the same calls this made already);
+   * this interval only catches a change made by a path that forgot to.
+   */
+  startTimer(intervalMs = 30_000): void {
     if (this.disposed) return;
     this.stopTimer();
     this.timer = setInterval(() => this.render(), intervalMs);

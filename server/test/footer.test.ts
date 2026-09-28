@@ -3,6 +3,8 @@
 // real config. It did: resetConfig() silently reset their auto-compact
 // threshold to the default on every test run.
 import "../support/isolate-config.ts";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { FooterManager, type FooterStateProvider } from "../src/footer.ts";
@@ -183,4 +185,69 @@ test("FooterManager setOffline updates pinest:url status", () => {
   assert.equal(offlineCall?.text, "offline — no service account key");
 
   footer.dispose();
+});
+
+test("an unchanged status line is not repainted", () => {
+  // The footer used to repaint on a 3s timer whether or not anything had
+  // changed: four setStatus calls every tick, each one a full TUI layout. On a
+  // long session that is the whole cost of the host and none of the value — it
+  // was measured at two cores with 27 KB read in 15 seconds, which is layout
+  // and nothing else. A status line that says the same thing needs no pixels.
+  resetConfig();
+  saveConfig({ tunnelProvider: "ngrok" });
+
+  const state: FooterStateProvider = {
+    getOwnerEmail: () => "owner@example.com",
+    getLiveSessionCount: () => ({ live: 2, working: 1 }),
+    getTunnelUrl: () => "https://example.ngrok.app",
+    isTunnelStarting: () => false,
+    isDirectConnected: () => false,
+  };
+  const footer = new FooterManager(state);
+  const ui = createStubUi();
+  footer.setUi(ui);
+
+  footer.render();
+  const first = ui.calls.length;
+  assert.ok(first > 0, "the first render does paint");
+
+  for (let i = 0; i < 50; i += 1) footer.render();
+  assert.equal(ui.calls.length, first, "50 identical renders paint nothing further");
+});
+
+test("a changed status line IS repainted", () => {
+  // The other half, and the one that matters: suppressing the paint must not
+  // suppress the change. A status line frozen on stale text is worse than a slow
+  // one, because it looks right.
+  resetConfig();
+  saveConfig({ tunnelProvider: "ngrok" });
+
+  let live = 2;
+  const state: FooterStateProvider = {
+    getOwnerEmail: () => "owner@example.com",
+    getLiveSessionCount: () => ({ live, working: 0 }),
+    getTunnelUrl: () => "https://example.ngrok.app",
+    isTunnelStarting: () => false,
+    isDirectConnected: () => false,
+  };
+  const footer = new FooterManager(state);
+  const ui = createStubUi();
+  footer.setUi(ui);
+
+  footer.render();
+  live = 3;
+  footer.render();
+
+  const last = ui.calls[ui.calls.length - 1];
+  assert.equal(last.key, "pinest:sessions");
+  assert.match(last.text ?? "", /3 sessions/, "the new count reached the status line");
+});
+
+test("the poll is a safety net, not a repaint loop", () => {
+  // 3000ms meant 4 repaints a minute, forever, to redraw three short strings.
+  // The interval is now long enough to be a backstop for a path that forgot to
+  // call render(), and short enough to still catch one.
+  const src = readFileSync(fileURLToPath(new URL("../src/footer.ts", import.meta.url)), "utf8");
+  assert.match(src, /startTimer\(intervalMs = 30_000\)/);
+  assert.ok(!/startTimer\(intervalMs = 3000\)/.test(src), "the 3s repaint loop is gone");
 });
