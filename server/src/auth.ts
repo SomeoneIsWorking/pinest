@@ -575,7 +575,23 @@ export class AdminFirebase implements FirebaseAuth {
     const app = existingApp
       ?? initializeApp({ credential: cert(sa), projectId: sa.project_id }, "pinest-admin");
     const db = getFirestore(app);
-    if (!existingApp) db.settings({ ignoreUndefinedProperties: true });
+    if (!existingApp) {
+      // Google's default is to retry a failing call for up to 600 seconds. On a
+      // metered project that quota can refuse outright, and ten minutes of
+      // silent retrying is indistinguishable from a hung host: no log, no
+      // presence, no error the operator can act on. A presence write that cannot
+      // succeed is worth knowing about in seconds, not ten minutes, so the retry
+      // budget is short and the failure surfaces as an ordinary error.
+      db.settings({
+        ignoreUndefinedProperties: true,
+        retrySettings: {
+          maxAttempts: 3,
+          initialRetryDelayMillis: 200,
+          maxRetryDelayMillis: 1_000,
+          totalTimeoutMillis: 8_000,
+        },
+      });
+    }
     return new AdminFirebase(
       getAuth(app) as unknown as AdminAuth,
       db,
