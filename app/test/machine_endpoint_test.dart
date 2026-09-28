@@ -42,10 +42,11 @@ void main() {
     expect(endpoint!.url?.host, 'machine.trycloudflare.com');
     expect(endpoint.online, isTrue);
     expect(endpoint.hostname, 'fedora');
-    expect(seen.url.toString(), '$base/users/$uid.json');
+    expect(seen.url.path, '/users/$uid.json');
     // The rules check auth.uid against the path, so the token must be the
     // app's own - the same credential the socket already presents.
-    expect(seen.headers['Authorization'], 'Bearer $token');
+    expect(seen.url.queryParameters['auth'], token,
+        reason: 'the token rides the query parameter, which is what this database accepts');
   });
 
   test('a machine that never published reads as absent, not as an error', () async {
