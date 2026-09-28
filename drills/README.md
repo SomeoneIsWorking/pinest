@@ -11,6 +11,8 @@ git so the next session can re-run them; their output goes to `scratch/logs/`.
 | `reload-midrun.mjs` | A reload landing MID-RUN hands the in-flight run to the re-imported instance: it keeps streaming onto the new instance, finishes, and still accepts input. Uses a local fake SSE model server — no tokens spent, deterministic timing. | nothing external |
 | `subagent-fanout.mjs` | A `subagent` tool call actually fans out: a second real `AgentSession` is opened, its own turn is what the tool waits for, the report returns to the parent as the tool result, and `running → completed` is published to the clients. The child must end up on its parent's model and thinking level, read back from the child's own session. `--negative` gives the same request to a model with no such tool and must fail; `--no-inherit` gives the parent a model that exists nowhere and must fail on the child running on the default. | nothing external |
 
+| `paired-e2e.mts` | A paired host is reachable and correct from the public internet with NO Firebase in the path: a real WebSocket through a real `*.trycloudflare.com` name to the host's own port, presenting the machine's real pairing secret (I-070). Run it with the host's current public URL. Exits 2 and prints SKIP when the host is unreachable, so a dead tunnel is never misread as a broken boundary. | the host paired, and its current public tunnel URL. |
+
 Each must be run in BOTH directions before their results are trusted:
 
 ```sh
