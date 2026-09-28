@@ -17,6 +17,8 @@ export interface SubagentTreeSession {
   name: string;
   cwd: string;
   model?: string | null;
+  /** This session's thinking level, in display form. A subagent inherits it. */
+  thinking?: string;
   /** Set when this session is a subagent. */
   parentSessionId?: string;
 }
@@ -55,6 +57,7 @@ export class SubagentTree {
         name: row.name ?? row.id,
         cwd: row.cwd ?? "",
         model: row.model,
+        thinking: row.thinkingLevel ?? undefined,
         ...(row.parentSessionId ? { parentSessionId: row.parentSessionId } : {}),
       };
     }

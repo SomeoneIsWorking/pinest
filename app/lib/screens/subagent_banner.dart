@@ -75,6 +75,31 @@ class SubagentBanner extends StatelessWidget {
                       style: TextStyle(fontSize: 11, color: tint.withAlpha(200)),
                     ),
                   ],
+                  if (run.diverged) ...[
+                    const SizedBox(height: 3),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(Icons.warning_amber_rounded, size: 12, color: scheme.onTertiaryContainer),
+                        const SizedBox(width: 4),
+                        Expanded(
+                          child: Text(
+                            // The model and the level it actually held, next to
+                            // what went wrong: a run that says "high" while the
+                            // session was on something else is the bug, so both
+                            // the claim and the truth are on screen.
+                            '${run.model ?? 'an unknown model'}'
+                            '${run.thinking == null ? '' : ' at ${run.thinking}'} — ${run.warning}',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              color: scheme.onTertiaryContainer,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                   if (run.finishedAt != null) ...[
                     const SizedBox(height: 2),
                     Text(

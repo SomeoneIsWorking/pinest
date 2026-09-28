@@ -24,6 +24,13 @@ const ROOT = resolve(HERE, "../scratch/subagent");
 const AGENT_DIR = resolve(ROOT, "agent");
 const WORK_DIR = resolve(ROOT, "workspace");
 const NEGATIVE = process.argv.includes("--negative");
+/** The control for the reported defect: a child that does NOT end up on its
+ * parent's model — which is what the first build produced, because it looked for
+ * that model anywhere but in the session that has to run it, found nothing, and
+ * left the child on the default. The parent is asked for a model that exists
+ * nowhere, so inheritance has nothing to find and the child lands on the
+ * default; the drill must FAIL on exactly that. */
+const NO_INHERIT = process.argv.includes("--no-inherit");
 const say = (m) => process.stderr.write(m + "\n");
 
 rmSync(ROOT, { recursive: true, force: true });
@@ -82,13 +89,27 @@ writeFileSync(resolve(AGENT_DIR, "models.json"), JSON.stringify({
       baseUrl: `http://127.0.0.1:${PORT}/v1`,
       api: "openai-completions",
       apiKey: "fake-key",
-      models: [{ id: "fast", name: "Fast Fake", contextWindow: 32000, maxTokens: 4000 }],
+      models: [
+        // `other` FIRST, because a session that is not told a model takes pi's
+        // first declared model — not settings.json's defaultModel. Putting the
+        // parent's model second is what makes "the subagent inherited its
+        // parent's model" a measurement: without inheritance the child lands
+        // here, and the two are different.
+        { id: "other", name: "Other Fake", contextWindow: 32000, maxTokens: 4000 },
+        {
+          id: "fast", name: "Fast Fake", contextWindow: 32000, maxTokens: 4000,
+          reasoning: true,
+          thinkingLevelMap: { off: null, low: "low", medium: "medium", high: "high" },
+        },
+      ],
     },
   },
 }, null, 2));
 writeFileSync(resolve(AGENT_DIR, "auth.json"), JSON.stringify({ fake: { type: "api_key", key: "fake-key" } }));
 writeFileSync(resolve(AGENT_DIR, "settings.json"), JSON.stringify({
-  defaultModel: "fake/fast",
+  // Recorded for the record only: a spawned session takes pi's first declared
+  // model, so the ORDER of models above is what sets the default.
+  defaultModel: "fake/other",
   compaction: { enabled: false },
 }));
 
@@ -115,9 +136,20 @@ const until = async (pred, ms, what) => {
 };
 
 try {
-  say("── step 1: a real parent session");
-  await sup.spawn({ sessionId: "s-parent", cwd: WORK_DIR, name: "parent", model: "fake/fast" });
+  say("── step 1: a real parent session, on its own model and thinking level");
+  await sup.spawn({
+    sessionId: "s-parent", cwd: WORK_DIR, name: "parent",
+    model: NO_INHERIT ? "fake/ghost" : "fake/fast",
+  });
+  // The parent's own settings, so the child has something specific to inherit.
+  await sup.handleSessionCommand({ type: "thinking_set", sessionId: "s-parent", level: "high" });
   if (sup.levelOf("s-parent") !== 1) throw new Error("a top-level session must be level 1");
+  const parentSession = sup.sessions.get("s-parent")?.session;
+  say(`parent on ${parentSession?.model?.provider}/${parentSession?.model?.id}, `
+    + `thinking ${parentSession?.thinkingLevel} (the machine's default model is fake/other)`);
+  if (parentSession?.thinkingLevel !== "high" && !NO_INHERIT) {
+    throw new Error(`the parent could not be set to high (it holds ${parentSession?.thinkingLevel}), so there is nothing to inherit`);
+  }
 
   say(`── step 2: the parent turn asks for a subagent${NEGATIVE ? " (control: the model has no subagent tool to call)" : ""}`);
   let mark = since();
@@ -159,6 +191,28 @@ try {
     + `child history pushes: ${histories.length}`);
 
   if (NEGATIVE) throw new Error("unreachable: the control returned above");
+  const childModel = child?.session?.model;
+  const childHeld = childModel ? `${childModel.provider}/${childModel.id}` : "nothing";
+  say(`child on ${childHeld}, thinking ${child?.session?.thinkingLevel}, `
+    + `published run model=${child?.subagent?.model} thinking=${child?.subagent?.thinking} `
+    + `warning=${child?.subagent?.modelWarning ?? "(none)"}`);
+  if (childHeld !== "fake/fast") {
+    throw new Error(`the subagent did not inherit its parent's model: it holds ${childHeld}, the parent runs fake/fast`);
+  }
+  if (NO_INHERIT) throw new Error("CONTROL UNREACHABLE — the no-inherit control still produced a child on the parent's model; it proves nothing");
+  // The parent's ACTUAL level, not the one that was asked for: a session that
+  // could not be put on high would hand "high" down, and the child would claim
+  // to be thinking harder than anyone is.
+  if (child?.session?.thinkingLevel !== parentSession.thinkingLevel) {
+    throw new Error(`the subagent did not share its parent's thinking level: it holds `
+      + `${child?.session?.thinkingLevel}, the parent holds ${parentSession.thinkingLevel}`);
+  }
+  if (child?.subagent?.model !== "fake/fast" || child?.subagent?.thinking !== "high") {
+    throw new Error("the run the clients read does not say which model and thinking the child used");
+  }
+  if (child?.subagent?.modelWarning) {
+    throw new Error(`inheritance was reported as a divergence although the child is on the parent's model: ${child.subagent.modelWarning}`);
+  }
   if (child?.parentSessionId !== "s-parent") {
     throw new Error(`the child is not linked to its parent (parentSessionId=${child?.parentSessionId})`);
   }
@@ -190,7 +244,10 @@ try {
   say("RESULT: PASS — a real subagent ran, was published as the parent's child, and reported back");
   process.exitCode = 0;
 } catch (e) {
-  if (NEGATIVE && !/the control produced a LINKED subagent/.test(e.message)) {
+  if (NO_INHERIT && /did not inherit its parent's model/.test(e.message)) {
+    say(`RESULT: PASS (control) — a child that does not inherit runs on the default model and this drill catches it: ${e.message}`);
+    process.exitCode = 0;
+  } else if (NEGATIVE && !/the control produced a LINKED subagent/.test(e.message)) {
     say(`RESULT: PASS (control) — the unlinked pre-feature path fails this drill as it must: ${e.message}`);
     process.exitCode = 0;
   } else {

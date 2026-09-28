@@ -25,6 +25,9 @@ interface FakeSession {
   name: string;
   cwd: string;
   model?: string | null;
+  thinking?: string;
+  /** What a child could not inherit. */
+  warning?: string;
 }
 
 interface Spawned extends FakeSession {
@@ -41,6 +44,9 @@ class FakeHost implements SubagentHost {
   readonly spawned: Spawned[] = [];
   /** Set to make `startChild` fail, the way an unreachable session would. */
   refuseToStart = false;
+  /** Models this machine cannot offer a child, the way an extension-registered
+   * model is invisible to the process-wide registry. */
+  readonly unavailableModels = new Set<string>();
   private next = 0;
   hostSession: FakeSession | null = null;
 
@@ -57,15 +63,24 @@ class FakeHost implements SubagentHost {
     model?: string;
   }): Promise<string> {
     const id = `child-${++this.next}`;
+    // Stands in for the supervisor: the child ends up on what was asked for, or
+    // on something else with a reason.
+    const parent = this.sessions.get(request.parentSessionId);
+    const unavailable = this.unavailableModels.has(request.model ?? "");
     const session: Spawned = {
       id,
       parentSessionId: request.parentSessionId,
       name: request.name,
       cwd: request.cwd,
-      model: request.model,
+      model: unavailable ? "other/whatever" : request.model,
+      thinking: unavailable ? "medium" : request.thinking,
+      warning: unavailable
+        ? `could not use the parent's model ${request.model} (not available to this session); it ran on other/whatever instead`
+        : undefined,
       task: request.task,
       settle: (run) => this.finish(id, run),
     };
+    void parent;
     this.sessions.set(id, session);
     this.spawned.push(session);
     return id;
@@ -128,6 +143,16 @@ class FakeHost implements SubagentHost {
     return this.sessions.get(sessionId)?.model ?? undefined;
   }
 
+  thinkingOf(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.thinking;
+  }
+
+  childRunsOn(sessionId: string): { model?: string; thinking?: string; warning?: string } {
+    const child = this.sessions.get(sessionId);
+    if (!child) return {};
+    return { model: child.model ?? undefined, thinking: child.thinking, warning: child.warning };
+  }
+
   cwdOf(sessionId: string): string | undefined {
     return this.sessions.get(sessionId)?.cwd;
   }
@@ -141,8 +166,11 @@ class FakeHost implements SubagentHost {
   }
 }
 
-function parentSession(host: FakeHost, id = "parent") {
-  return host.add({ id, name: "the agent", cwd: "/work/project", model: "opencode-go/glm-5.3-flash" });
+function parentSession(host: FakeHost, id = "parent", thinking?: string) {
+  return host.add({
+    id, name: "the agent", cwd: "/work/project",
+    model: "opencode-go/glm-5.3-flash", thinking,
+  });
 }
 
 test("a run spawns a real child in the parent's workspace and returns its words", async () => {
@@ -224,6 +252,55 @@ test("a child that cannot be started is torn down instead of left idle", async (
     /was opened but could not be started/,
   );
   assert.deepEqual(host.stopped, ["child-1"], "the half-started child is closed, not orphaned");
+});
+
+test("a subagent runs on its parent's model AND thinking level, and says which", async () => {
+  const host = new FakeHost();
+  const service = new SubagentService(host);
+  const parent = parentSession(host, "parent", "high");
+
+  const running = service.run({ parentSessionId: parent.id, task: "Audit the retry policy." });
+  await new Promise((r) => setImmediate(r));
+  const child = host.spawned[0];
+
+  assert.equal(child.model, "opencode-go/glm-5.3-flash", "the parent's model, not the machine's default");
+  assert.equal(child.thinking, "high", "the parent's thinking level too — a subagent that thinks harder or cheaper on its own is a different agent");
+
+  child.settle({ ok: true, summary: "three retries" });
+  const outcome = await running;
+  assert.equal(outcome.model, "opencode-go/glm-5.3-flash");
+  assert.equal(outcome.thinking, "high");
+  assert.equal(outcome.warning, undefined, "nothing to warn about when it inherited cleanly");
+  assert.equal(host.runs.get(outcome.sessionId)?.model, "opencode-go/glm-5.3-flash");
+  assert.equal(host.runs.get(outcome.sessionId)?.thinking, "high");
+  // The agent is told the provenance either way: a result's origin is part of it.
+  const text = formatOutcome(outcome, "the agent");
+  assert.match(text, /Ran on opencode-go\/glm-5\.3-flash, thinking high — the same as its parent\./);
+});
+
+test("a child that could not be put on its parent's model says so instead of pretending", async () => {
+  const host = new FakeHost();
+  host.unavailableModels.add("opencode-go/glm-5.3-flash");
+  const service = new SubagentService(host);
+  const parent = parentSession(host, "parent", "high");
+
+  const running = service.run({ parentSessionId: parent.id, task: "Audit the retry policy." });
+  await new Promise((r) => setImmediate(r));
+  host.spawned[0].settle({ ok: true, summary: "three retries" });
+  const outcome = await running;
+
+  assert.equal(outcome.model, "other/whatever", "the truth about what it ran on");
+  assert.match(outcome.warning ?? "", /could not use the parent's model/);
+  assert.match(formatOutcome(outcome, "the agent"), /WARNING: could not use the parent's model/);
+  assert.match(host.runs.get(outcome.sessionId)?.modelWarning ?? "", /could not use the parent's model/,
+    "and it is on the run the clients read, not only in the agent's own turn");
+});
+
+test("the tool has no model parameter: a subagent cannot be sent to another model", () => {
+  const tool = createSubagentTool({ service: () => new SubagentService(new FakeHost()), resolveOwner: () => "p" });
+  const properties = Object.keys((tool.parameters as any).properties ?? {});
+  assert.ok(!properties.includes("model"), `a subagent shares its parent's model; the tool must not offer a choice: ${properties.join(",")}`);
+  assert.deepEqual(properties.sort(), ["cwd", "name", "task"]);
 });
 
 test("a child that failed is reported as failed, not as a run that found nothing", async () => {

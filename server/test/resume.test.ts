@@ -130,7 +130,7 @@ test("refreshUsage: quiet overlay does not re-enter state broadcast", async () =
       broadcasts += 1;
       // Model index.ts: a normal snapshot mutation broadcasts a state
       // message, whose usage overlay must update snapshots quietly.
-      sup.refreshUsage(false);
+      sup.view.refreshUsage(false);
     },
     removeSession: () => {},
     broadcast: () => {},
@@ -222,8 +222,8 @@ test("sessions in same folder with same name have isolated files and history", a
   );
 
   // Check history isolation
-  const hist1 = await sup.getHistory(sup.sessions.get("s1")!);
-  const hist2 = await sup.getHistory(sup.sessions.get("s2")!);
+  const hist1 = await sup.view.historyOf(sup.sessions.get("s1")!);
+  const hist2 = await sup.view.historyOf(sup.sessions.get("s2")!);
 
   assert.equal(hist1.length, 2);
   assert.equal(hist1[0].text, "msg for session 1");

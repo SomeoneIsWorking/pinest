@@ -12,6 +12,17 @@ class SubagentRun {
   final String? summary;
   final String? error;
 
+  /// The model and thinking level the run ACTUALLY held, as read back from the
+  /// child's own session. Null on a run recorded before provenance existed.
+  final String? model;
+  final String? thinking;
+
+  /// Set when the run could not be put on its parent's footing — a model the
+  /// child could not be given, or a reasoning level its model does not have.
+  /// A divergence the user cannot see is the same as the divergence not being
+  /// fixed, so it travels with the run and is shown.
+  final String? warning;
+
   const SubagentRun({
     required this.task,
     required this.status,
@@ -19,6 +30,9 @@ class SubagentRun {
     this.finishedAt,
     this.summary,
     this.error,
+    this.model,
+    this.thinking,
+    this.warning,
   });
 
   static SubagentRun? fromJson(Object? raw) {
@@ -33,6 +47,9 @@ class SubagentRun {
       finishedAt: (raw['finishedAt'] as num?)?.toInt(),
       summary: (raw['summary'] as String?)?.trim(),
       error: (raw['error'] as String?)?.trim(),
+      model: (raw['model'] as String?)?.trim(),
+      thinking: (raw['thinking'] as String?)?.trim(),
+      warning: (raw['warning'] as String?)?.trim(),
     );
   }
 
@@ -50,6 +67,10 @@ class SubagentRun {
     if (end == null || startedAt <= 0 || end < startedAt) return null;
     return Duration(milliseconds: end - startedAt);
   }
+
+  /// True when the run could not be put on its parent's footing. Named for what
+  /// it is, not how it looks, because it is the case that must not be silent.
+  bool get diverged => (warning ?? '').isNotEmpty;
 
   /// How the run reads in a list row: what happened, not a code.
   String get label {

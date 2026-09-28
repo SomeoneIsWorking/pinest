@@ -47,7 +47,7 @@ import { SessionRegistry } from "./registry.ts";
 import { deriveSessionName, extractToolResult, listPaths, resolvePathInput, pageHistory, lookupImage, embedImages } from "./logic.ts";
 import { createDefaultBackgroundManager, registerBashIntegration, toJobSummary, type BackgroundProcessManager } from "./bash-tool.ts";
 import { registerBackgroundTools, handleJobCommand } from "./background-tools.ts";
-import { registerSubagentTools } from "./subagent-tools.ts";
+import { hostSubagentToolDeps, registerSubagentTools } from "./subagent-tools.ts";
 import { StreamSegmenter } from "./stream.ts";
 import { loadConfig, saveConfig } from "./config.ts";
 import { normalizeGoal } from "./session-goal.ts";
@@ -199,7 +199,7 @@ const _publisher = new StatePublisher({
   presenceError: () => _presenceError,
   signalingError: () => _signaling?.readError() ?? null,
   signalingMode: () => _signaling?.watchMode() ?? null,
-  refreshUsage: () => { _supervisor?.refreshUsage?.(false); },
+  refreshUsage: () => { _supervisor?.view.refreshUsage(false); },
   send: (msg) => broadcast(msg),
 });
 
@@ -489,15 +489,18 @@ async function bootstrap(): Promise<void> {
     },
     bgManager: _bgManager ?? undefined,
   }, _registry, {
-    // The host is pi's own session, so it is not in the supervisor's map — but
-    // it is a session like any other for anything that asks what a session is.
-    // The host can fan out too, so it needs a workspace, a model and a level.
-    hostSession: () => ({
-      id: _sessionId,
-      name: _publisher.get(_sessionId)?.name ?? deriveSessionName(process.cwd(), process.env.RC_NAME),
-      cwd: process.cwd(),
-      model: _publisher.get(_sessionId)?.model ?? null,
-    }),
+    // The host is pi's own session: not in the supervisor's map, but a session
+    // like any other for anything that asks what a session is.
+    hostSession: () => {
+      const host = _publisher.get(_sessionId);
+      return {
+        id: _sessionId,
+        name: host?.name ?? deriveSessionName(process.cwd(), process.env.RC_NAME),
+        cwd: process.cwd(),
+        model: host?.model ?? null,
+        thinking: host?.thinkingLevel,
+      };
+    },
   });
 
   // Re-attach runs parked by the previous instance FIRST — before the WS
@@ -735,8 +738,16 @@ async function startDirectTransport(): Promise<void> {
       // answerable by one peer, so this is what lets a second app on the same
       // account connect at all instead of its answer being refused as the
       // first client's redelivered one.
+      //
+      // The report's OWN timestamp goes with it, because the entry under
+      // `clients.<id>` outlives the client: a report from a client that left
+      // stays in the document and is redelivered on every update, and renewing
+      // a lane on redelivery gave departed clients a permanent hold on the cap
+      // (I-069). A report is a heartbeat only while it is advancing.
       void Promise.all(
-        reports.map(({ lane }) => _directTransport?.ensureLane(lane)),
+        reports.map(({ lane, seen }) => (seen && "report" in seen)
+          ? _directTransport?.ensureLane(lane, seen.report.at)
+          : _directTransport?.ensureLane(lane)),
       ).catch((error: Error) => debug(`[remote-code] p2p: could not open a client lane: ${error.message}`));
     });
     _directTransport = await offerDirectTransport({
@@ -1122,20 +1133,9 @@ const remoteCode = (pi: ExtensionAPI): void => {
   registerBashIntegration(pi, { bgManager: _bgManager, sessionId: _sessionId });
   registerBackgroundTools(pi, _bgManager, _sessionId);
   // The host fans out like any other session. The supervisor is built during
-  // bootstrap, after this wiring runs, so both the service and the caller's
-  // row id are resolved when the tool is actually CALLED.
-  registerSubagentTools(
-    pi,
-    {
-      service: () => {
-        if (!_supervisor) throw new Error("the session supervisor is not up yet; try again in a moment");
-        return _supervisor.subagents;
-      },
-      resolveOwner: (ctx, preferred) =>
-        _supervisor?.rowIdForToolContext(ctx, preferred ?? _sessionId) ?? (preferred ?? _sessionId),
-    },
-    _sessionId,
-  );
+  // bootstrap, after this wiring runs, so the helper resolves it when the tool
+  // is CALLED rather than capturing one that does not exist yet.
+  registerSubagentTools(pi, hostSubagentToolDeps(() => _supervisor, () => _sessionId), _sessionId);
 
   // Chokepoint on HOST message delivery: stale tool closures from before a
   // reload (orphaned managers whose delivery code never updates) still call
