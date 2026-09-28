@@ -129,9 +129,15 @@ export function bindSubagents(
   };
 }
 
-/** The host's own tool wiring: the service is resolved when the tool is CALLED,
- * because the supervisor is built during bootstrap, after the extension is
- * wired, and a captured one would belong to the previous runtime. */
+/** The host's own tool wiring.
+ *
+ * Everything here is resolved when the tool is CALLED, not when it is
+ * registered. The extension factory runs before bootstrap, and bootstrap then
+ * REBINDS the host's id to the registry's existing host row — so a value
+ * captured at registration is a stale id that names nothing. Measured on a real
+ * run: the host's own subagent call was parented to the pre-bootstrap id and
+ * refused with "session <uuid> has no workspace", because nothing knew a
+ * session by that name. */
 export function hostSubagentToolDeps(
   supervisor: () => { sessions: Map<string, PiSessionRef>; subagents: SubagentService } | null,
   hostSessionId: () => string,
@@ -142,10 +148,12 @@ export function hostSubagentToolDeps(
       if (!live) throw new Error("the session supervisor is not up yet; try again in a moment");
       return live.subagents;
     },
-    resolveOwner: (ctx, preferred) => {
-      const fallback = preferred ?? hostSessionId();
+    // The host's row id is a fact to be read, never a parameter to be passed:
+    // the `preferred` a tool was registered with is the pre-bootstrap value.
+    resolveOwner: (ctx) => {
+      const current = hostSessionId();
       const live = supervisor();
-      return live ? rowIdForToolContext(live.sessions, ctx, fallback) : fallback;
+      return live ? rowIdForToolContext(live.sessions, ctx, current) : current;
     },
   };
 }

@@ -78,7 +78,13 @@ phone).
 Model and thinking inheritance is verified by 8 further tests
 (`server/test/session-model-inheritance.test.ts`) and by the drill against a
 parent on a model the machine does not default to, with a `--no-inherit`
-control that must fail on the reported symptom.
+control that must fail on the reported symptom. It is also verified LIVE: a
+real `pi` host, the real model on `opencode/space-bunny-free`, one fan-out, and
+the tool result naming that model and the parent's own level. The same live run
+found that the host could not fan out at all — its row id was captured before
+bootstrap rebound it (`docs/issues/0072-the-host-could-not-fan-out-at-all.md`).
+The Flutter app is deployed with the divergence notice; the app's live behaviour
+on a phone is still not qualified.
 
 ### S22 — Host terminal session views
 

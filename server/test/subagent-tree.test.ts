@@ -6,7 +6,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { SubagentTree, type SubagentTreeSession } from "../src/subagent-tree.ts";
 import { rowIdForToolContext, type PiSessionRef } from "../src/session-identity.ts";
-import { MAX_SUBAGENT_LEVEL } from "../src/subagent.ts";
+import { MAX_SUBAGENT_LEVEL, type SubagentService } from "../src/subagent.ts";
+import { hostSubagentToolDeps } from "../src/subagent-tools.ts";
 import type { SessionRow } from "../src/protocol.ts";
 
 function treeOver(parts: {
@@ -146,4 +147,49 @@ test("no context and no preferred owner is refused, not guessed", () => {
 
   assert.throws(() => rowIdForToolContext(sessions, undefined), /no owning session/);
   assert.throws(() => rowIdForToolContext(sessions, {}), /no owning session/);
+});
+
+/** The live defect: the extension registers its tools BEFORE bootstrap, and
+ * bootstrap then rebinds the host's id to the registry's existing host row. A
+ * tool that captured the id it was registered with parents the host's subagent
+ * to a name nothing knows, and the fan-out is refused with a message about a
+ * workspace. Both facts are therefore read when the tool is CALLED. */
+test("the host's tool resolves to the host id as it is NOW, not as it was when registered", () => {
+  // Registered while the id was still the throwaway one...
+  const registeredId = "throwaway-uuid-before-bootstrap";
+  // ...and bootstrap rebound it to the registry's host row.
+  let currentHostId = "host-row-id";
+  const service = { run: async () => ({}) } as unknown as SubagentService;
+  const deps = hostSubagentToolDeps(
+    () => ({ sessions: new Map(), subagents: service }),
+    () => currentHostId,
+  );
+
+  assert.equal(
+    deps.resolveOwner({ sessionManager: { getSessionId: () => "some-other-session" } }, registeredId),
+    currentHostId,
+    "the id from registration time is ignored: it names no session anyone can open",
+  );
+
+  currentHostId = "host-row-id-2";
+  assert.equal(
+    deps.resolveOwner({ sessionManager: { getSessionId: () => "some-other-session" } }, registeredId),
+    "host-row-id-2",
+    "and it tracks a later rebind too",
+  );
+});
+
+test("the host's tool still prefers a live session's own row when the call comes from one", () => {
+  const sessions = new Map<string, PiSessionRef>([["row-2", { session: { sessionManager: { getSessionId: () => "pi-2" } } }]]);
+  const service = { run: async () => ({}) } as unknown as SubagentService;
+  const deps = hostSubagentToolDeps(
+    () => ({ sessions, subagents: service }),
+    () => "host-row-id",
+  );
+
+  assert.equal(
+    deps.resolveOwner({ sessionManager: { getSessionId: () => "pi-2" } }, "throwaway-uuid"),
+    "row-2",
+    "a call from inside a managed session is that session, not the host",
+  );
 });
