@@ -360,6 +360,16 @@ let _presenceError: string | null = null;
 /** Say where this host can be reached. On CHANGE only: a quick tunnel renames
  * itself only when it restarts, so this is a handful of writes a month rather
  * than tens of thousands. A refusal is a line, never an interruption. */
+/** Say where this host is: to the runtime record AND to the lookup service.
+ * One function because the two drifted and that was the bug: a recorded URL that
+ * is never announced leaves the app dialling a hostname that died with the last
+ * tunnel. Written on CHANGE, never on a heartbeat - a quick tunnel renames
+ * itself only when it restarts, so this is a handful of writes a month. */
+function announceEndpoint(): Promise<void> {
+  recordTunnelUrl(_ws?.tunnelUrl ?? null);
+  return publishCurrentEndpoint();
+}
+
 function publishCurrentEndpoint(): Promise<void> {
   if (!_ownerUid) return Promise.resolve();
   const deps = {
@@ -527,7 +537,7 @@ async function bootstrap(): Promise<void> {
     adoptReloadedSessions();
   } catch (e) {
     const reason = (e as Error)?.message ?? String(e);
-    debug(`[remote-code] reload: adoption failed: ${reason} — sessions stay resumable, remote control continues`);
+    debug(`[remote-code] reload: adoption failed: ${reason} — sessions stay resumable`);
     uiNotify(`[pinest] could not re-attach parked sessions: ${reason} (they remain resumable)`, "warning");
   }
 
@@ -540,16 +550,10 @@ async function bootstrap(): Promise<void> {
   // can be answered with a status code instead of an unread push.
   _ws.setCommandRunner((cmd) => dispatchCommand(cmd));
   _ws.setStateProvider(() => _publisher.message());
-  // A moved tunnel URL is only useful once the app can see it: republish the
-  // discovery document the app watches, and refresh the local state snapshot.
+  // A moved URL is only useful once the app can see it: re-announce, and
+  // refresh the local state snapshot.
   _ws.tunnelUrlChanged = () => {
-    recordTunnelUrl(_ws?.tunnelUrl ?? null);
-    void publishCurrentPresence(true);
-    // Written on CHANGE, never on a heartbeat: a quick tunnel renames itself
-    // only when it restarts, so this is a handful of writes a month rather
-    // than tens of thousands. That is the difference between a budget that
-    // lasts and one that empties in a day (endpoint-registry.ts).
-    void publishCurrentEndpoint();
+    void announceEndpoint();
     broadcastState();
   };
   _ws.setHistoryRunner(historyRunner);
@@ -618,7 +622,10 @@ async function bootstrap(): Promise<void> {
       // "(starting…)": a working host that reads as a hung one (I-021).
       renderFooter();
       uiNotify(`[pinest] tunnel up: ${ws.tunnelUrl ?? "no URL — remote access is local-only"}`);
-      recordTunnelUrl(ws.tunnelUrl ?? null);
+      // The FIRST url fires no `tunnelUrlChanged` - that is for re-registration
+      // only - so the host went silent after every reload and the app kept the
+      // previous, now-dead hostname.
+      void announceEndpoint();
       return publishCurrentPresence(true);
     })
     .catch((e) => {
@@ -702,15 +709,8 @@ async function bootstrap(): Promise<void> {
 
 // ── Command handling ────────────────────────────────────────────────────────
 
-/** Direct (no-tunnel) transport: publish an offer into the discovery doc, apply
- * the app's answer, and pump whatever channel opens to the loopback server.
- *
- * Opt-in through config `p2p`. Nothing about it replaces the tunnel: the app
- * decides which transport to use, and a punch that fails is a failure to
- * report, not a silent switch. */
-/** Session lifecycle operations, bound to the host's live owners. The owner
- * accessors are read at call time: the supervisor, registry, and selected
- * session all appear (and change) after this is constructed. */
+/** Session lifecycle, bound to the host's live owners. Accessors are read at
+ * call time: supervisor, registry and selected session all appear after this. */
 const sessions = createSessionLifecycle({
   supervisor: () => _supervisor,
   registry: () => _registry,
@@ -723,8 +723,9 @@ const sessions = createSessionLifecycle({
   hostSessionId: _sessionId,
 });
 
-/** Direct (no-tunnel) transport wiring. Off unless config says otherwise, and
- * only once the control port is real: the bridge dials it. */
+/** Direct (no-tunnel) transport: publish an offer into the discovery doc, take
+ * the app's answer, and pump whatever channel opens to the loopback server.
+ * Opt-in through `p2p`, and only once the control port is real. */
 async function startDirectTransport(): Promise<void> {
   if (loadConfig().p2p !== true || !_fb) return; // opt-in, and needs a document to signal in
   const port = _ws?.controlPort;
@@ -767,8 +768,7 @@ async function startDirectTransport(): Promise<void> {
   }
 }
 
-/** Dispatch a socket command; a refusal is pushed as a notice, since a socket
- * has no reply channel. */
+/** Dispatch a socket command; a refusal goes out as a notice (no reply channel). */
 async function handleCommand(command: ClientCommand): Promise<void> {
   try {
     await dispatchCommand(command);
