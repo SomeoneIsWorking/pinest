@@ -1,5 +1,5 @@
 import type { HttpHistoryRunner } from "./http-api.ts";
-import { offerDirectTransport, type DirectTransport } from "./direct-transport.ts";
+import { openReportedLanes, offerDirectTransport, type DirectTransport } from "./direct-transport.ts";
 import { createSessionLifecycle, RESUME_NUDGE } from "./session-lifecycle.ts";
 import {
   checkPathCommand,
@@ -85,6 +85,7 @@ import { imageBytesLimit, setImageBytesLimit } from "./config.ts";
 import { applyCompactThresholdCommand, reconcileStoredThreshold } from "./compaction-settings.ts";
 import { mergeRegistryRows } from "./state-message.ts";
 import { publishPresence } from "./presence.ts";
+import { publishEndpoint, realtimeDatabaseUrl } from "./endpoint-registry.ts";
 import { StatePublisher } from "./state-publisher.ts";
 import { recordFactoryEntry, recordLoadOutcome, recordTunnelUrl } from "./runtime-record.ts";
 const REGISTRY_PATH = process.env.RC_REGISTRY_PATH
@@ -356,6 +357,19 @@ function broadcastState(): void {
  * machine showed nothing, so the reason existed nowhere. */
 let _presenceError: string | null = null;
 
+/** Say where this host can be reached. On CHANGE only: a quick tunnel renames
+ * itself only when it restarts, so this is a handful of writes a month rather
+ * than tens of thousands. A refusal is a line, never an interruption. */
+function publishCurrentEndpoint(): Promise<void> {
+  if (!_ownerUid) return Promise.resolve();
+  const deps = {
+    ownerUid: _ownerUid, databaseUrl: realtimeDatabaseUrl(),
+    hostname: hostname(), online: true,
+  };
+  const doc = { url: _ws?.tunnelUrl ?? null, online: true, hostname: hostname(), ts: Date.now() };
+  return publishEndpoint(doc, deps).catch((e) => debug("[remote-code] endpoint publish failed:", (e as Error).message));
+}
+
 function publishCurrentPresence(online: boolean): Promise<void> {
   return publishPresence(
     { fb: _fb, ownerUid: _ownerUid, ownerEmail: _ownerEmail, tunnelUrl: () => _ws?.tunnelUrl ?? null, hostname },
@@ -382,7 +396,7 @@ function publishCurrentPresence(online: boolean): Promise<void> {
   );
 }
 
-/** Registry rows overlaid with live status (live: true = loaded in-process). */
+/** Registry rows with live status folded in (live: loaded in-process). */
 function mergedRegistryRows(): SessionRow[] {
   return mergeRegistryRows(_registry?.all() ?? [], (id) => _publisher.get(id)?.status);
 }
@@ -531,6 +545,11 @@ async function bootstrap(): Promise<void> {
   _ws.tunnelUrlChanged = () => {
     recordTunnelUrl(_ws?.tunnelUrl ?? null);
     void publishCurrentPresence(true);
+    // Written on CHANGE, never on a heartbeat: a quick tunnel renames itself
+    // only when it restarts, so this is a handful of writes a month rather
+    // than tens of thousands. That is the difference between a budget that
+    // lasts and one that empties in a day (endpoint-registry.ts).
+    void publishCurrentEndpoint();
     broadcastState();
   };
   _ws.setHistoryRunner(historyRunner);
@@ -707,8 +726,7 @@ const sessions = createSessionLifecycle({
 /** Direct (no-tunnel) transport wiring. Off unless config says otherwise, and
  * only once the control port is real: the bridge dials it. */
 async function startDirectTransport(): Promise<void> {
-  if (loadConfig().p2p !== true) return;
-  if (!_fb) return; // no discovery document to signal in
+  if (loadConfig().p2p !== true || !_fb) return; // opt-in, and needs a document to signal in
   const port = _ws?.controlPort;
   if (!port) {
     debug("[remote-code] p2p: no control port yet, not offering a direct transport");
@@ -720,12 +738,10 @@ async function startDirectTransport(): Promise<void> {
         if (!_fb || !_ownerUid) throw new Error("no owner record to publish an offer to");
         await _fb.patchUserDoc(_ownerUid, fields);
       },
-      // The machine learns the answer by WATCHING the document, not by reading
-      // it on a timer: a listener costs one read per change and nothing at all
-      // while nothing happens, where a two-second poll cost 43,200 reads a day
-      // and exhausted this project's daily allowance (issue #57). Where no
-      // credential can open a listener the watch falls back to a paced poll and
-      // says so, so the fallback is visible rather than implied.
+      // The machine learns the answer by WATCHING the document, not by polling
+      // it: a two-second poll cost 43,200 reads a day and exhausted this
+      // project's daily allowance (issue #57). Where no credential can open a
+      // listener the watch falls back to a paced poll and says so.
       watch: createDiscoveryWatch({
         uid: _ownerUid ?? "",
         read: () => (_fb && _ownerUid ? _fb.readUserDoc(_ownerUid) : Promise.resolve(null)),
@@ -736,21 +752,8 @@ async function startDirectTransport(): Promise<void> {
     signaling.onReports((reports) => {
       _clientReports.update(reports);
       _clientReport = _clientReports.view();
-      // A client that has reported gets a lane of its own: one offer is
-      // answerable by one peer, so this is what lets a second app on the same
-      // account connect at all instead of its answer being refused as the
-      // first client's redelivered one.
-      //
-      // The report's OWN timestamp goes with it, because the entry under
-      // `clients.<id>` outlives the client: a report from a client that left
-      // stays in the document and is redelivered on every update, and renewing
-      // a lane on redelivery gave departed clients a permanent hold on the cap
-      // (I-069). A report is a heartbeat only while it is advancing.
-      void Promise.all(
-        reports.map(({ lane, seen }) => (seen && "report" in seen)
-          ? _directTransport?.ensureLane(lane, seen.report.at)
-          : _directTransport?.ensureLane(lane)),
-      ).catch((error: Error) => debug(`[remote-code] p2p: could not open a client lane: ${error.message}`));
+      void openReportedLanes(reports, (lane, reportAt) => _directTransport?.ensureLane(lane, reportAt) ?? Promise.resolve())
+        .catch((error: Error) => debug(`[remote-code] p2p: could not open a client lane: ${error.message}`));
     });
     _directTransport = await offerDirectTransport({
       port,
@@ -764,10 +767,8 @@ async function startDirectTransport(): Promise<void> {
   }
 }
 
-/**
- * Dispatch a command from a socket: a refusal is pushed to the client as a
- * notice, because a socket has no reply channel for it.
- */
+/** Dispatch a socket command; a refusal is pushed as a notice, since a socket
+ * has no reply channel. */
 async function handleCommand(command: ClientCommand): Promise<void> {
   try {
     await dispatchCommand(command);
