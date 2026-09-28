@@ -368,16 +368,16 @@ function publishCurrentPresence(online: boolean): Promise<void> {
       }
     },
     (error: Error) => {
-      // Recorded and broadcast: an exceeded quota, a revoked credential, or a
-      // rejected field is information the operator can act on, and "the app
-      // cannot see this machine" is otherwise indistinguishable from a network
-      // problem on the app's side.
+      // Recorded and broadcast - a quota, a revoked credential or a rejected
+      // field is what the operator acts on - and NOT rethrown. Rethrowing made
+      // it a landmine: every call site had to catch it and the fire-and-forget
+      // ones did not, so a metered service refusing a write could take down the
+      // host that was only trying to be found.
       if (_presenceError !== error.message) {
         debug(`[remote-code] discovery publish failed: ${error.message}`);
       }
       _presenceError = error.message;
       broadcastState();
-      throw error;
     },
   );
 }
@@ -587,17 +587,16 @@ async function bootstrap(): Promise<void> {
   // Tunnel (background). Drifts publish the fresh URL as soon as it's up.
   const { tunnelProvider: preferred } = loadConfig();
   debug(`[remote-code] Starting tunnel (preferred: ${preferred})…`);
-  const ws = _ws; // teardownRemote() may null _ws while the tunnel is pending
+  // teardownRemote() may null _ws while the tunnel is pending, hence the local.
+  const ws = _ws;
   _tunnelStarting = preferred !== "off";
   renderFooter();
   void ws.startTunnel(preferred)
     .then((used) => {
       _tunnelStarting = false;
       debug(`[remote-code] Tunnel up via ${used ?? "(none)"}: ${ws.tunnelUrl ?? "local-only"}`);
-      // The footer was rendered while this was still pending, so it still says
-      // "(starting…)". Refresh it here or the status bar keeps reporting a
-      // state that ended minutes ago — which is how a WORKING host reads as a
-      // hung one (see I-021's recovery note).
+      // The footer was rendered while this was pending, so it still says
+      // "(starting…)": a working host that reads as a hung one (I-021).
       renderFooter();
       uiNotify(`[pinest] tunnel up: ${ws.tunnelUrl ?? "no URL — remote access is local-only"}`);
       recordTunnelUrl(ws.tunnelUrl ?? null);
@@ -608,7 +607,7 @@ async function bootstrap(): Promise<void> {
       debug("[remote-code] Tunnel failed:", (e as Error).message, "— running local-only");
       renderFooter();
       uiNotify(`[pinest] tunnel failed: ${(e as Error).message} — local-only`, "warning");
-      return publishCurrentPresence(true);
+      publishCurrentPresence(true);
     });
 
   // Register this interactive session

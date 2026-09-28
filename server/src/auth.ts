@@ -37,6 +37,36 @@ const AGENT_DIR = join(homedir(), ".pi", "agent");
 const RC_DIR = join(AGENT_DIR, "remote-code");
 const DEFAULT_SERVICE_ACCOUNT_PATH = join(RC_DIR, "serviceAccountKey.json");
 
+/**
+ * Give a metered call a deadline we actually control.
+ *
+ * The Firestore client's own retry policy is not settable through `settings()`:
+ * `maxAttempts` there belongs to `transaction()`, and the gax backoff that
+ * produces "Total timeout ... exceeded 600000 milliseconds" is configured on the
+ * call path we do not reach. A bound written into `settings()` therefore looked
+ * applied and was silently ignored — measured, when an exhausted quota stalled a
+ * presence write for ten minutes exactly as before the bound existed.
+ *
+ * So the deadline is ours: a discovery write is a side channel, and how long it
+ * may hold the host is a decision the host makes, not one it inherits.
+ */
+const DISCOVERY_DEADLINE_MS = 10_000;
+
+function withDeadline<T>(work: Promise<T>, what: string, ms = DISCOVERY_DEADLINE_MS): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${what} did not complete within ${ms / 1000}s`)),
+      ms,
+    );
+    // Never hold the process open for a write nobody is waiting on.
+    timer.unref?.();
+    work.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
 export interface ServiceAccount {
   project_id: string;
   [key: string]: unknown;
@@ -703,11 +733,17 @@ export class AdminFirebase implements FirebaseAuth {
     // merely TRUTHY and selects the same leaf-level deep merge as `true` - a
     // fix that looks right, typechecks, and changes nothing. See the fake in
     // server/test/auth.test.ts, which implements the SDK's own branch.
-    await this.db.collection("users").doc(uid).set(fields, { mergeFields: Object.keys(fields) });
+    await withDeadline(
+      this.db.collection("users").doc(uid).set(fields, { mergeFields: Object.keys(fields) }),
+      "the discovery document write",
+    );
   }
 
   async readUserDoc(uid: string): Promise<Record<string, unknown> | null> {
-    const snap = await this.db.collection("users").doc(uid).get();
+    const snap = await withDeadline<{ exists: boolean; data(): unknown }>(
+      this.db.collection("users").doc(uid).get(),
+      "the discovery document read",
+    );
     if (!snap.exists) return null;
     return (snap.data() as Record<string, unknown> | undefined) ?? {};
   }
