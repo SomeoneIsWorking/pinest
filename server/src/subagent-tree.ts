@@ -21,6 +21,10 @@ export interface SubagentTreeSession {
   thinking?: string;
   /** Set when this session is a subagent. */
   parentSessionId?: string;
+  /** Whether this session is executing a turn. */
+  status?: "idle" | "working";
+  /** This subagent's current run, when it is one. */
+  subagent?: SubagentRun;
 }
 
 export interface SubagentTreeDeps {
@@ -59,6 +63,7 @@ export class SubagentTree {
         model: row.model,
         thinking: row.thinkingLevel ?? undefined,
         ...(row.parentSessionId ? { parentSessionId: row.parentSessionId } : {}),
+        subagent: row.subagent ?? undefined,
       };
     }
     return null;
@@ -93,6 +98,35 @@ export class SubagentTree {
     return this.deps.live()
       .filter((s) => s.parentSessionId !== undefined)
       .map((s) => s.id);
+  }
+
+  /** Of this session's children, the ones actually doing work.
+   *
+   * The caps count THESE, not [childrenOf]. A finished subagent is a finished
+   * subagent: it still has a transcript, can be talked to, resumed or killed, and
+   * counting it would grow the bound without limit — four completed runs and no
+   * further fan-out, naming runs that ended hours ago. The earlier answer was to
+   * destroy finished children to make room, which fixed the count by taking away
+   * the parent's ability to reach the child at all.
+   *
+   * `working` is the honest test, with the unsettled run as a second: between
+   * spawning and the child's first turn there is a window where it has work and
+   * is not yet marked busy, and a cap that blinks there is not a cap. */
+  runningChildrenOf(parentSessionId: string): string[] {
+    return this.childrenOf(parentSessionId).filter((id) => this.isWorking(id));
+  }
+
+  /** Every subagent in the tree that is still doing work. */
+  runningSubagentIds(): string[] {
+    return this.subagentIds().filter((id) => this.isWorking(id));
+  }
+
+  /** Whether this subagent occupies a slot: a live session that is busy, or one
+   * whose run has been started and has no verdict yet. */
+  private isWorking(sessionId: string): boolean {
+    const s = this.find(sessionId);
+    if (!s) return false;
+    return s.status === "working" || s.subagent?.status === "running";
   }
 
   /**

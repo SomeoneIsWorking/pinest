@@ -13,6 +13,7 @@ import '../services/user_preferences.dart';
 import '../models/session.dart';
 import '../logic/session_grouping.dart';
 import 'chat_screen.dart';
+import 'subagent_list_screen.dart';
 import 'spawn_dialog.dart';
 import 'settings_screen.dart';
 import 'app_toast.dart';
@@ -131,7 +132,8 @@ class _MainShellState extends State<MainShell> {
     // Grouped, so a subagent is listed under the session that spawned it and
     // not wherever it happened to land in start order.
     final tree = buildSessionTree(svc.sessions);
-    final sessions = tree.map((row) => row.session).toList();
+    final rows = topLevelRows(tree);
+    final sessions = rows.map((row) => row.session).toList();
     // Keep selection valid
     if (_selectedId != null && !sessions.any((s) => s.id == _selectedId)) {
       _selectedId = sessions.isNotEmpty ? sessions.first.id : null;
@@ -144,13 +146,18 @@ class _MainShellState extends State<MainShell> {
     }
 
     if (wide) {
-      return _wide(context, svc, tree);
+      return _wide(context, svc, tree, rows);
     }
-    return _narrow(context, svc, tree);
+    return _narrow(context, svc, tree, rows);
   }
 
-  Widget _wide(BuildContext context, AgentService svc, List<SessionTreeRow> tree) {
-    final sessions = tree.map((row) => row.session).toList();
+  Widget _wide(
+    BuildContext context,
+    AgentService svc,
+    List<SessionTreeRow> tree,
+    List<SessionTreeRow> rows,
+  ) {
+    final sessions = rows.map((row) => row.session).toList();
     final active = _activeSession(sessions);
     // TabBar + TabBarView require a TabController ancestor; without it they
     // throw a null-check crash the moment sessions render. DefaultTabController
@@ -207,30 +214,35 @@ class _MainShellState extends State<MainShell> {
               onPressed: () => context.read<AuthService>().signOut(),
             ),
           ],
-          bottom: sessions.isEmpty
+          // Top level only. A subagent is work a session did, not a tab you
+          // chose: four of them used to push the sessions you were working in
+          // off the bar. They are reached from their parent, in
+          // [SubagentListScreen], which is where the fan-out actually reads.
+          bottom: rows.isEmpty
               ? null
               : TabBar(
                   isScrollable: true,
-                  tabs: sessions
-                      .asMap()
-                      .entries
+                  tabs: rows
                       .map(
-                        (entry) => _SessionTab(
-                          session: entry.value,
-                          level: tree[entry.key].level,
-                          onEdit: () => _editSession(context, svc, entry.value),
+                        (row) => _SessionTab(
+                          session: row.session,
+                          level: row.level,
+                          onEdit: () => _editSession(context, svc, row.session),
                         ),
                       )
                       .toList(),
-                  onTap: (i) => _selectSession(svc, sessions[i].id),
+                  onTap: (i) => _selectSession(svc, rows[i].session.id),
                 ),
         ),
-        body: sessions.isEmpty
+        body: rows.isEmpty
             ? const _EmptySessions()
             : TabBarView(
-                children: sessions
+                children: rows
                     .map(
-                      (s) => ChatScreen(sessionId: s.id, key: ValueKey(s.id)),
+                      (r) => ChatScreen(
+                        sessionId: r.session.id,
+                        key: ValueKey(r.session.id),
+                      ),
                     )
                     .toList(),
               ),
@@ -242,8 +254,9 @@ class _MainShellState extends State<MainShell> {
     BuildContext context,
     AgentService svc,
     List<SessionTreeRow> tree,
+    List<SessionTreeRow> rows,
   ) {
-    final sessions = tree.map((row) => row.session).toList();
+    final sessions = rows.map((row) => row.session).toList();
     final selected = _selectedId != null
         ? sessions.where((s) => s.id == _selectedId).firstOrNull
         : null;
@@ -634,6 +647,26 @@ class _SessionList extends StatelessWidget {
             );
           },
         ),
+        if (selected != null)
+          ListTile(
+            leading: const Icon(Icons.hub_outlined),
+            title: const Text('Subagents'),
+            subtitle: Text(
+              subagentsOf(sessions, selected.session.id).isEmpty
+                  ? 'No subagents for this session'
+                  : '${subagentsOf(sessions, selected.session.id).length} spawned by this session',
+            ),
+            onTap: () {
+              Navigator.pop(context);
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) =>
+                      SubagentListScreen(sessionId: selected.session.id),
+                ),
+              );
+            },
+          ),
         if (selected != null)
           ListTile(
             leading: const Icon(Icons.account_tree_outlined),

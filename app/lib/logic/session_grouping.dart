@@ -68,3 +68,37 @@ List<Session> subagentsOf(Iterable<Session> sessions, String parentId) => [
       for (final s in sessions)
         if (s.parentSessionId == parentId) s,
     ];
+
+/// The sessions a person drives: the top level of the tree, and nothing else.
+///
+/// A subagent used to sit in the tab bar beside the session that spawned it, so
+/// a fan-out of four replaced the tabs you were working in. A subagent is work
+/// that session did, not work you chose to switch to, so it belongs to its
+/// parent — see [subagentsOf], which is where they live now.
+List<SessionTreeRow> topLevelRows(List<SessionTreeRow> rows) =>
+    rows.where((r) => r.level == 1).toList();
+
+/// Whether [sessionId] is inside [ancestorId]'s subtree, [ancestorId] included.
+///
+/// Walks UP from [sessionId] rather than down from [ancestorId]: a subtree is
+/// however deep, and [subagentsOf] is only one level, so asking it would answer
+/// false for a grandchild that is plainly inside. The walk is bounded by the
+/// data (each step follows a parent link) and stops at the root, so a cycle made
+/// by bad data cannot hang the UI.
+bool isInSubtree(
+  List<SessionTreeRow> rows,
+  String ancestorId,
+  String sessionId,
+) {
+  if (ancestorId == sessionId) return true;
+  final parentOf = {
+    for (final r in rows)
+      if (r.session.parentSessionId != null) r.session.id: r.session.parentSessionId,
+  };
+  var current = parentOf[sessionId];
+  while (current != null) {
+    if (current == ancestorId) return true;
+    current = parentOf[current];
+  }
+  return false;
+}
