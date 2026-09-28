@@ -345,6 +345,17 @@ export class SubagentService {
       ...(settled.run.error ? { error: settled.run.error } : {}),
       ...inheritance(ran, "modelWarning"),
     });
+    // Release the slot. The per-session and machine caps count LIVE sessions, and stopping the child
+    // is the only thing that makes it not-live, so a child that finished without this kept its slot
+    // for the life of the process: four completed subagents and every later fan-out refused with
+    // "4 subagents are already running for this session", naming runs that had ended hours earlier.
+    // The aborted path below already did this, which is the tell that the omission was an oversight
+    // rather than a decision — an ABORTED child is the one you least want left running.
+    //
+    // AFTER markRun, because markRun records the verdict on the live session and despawning first
+    // would drop it. The durable row outlives the session (despawn keeps the registry entry), so the
+    // transcript the summary points at is still listable and resumable afterwards.
+    await this.host.stopChild(sessionId);
     debug(
       `[pinest] subagent ${sessionId} ${settled.run.ok ? "completed" : "failed"} ` +
         `after ${Math.round(durationMs / 1000)}s`,
