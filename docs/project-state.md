@@ -290,6 +290,36 @@ unconnected lanes. Legacy single-client flat fields have been retired in favor
 of the client lane schema. Each client persists a 32-character hex identity in storage
 (`client_identity.dart`), reports under `clients.<id>`, and answers its own
 matching lane in `p2pOffers`.
+
+A lane is a LEASE, and an offer cannot outlive the lane that published it
+(2026-09-28, I-069). Lanes were claims nothing gave back - `dropLane` had no
+caller outside the tests - so every departed client kept a peer connection and
+entries in three maps that the deployed rules cap at 8, while the machine's own
+service-account writes bypass those rules. One account reached eight lanes and
+every client write came back `PERMISSION_DENIED` while the machine went on
+publishing: measured live as a brand-new client refused on its first write, with
+the user's own Firefox and Chrome clients frozen out (their reports had stopped
+because the cap was refusing them, which is why every lane looked stale). Lanes
+are now released after `LANE_LEASE_MS` of silence, renewed by the client's own
+report and by an open channel, and admission is serialized so the cap is a real
+count rather than a check-then-await race that let six lanes exist against a cap
+of four. Two further leaks in the same class were found only by comparing the
+machine's two views of ITSELF - the lane count it reports against the offer map
+it publishes, which disagreed 3 vs 7: a publish that lands after its own
+retraction (candidates are still gathering when the lane is released), and a
+`close()` that released lanes without withdrawing their offers, leaking up to
+`MAX_LANES` entries on every reload. The rules bound is now 16, deliberately
+above `MAX_LANES` and asserted against it from `app/test/`, so a client write can
+never be refused because the machine filled a map. Verified live after the fix:
+a brand-new client registered, was answered with an offer, and completed the
+direct channel - `npm run verify:direct` authenticating over the direct channel
+and receiving state, with the offer/answer pair counting identically on both
+ends. Two clients punching at the same time, each on its own lane and each
+carrying its own traffic, is `server/test/p2p-multi-client.test.ts`; with one
+shared offer - the pre-lane design - the second client never receives an offer
+at all. The app now names its OWN refused write on the empty-state screen
+("This app cannot be seen"), because the machine cannot know: a report that was
+never written is a client it never heard from.
 app's write time is a different device's clock, and comparing the two refuses a
 perfectly good answer whenever the devices disagree by more than the age of the
 offer - silently, because a refused answer is just a punch that never lands. The
