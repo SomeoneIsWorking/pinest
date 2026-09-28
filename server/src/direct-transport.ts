@@ -162,10 +162,13 @@ export interface DirectTransport {
   /** Whether a direct channel now carries traffic, per lane. */
   status: () => DirectTransportStatus;
   /** Open a lane for this client if it has none, so a client that has just
-   * appeared gets an offer of its own. Idempotent: a client with a lane (open
-   * or not) keeps it, and every call RENEWS that lane's lease, because a
-   * client report is the only evidence that client is still there. */
-  ensureLane: (lane: string) => Promise<void>;
+   * appeared gets an offer of its own. Idempotent, and it renews the lease ONLY
+   * for a report that is actually new.
+   *
+   * `reportAt` is the reporting client's own timestamp. Pass it, or the lane is
+   * treated as unheard-from and left to expire: renewing on delivery alone is
+   * what let every departed client hold a lane for ever (I-069). */
+  ensureLane: (lane: string, reportAt?: number) => Promise<void>;
   /** Close a lane and withdraw its offer. Idempotent. */
   dropLane: (lane: string) => Promise<void>;
   /** Release every lane whose client has not been heard from within the lease,
@@ -208,6 +211,22 @@ interface Lane {
    * that keeps the lane: a client that stops reporting lets it expire, which is
    * the only thing that ever gives a lane back. */
   lastSeenAt: number;
+  /** The newest report timestamp this lane has produced, in the CLIENT's clock.
+   *
+   * This is what distinguishes a client that is alive from a report that is
+   * merely still in the document. A client's entry under `clients.<id>` is never
+   * deleted - only the client could do that, and a closed tab cannot - so a
+   * report from a client that left an hour ago is still sitting there being
+   * delivered on every discovery update. Renewing the lease on delivery alone
+   * therefore renews DEAD CLIENTS' LEASES FOREVER: measured live, four lanes
+   * held by probes silent for over an hour, which is exactly the cap that kept
+   * the owner's own browser from ever being given an offer.
+   *
+   * Comparing each report's own `at` against the last one seen for that lane is
+   * what makes this a heartbeat, and it is safe across devices because it only
+   * ever compares a client's timestamps with ITS OWN earlier ones. No two clocks
+   * are ever subtracted. */
+  lastReportAt: number;
 }
 
 export async function offerDirectTransport(
@@ -324,6 +343,7 @@ export async function offerDirectTransport(
       // A replacement exchange inherits the lane's lease: it is the same
       // client, still evidenced by the same report.
       lastSeenAt: previous?.lastSeenAt ?? now(),
+      lastReportAt: previous?.lastReportAt ?? -Infinity,
     };
     lanes.set(laneId, lane);
     laneRef.current = lane;
@@ -534,7 +554,7 @@ export async function offerDirectTransport(
   return {
     refreshIfStale,
     releaseExpiredLanes,
-    ensureLane: async (laneId) => {
+    ensureLane: async (laneId, reportAt?: number) => {
       if (closed || !laneId) return;
       // The cap is a COUNT, so admitting a lane is a compare-and-set on that
       // count. Awaiting anything between the check and the insert lets two
@@ -545,9 +565,15 @@ export async function offerDirectTransport(
       return admit(async () => {
         const existing = lanes.get(laneId);
         if (existing) {
-          // Already here: renew the lease. A client that keeps reporting keeps
-          // its lane; that is the whole contract.
-          existing.lastSeenAt = now();
+          // Already here. Renew ONLY if this report is newer than the last one
+          // seen for this lane: a report redelivered from the document is not a
+          // sign of life, and honouring it would keep a departed client's lane
+          // alive for ever - which is the cap the real clients could not get
+          // past.
+          if (reportAt === undefined || reportAt > existing.lastReportAt) {
+            existing.lastReportAt = reportAt ?? now();
+            existing.lastSeenAt = now();
+          }
           return;
         }
         if (lanes.size >= MAX_LANES) {
@@ -568,6 +594,8 @@ export async function offerDirectTransport(
         }
         log(`direct transport: opening a lane for ${label(laneId)}`);
         await beginExchange(laneId);
+        const admitted = lanes.get(laneId);
+        if (admitted && reportAt !== undefined) admitted.lastReportAt = reportAt;
       });
     },
     dropLane: closeLane,
