@@ -245,6 +245,29 @@ export interface RestDeps {
 }
 
 /**
+ * A fresh Google ID token for THIS machine's owner, from the cached sign-in.
+ *
+ * The same credential the app presents, which is the point: it means a host can
+ * write to a Google service under rules that check `auth.uid`, with no service
+ * account and no Admin SDK database module - and with no Firestore anywhere in
+ * the path, which is what a project whose Firestore write quota is exhausted
+ * needs. The refresh credential is a local file read; the exchange is Identity
+ * Toolkit, which is not a document store.
+ */
+export async function mintOwnerIdToken(
+  deps: { fetchImpl?: typeof fetch } = {},
+): Promise<string | null> {
+  const cached = readCachedAuth();
+  if (!cached?.refreshToken) return null;
+  const fresh = await securetokenRefresh(
+    firebaseWebConfig().apiKey,
+    cached.refreshToken,
+    deps.fetchImpl ?? fetch,
+  );
+  return fresh?.idToken ?? null;
+}
+
+/**
  * Verify a client's Google ID token, with no Firestore anywhere.
  *
  * This is the whole reason a host can run without a metered document store:

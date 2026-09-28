@@ -658,3 +658,30 @@ export async function offerDirectTransport(
     },
   };
 }
+
+/** One client's lane, as the discovery watch reports it. */
+export interface ObservedLane {
+  lane: string;
+  seen: { report: { at: number } } | { problem: string };
+}
+
+/**
+ * Open a lane for every client that has reported, and keep their count honest.
+ *
+ * A client that has reported gets a lane of its own, because one offer is
+ * answerable by one peer — this is what lets a second app on the same account
+ * connect at all instead of its answer being refused as the first client's
+ * redelivered one.
+ *
+ * The report's OWN timestamp goes with it, because the entry under
+ * `clients.<id>` outlives the client: a report from a client that left stays in
+ * the document and is redelivered on every update, and renewing a lane on that
+ * redelivery gave departed clients a permanent hold on the cap (I-069). A
+ * report is a heartbeat only while it is advancing.
+ */
+export function openReportedLanes(
+  reports: ObservedLane[],
+  ensureLane: (lane: string, reportAt?: number) => Promise<void>,
+): Promise<void[]> {
+  return Promise.all(reports.map(({ lane, seen }) => ensureLane(lane, "report" in seen ? seen.report.at : undefined)));
+}

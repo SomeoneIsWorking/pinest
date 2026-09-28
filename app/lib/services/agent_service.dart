@@ -15,8 +15,10 @@ import '../logic/client_report.dart';
 import '../logic/builtin_host.dart';
 import 'builtin_host_connector.dart';
 import 'client_report_writer.dart';
-import '../logic/discovery_document.dart';
 import '../logic/discovery_watch.dart';
+import '../logic/endpoint_choice.dart';
+import '../logic/machine_locator.dart';
+import '../firebase_options.dart';
 import '../logic/command_id.dart';
 import 'client_reporter.dart';
 import 'link_bridge.dart';
@@ -30,7 +32,6 @@ import '../models/session.dart';
 import '../models/session_goal.dart';
 export '../models/server_notice.dart';
 export '../models/session.dart' show PendingImage;
-import '../logic/endpoint_choice.dart';
 import '../models/chat_item.dart';
 import '../models/stream_segment.dart';
 import '../models/session_tree.dart';
@@ -41,7 +42,7 @@ import '../models/background_job.dart';
 /// Firebase = auth + URL discovery ONLY.
 /// The app reads `users/{uid}` to get the server's public URL, then connects
 /// via WebSocket. All data (sessions, history, streaming, tools) flows through WS.
-class AgentService extends ChangeNotifier {
+class AgentService extends ChangeNotifier implements MachineLocatorSink {
   final _db = FirebaseFirestore.instance;
   final _requests = CorrelatedRequestBroker();
   final _store = SessionStore();
@@ -64,6 +65,7 @@ class AgentService extends ChangeNotifier {
   /// one (an older host, or peer-to-peer switched off there).
   DirectStatus? get hostDirectStatus => _directStatus;
   String? get tunnelProvider => _tunnelProvider;
+  @override
   String? get uid => _auth?.user?.uid;
   String? _error;
   String? get error => _error;
@@ -160,6 +162,15 @@ class AgentService extends ChangeNotifier {
   String? _discoveryError;
   String? get discoveryError => _discoveryError;
   final BuiltInHostConnector _builtInHost = const BuiltInHostConnector();
+  @override
+  Future<String> token() async => (await _auth!.user!.getIdToken())!;
+
+  late final MachineLocator _locator = MachineLocator(
+    db: FirebaseFirestore.instance,
+    projectId: DefaultFirebaseOptions.web.projectId,
+    sink: this,
+  );
+
   final MachineDiscoveryWatch _discoveryWatch =
       MachineDiscoveryWatch(db: FirebaseFirestore.instance);
 
@@ -380,101 +391,53 @@ class AgentService extends ChangeNotifier {
 
   Future<String> _token() async => (await _auth!.user!.getIdToken())!;
 
+  /// Watch for this account's machine. All of the "where is it" lives in
+  /// MachineLocator, including which service answers first — see it for why the
+  /// order matters; here it is just: start looking, and apply what it finds.
   void _watchDiscovery(String uid) {
-    // The watch owns the subscription and the failure; what to DO about a
-    // document stays here, because only this service can dial and report.
-    _discoveryWatch.watch(
-      uid,
-      stillCurrent: () => _boundUid == uid,
-      onDocument: (doc) async {
-        // The machine's reload request rides the document this listener already
-        // watches; honoured once, and only if newer than this page.
-        _clientReport.offerReload(doc.data()?[kClientReloadField]);
-        await _applyDiscovery(doc);
-      },
-      onFailure: (error) {
-        _note(error is StateError || error is ArgumentError
-            ? 'the connection could not be started: $error'
-            : 'the machine\'s updates stopped reaching this app: $error');
-        notifyListeners();
-      },
-    );
-    // Mirror the watch's own failure into the one the UI reads.
-    final failure = _discoveryWatch.lastError;
-    if (failure != null && '$failure' != _discoveryError) {
-      _discoveryError = '$failure';
-      notifyListeners();
-    }
+    _locator.start();
   }
 
-  /// Apply one discovery update: pick an endpoint, dial it, try direct beside it.
-  Future<void> _applyDiscovery(DocumentSnapshot<Map<String, dynamic>> doc) async {
-    final data = doc.data();
-    final reading = readDiscoveryDocument(data, exists: doc.exists);
-    if (reading is NoMachinePublished) {
-      _note('the machine has not published anything for this account yet');
-      _transitionToDisconnected(forgetEndpoint: true);
-      return;
-    }
-    if (reading is UnreadableDocument) {
-      _note('the machine published an update this app could not read');
-      return;
-    }
-    if (reading is StaleMachine) {
-      _note("the machine's last update is ${(reading.age.inMilliseconds / 1000).round()}s old, so it is not being used");
-      _transitionToDisconnected(forgetEndpoint: true);
-      return;
-    }
-    if (reading is InsecureEndpointRefused) {
-      // A published URL that is not a safe WSS endpoint is refused outright:
-      // nothing may receive the Firebase token instead.
-      _transitionToDisconnected(forgetEndpoint: true, notify: false);
-      _error = 'Rejected insecure discovery URL';
-      notifyListeners();
-      return;
-    }
-    final live = reading as LiveMachine;
-    final endpoint = live.endpoint;
-    // Record the machine's own claim while it is fresh, before deciding
-    // anything about reaching it: this is what lets "offline" mean the machine,
-    // not merely this app's last dial.
+  @override
+  void onDialable(Uri? secure, {required bool fromRealtimeDatabase}) {
+    // A machine that just published is a machine that is up, whether or not it
+    // gave us an address: this is what lets "offline" mean the machine rather
+    // than merely this app's last dial.
     _machineSeenAt = DateTime.now().millisecondsSinceEpoch;
-    _machineSaidOnline = live.online;
-    if (endpoint != null) _lastEndpoint = endpoint;
+    _machineSaidOnline = true;
+    if (secure == null) {
+      // No tunnel published: the direct path is the only one left, and saying so
+      // is better than reporting a machine that is present but unaddressable as
+      // one that is not there at all.
+      _note('the machine published no tunnel; trying its direct connection');
+      _transitionToDisconnected(forgetEndpoint: true);
+      return;
+    }
+    // The loopback endpoint is preferred when this app is running ON the
+    // machine: it answers without leaving the machine, and a loopback that has
+    // already refused is not tried again.
+    final picked = pickEndpoint(
+      local: _localEndpoint,
+      remote: secure,
+      lastFailedLocal: _localFailed,
+    );
+    if (picked == null) {
+      _note('the machine published no endpoint this app can dial');
+      _transitionToDisconnected(forgetEndpoint: true);
+      return;
+    }
+    _lastEndpoint = picked;
+    _note('connecting to ${picked.host}'
+        '${fromRealtimeDatabase ? ' (published in Realtime Database)' : ''}');
+    _dialTarget = picked;
+    unawaited(_dial(picked));
+  }
 
-    // The tunnel is dialled FIRST and the direct attempt runs beside it: a
-    // punch takes as long as ICE takes, and making the only working path wait
-    // for it left the app disconnected for the duration - the machine looked
-    // offline while an exchange that may never land was in flight. A direct
-    // channel replaces the tunnel once it is actually open.
-    if (endpoint != null) {
-      final picked = pickEndpoint(
-        local: _localEndpoint,
-        remote: endpoint,
-        lastFailedLocal: _localFailed,
-      );
-      if (picked != null) {
-        _note('connecting to ${picked.host}');
-        _dialTarget = picked;
-        await _dial(picked);
-      } else {
-        _note('the machine published no endpoint this app can dial');
-      }
-    }
-    // A direct connection needs no third party in the data path. A failure is
-    // not silent: the link records why, and a machine with no tunnel at all is
-    // still reachable this way.
-    _direct.tryConnectInBackground(data);
-    if (endpoint == null && !_direct.active) {
-      final directErr = _direct.failure?.trim();
-      if (directErr != null && directErr.isNotEmpty) {
-        _note('the machine published no tunnel URL; direct connection failed: $directErr');
-      } else {
-        _note('the machine published no tunnel URL; a direct connection is being attempted');
-      }
-      _transitionToDisconnected(forgetEndpoint: true, notify: false);
-      notifyListeners();
-    }
+  @override
+  void onMissing(String why, {required bool fromRealtimeDatabase}) {
+    if (fromRealtimeDatabase) _discoveryError = why;
+    _note(why);
+    _transitionToDisconnected(forgetEndpoint: true);
   }
 
   /// Dial the tunnel URL. Safe to call repeatedly — skips if already
