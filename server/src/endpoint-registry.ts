@@ -68,12 +68,22 @@ export interface PublishEndpointDeps {
  * of a service that was only announcing a hostname.
  */
 export async function publishEndpoint(doc: EndpointDoc, deps: PublishEndpointDeps): Promise<void> {
-  const token = await (deps.idToken ?? mintOwnerIdToken)({ fetchImpl: deps.fetchImpl });
+  // Defaulted here rather than at the call site: the seam is optional, and a
+  // seam that is present in the type but undefined at runtime is how a publish
+  // path ships broken and only fails when it is actually used.
+  const doFetch = deps.fetchImpl ?? fetch;
+  const token = await (deps.idToken ?? mintOwnerIdToken)({ fetchImpl: doFetch });
   if (!token) return;
-  const url = `${deps.databaseUrl.replace(/\/+$/, "")}/${endpointPath(deps.ownerUid)}.json`;
-  const response = await deps.fetchImpl!(url, {
+  // The token goes in `?auth=`, NOT an `Authorization: Bearer` header.
+  // Measured against the live database: a valid, unexpired, correctly-scoped
+  // Google ID token presented as a bearer header is answered `401 Unauthorized
+  // request`, while the same token in the query parameter is accepted. The
+  // difference is invisible until it is tested against the real service, and it
+  // presents as a permissions problem when it is really a transport one.
+  const response = await doFetch(withAuth(
+    `${deps.databaseUrl.replace(/\/+$/, "")}/${endpointPath(deps.ownerUid)}.json`, token), {
     method: "PUT",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       url: doc.url,
       online: doc.online,
@@ -86,15 +96,26 @@ export async function publishEndpoint(doc: EndpointDoc, deps: PublishEndpointDep
   }
 }
 
-/** A client reads this to learn where its host is. */
+/** Attach an ID token the way this database accepts one. See publishEndpoint. */
+function withAuth(url: string, token: string): string {
+  return `${url}${url.includes("?") ? "&" : "?"}auth=${encodeURIComponent(token)}`;
+}
+
+/**
+ * Read where a host says it can be reached.
+ *
+ * The token is REQUIRED, not optional: the rules refuse an anonymous read, and
+ * a helper that appeared to work without one would only ever answer 401 while
+ * looking like a working lookup.
+ */
 export async function readEndpoint(
   uid: string,
   databaseUrl: string,
+  idToken: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<EndpointDoc | null> {
-  const response = await fetchImpl(
-    `${databaseUrl.replace(/\/+$/, "")}/${endpointPath(uid)}.json`,
-  );
+  const response = await fetchImpl(withAuth(
+    `${databaseUrl.replace(/\/+$/, "")}/${endpointPath(uid)}.json`, idToken));
   if (response.status === 404) return null;
   if (!response.ok) throw new Error(`endpoint read failed: HTTP ${response.status}`);
   const body = await response.json() as Partial<EndpointDoc> | null;

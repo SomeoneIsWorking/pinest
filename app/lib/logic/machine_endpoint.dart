@@ -64,13 +64,12 @@ Future<MachineEndpoint?> readMachineEndpoint({
   required String idToken,
   http.Client? client,
 }) async {
-  final url = Uri.parse(
-    '$baseUrl/${endpointPath(uid)}.json',
-  );
-  final response = await (client ?? http.Client()).get(
-    url,
-    headers: {'Authorization': 'Bearer $idToken'},
-  );
+  // The token rides `?auth=`, not an Authorization header: a valid, unexpired,
+  // correctly-scoped Google ID token sent as a bearer header is answered 401 by
+  // this database, which looks exactly like being forbidden and is not.
+  final url = Uri.parse('$baseUrl/${endpointPath(uid)}.json')
+      .replace(queryParameters: {'auth': idToken});
+  final response = await (client ?? http.Client()).get(url);
   // 401 is the rules refusing this token. It is an answer, not a failure to
   // reach the database, and saying so keeps "signed in as the wrong person"
   // distinct from "the service is unreachable".
