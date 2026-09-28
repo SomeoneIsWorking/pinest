@@ -400,6 +400,40 @@ export function embedImages(text: string): string {
  * long sessions with embedded images were far too heavy for session open. */
 export const HISTORY_PAGE_SIZE = 50;
 
+/** Byte budget for one history page, on top of the message count.
+ *
+ * The count alone is not a bound. A message in an agent session is not a
+ * sentence: one tool result here is 50 KB, so a 50-message page of ordinary work
+ * is megabytes. Measured on a live host, every history request cost the client
+ * ~6 MB and the host ~2 cores of re-serializing it, on a stable connection with
+ * no reconnect churn. The page is walked back until EITHER limit is reached, so
+ * a long session pages by weight and an ordinary one pages by count exactly as
+ * before.
+ *
+ * Large enough that a page still means something to a reader, small enough that
+ * re-sending one is never the expensive part of a turn.
+ */
+export const HISTORY_PAGE_BYTES = 256 * 1024;
+
+/** Roughly what one history item costs on the wire.
+ *
+ * Deliberately an estimate and not `JSON.stringify`: measuring must not be the
+ * expensive thing it exists to prevent. Text dominates, and tool args/results
+ * and inline image payloads are walked because those are what made a page heavy.
+ */
+export function historyItemBytes(item: HistoryItem): number {
+  let bytes = item.text.length + (item.thinking?.length ?? 0);
+  for (const tool of item.tools) {
+    bytes += (tool.name?.length ?? 0) + (tool.result?.length ?? 0) + (tool.id?.length ?? 0);
+    if (tool.args !== undefined) {
+      try { bytes += JSON.stringify(tool.args).length; } catch { bytes += 512; }
+    }
+    for (const image of tool.images ?? []) bytes += image.data?.length ?? 0;
+  }
+  for (const image of item.images ?? []) bytes += 1024;
+  return bytes;
+}
+
 /** Slice a full transcript into a page for the client.
  *
  * - No cursor (initial load / live refresh): the LAST `limit` items.
@@ -411,12 +445,25 @@ export const HISTORY_PAGE_SIZE = 50;
  * with any older pages it holds) or prepend (older page). */
 export function pageHistory(
   full: HistoryItem[],
-  opts: { limit?: number; cursor?: number } = {},
+  opts: { limit?: number; cursor?: number; maxBytes?: number } = {},
 ): { history: HistoryItem[]; cursor: number; hasMore: boolean; mode: "replace" | "older" } {
   const limit = Math.max(1, opts.limit ?? HISTORY_PAGE_SIZE);
+  const maxBytes = opts.maxBytes ?? HISTORY_PAGE_BYTES;
   const older = typeof opts.cursor === "number";
   const end = Math.min(older ? opts.cursor! : full.length, full.length);
-  const start = Math.max(0, end - limit);
+  // Walk back from the newest until one of the two bounds is reached. AT LEAST
+  // ONE item always goes out, even if it alone exceeds the budget: a page that
+  // can be empty has no progress, and a session whose newest message is huge
+  // would otherwise never open at all.
+  let start = end;
+  let bytes = 0;
+  while (start > 0) {
+    const item = full[start - 1]!;
+    const cost = historyItemBytes(item);
+    if (start < end && (end - start >= limit || bytes + cost > maxBytes)) break;
+    bytes += cost;
+    start -= 1;
+  }
   return {
     history: full.slice(start, end),
     cursor: start,
