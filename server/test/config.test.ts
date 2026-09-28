@@ -10,7 +10,9 @@ const TMP = makeTempDir("rc-config-test-");
 process.env.RC_CONFIG_PATH = join(TMP, "remote-code-config.json");
 
 // Import AFTER setting the env var so the module picks up the test path.
-const { loadConfig, saveConfig, resetConfig } = await import("../src/config.ts");
+const {
+  loadConfig, saveConfig, resetConfig, ensurePairingToken, createPairingToken,
+} = await import("../src/config.ts");
 const { DEFAULT_COMPACT_AT_TOKENS } = await import("../src/product-defaults.ts");
 
 const CFG = process.env.RC_CONFIG_PATH;
@@ -104,4 +106,46 @@ test("a test process cannot write the real user config (guard fires)", async () 
   const out = `${child.stdout}${child.stderr}`;
   assert.match(out, /REFUSED: refusing to write the user's real config/);
   assert.doesNotMatch(out, /NO-REFUSAL/);
+});
+
+// ── Pairing: the secret that takes the machine off Firebase (I-070) ─────────
+//
+// Pairing exists so a machine can run with no Google service in its path at all.
+// The config is where that decision is made, so the decision is tested here: a
+// secret that is generated once and reused, and NO secret on a machine that has
+// never been paired - because a lazily-created secret is a liability sitting on
+// disk, and a machine nobody paired must stay on the path it was shipped on.
+
+test("no pairing token exists until one is asked for", () => {
+  writeFileSync(CFG, JSON.stringify({ ...loadConfig(), tunnelProvider: "off" }, null, 2));
+  assert.equal(ensurePairingToken(), null, "a machine that was never paired has no secret on disk");
+  assert.equal(
+    JSON.parse(readFileSync(CFG, "utf8")).pairingToken,
+    undefined,
+    "and reading the config did not quietly create one",
+  );
+});
+
+test("a created pairing token is persisted, stable across reads, and secret enough", () => {
+  writeFileSync(CFG, JSON.stringify({ ...loadConfig() }, null, 2));
+  const token = createPairingToken();
+  assert.equal(typeof token, "string");
+  assert.ok(token.length >= 32, `long enough to be unguessable (got ${token.length})`);
+  assert.equal(ensurePairingToken(), token, "a second read returns the same secret");
+  assert.equal(
+    JSON.parse(readFileSync(CFG, "utf8")).pairingToken,
+    token,
+    "and it survives a restart, or every restart would need re-pairing",
+  );
+
+  const second = createPairingToken();
+  assert.notEqual(second, token, "creating again rotates it deliberately");
+  assert.equal(ensurePairingToken(), second, "and the new one is the one in force");
+});
+
+test("an empty or non-string pairing token is treated as not paired", () => {
+  for (const value of ["", 0, null, false, {}]) {
+    writeFileSync(CFG, JSON.stringify({ ...loadConfig(), pairingToken: value }, null, 2));
+    assert.equal(ensurePairingToken(), null, `not paired for ${JSON.stringify(value)}`);
+  }
 });

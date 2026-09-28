@@ -50,6 +50,7 @@ import { registerBackgroundTools, handleJobCommand } from "./background-tools.ts
 import { hostSubagentToolDeps, registerSubagentTools } from "./subagent-tools.ts";
 import { StreamSegmenter } from "./stream.ts";
 import { loadConfig, saveConfig } from "./config.ts";
+import { resolveHostIdentity, type HostVerify } from "./host-identity.ts";
 import { normalizeGoal } from "./session-goal.ts";
 import type { GoalSink } from "./session-goal.ts";
 import { registerHostCommands, showSessionsFlow, type HostCommandDeps } from "./host-commands.ts";
@@ -86,7 +87,6 @@ import { mergeRegistryRows } from "./state-message.ts";
 import { publishPresence } from "./presence.ts";
 import { StatePublisher } from "./state-publisher.ts";
 import { recordFactoryEntry, recordLoadOutcome } from "./runtime-record.ts";
-import { verifiedOwnerToken } from "./owner-runtime.ts";
 
 const REGISTRY_PATH = process.env.RC_REGISTRY_PATH
   || join(homedir(), ".pi", "agent", "remote-code", "sessions.json");
@@ -98,6 +98,7 @@ const REGISTRY_PATH = process.env.RC_REGISTRY_PATH
 // Either way a failure must not crash the pi host: remote control stays
 // offline with the reason visible.
 let _fb: FirebaseAuth | null = null;
+let _pairing: HostVerify | null = null;
 
 function firebase(): FirebaseAuth {
   if (_fb) return _fb;
@@ -451,14 +452,19 @@ async function bootstrap(): Promise<void> {
   if (_bootstrapPromise) return _bootstrapPromise;
   _isTornDown = false;
   _bootstrapPromise = (async () => {
-  const fb = await fbAsync();
-  _fb = fb;
-  // Browser login ONLY when a human is at the TUI. Headless runs (tests,
-  // RPC/print/json modes) resolve from cache or fail with instructions —
-  // an unattended run must never open a browser window.
-  const { uid, email } = await fb.resolveOwner({ interactive: _ctx?.mode === "tui" });
+  // A PAIRED machine does not use Firebase at all. It owns its URL, so there is
+  // nothing to discover and nothing to signal, and an app that was handed the
+  // pairing secret needs no identity provider to be believed. Skipping this
+  // whole block is what takes the host off a metered document entirely: no
+  // presence, no discovery, no offers, and therefore no quota to exhaust and no
+  // quota error that can leave the host unable to start.
+  const identity = await resolveHostIdentity({ interactive: _ctx?.mode === "tui" });
+  const { uid, email } = identity;
+  _fb = identity.fb;
+  _pairing = identity.kind === "paired" ? identity.verify : null;
   _ownerUid = uid;
   _ownerEmail = email;
+  debug(`[remote-code] ${identity.kind} identity · owner ${email} · session ${_sessionId}`);
 
   // Persistence and owner binding are authorization authorities, not optional
   // features. An unusable registry aborts remote bootstrap; continuing with
@@ -471,7 +477,6 @@ async function bootstrap(): Promise<void> {
   if (hostRow && !process.env.RC_SESSION_ID) {
     _sessionId = hostRow.id;
   }
-  debug(`[remote-code] Owner ${email} · session ${_sessionId}`);
 
   // Create supervisor with WebSocket callbacks
   _supervisor = new Supervisor(uid, {
@@ -518,10 +523,7 @@ async function bootstrap(): Promise<void> {
 
   // Start WebSocket server + tunnel
   _ws = new WSServer({ port: 0, expectedUid: uid });
-  _ws.setVerifyFn(async (token) => {
-    const identity = await fb.verifyToken(token);
-    return verifiedOwnerToken(identity);
-  });
+  _ws.setVerifyFn(async (token) => (_pairing ?? identity.verify)(token));
   _ws.on("command", (cmd) => { void handleCommand(cmd); });
   // The HTTP routes get the same dispatcher, with refusals propagating so they
   // can be answered with a status code instead of an unread push.
@@ -707,6 +709,7 @@ const sessions = createSessionLifecycle({
  * only once the control port is real: the bridge dials it. */
 async function startDirectTransport(): Promise<void> {
   if (loadConfig().p2p !== true) return;
+  if (_pairing) return; // paired: no document to signal in (host-identity.ts)
   const port = _ws?.controlPort;
   if (!port) {
     debug("[remote-code] p2p: no control port yet, not offering a direct transport");
@@ -824,8 +827,12 @@ async function dispatchCommand(command: ClientCommand): Promise<void> {
       reloadClient: async () => {
         // One explicit write into the app's own document; the app obeys a
         // request only when it is newer than the page it is running.
+        // A paired machine has no document to write into, so there is nothing
+        // to reload a browser through: say so rather than reporting a failure.
         if (!_fb || !_ownerUid) {
-          broadcast({ type: "error", message: "[remote-code] no owner to reload" });
+          broadcast(_pairing
+            ? { type: "notice", message: "[pinest] reload is a Firebase feature; a paired app reloads by pairing again" }
+            : { type: "error", message: "[pinest] no owner to reload" });
           return;
         }
         const at = Date.now();
