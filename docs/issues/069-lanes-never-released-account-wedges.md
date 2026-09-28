@@ -135,6 +135,90 @@ cap of four.** The cap was advisory, not a count.
 - Live: after reclaiming the document, a brand-new client wrote successfully and
   the machine answered it with an offer within seconds.
 
+## The actual root cause: the write that was supposed to REMOVE a lane merged instead
+
+Everything above reduces to one line. `AdminFirebase.patchUserDoc` wrote the
+discovery document with the Firestore Admin SDK's `set(fields, { merge: true })`,
+and **`merge: true` is a recursive merge**: for a map-valued field it merges the
+incoming keys in and leaves every key the caller did not mention. The machine
+rebuilds `p2pOffers` from its live lanes *precisely so a retracted lane
+disappears* — and under a deep merge it never could. Every lane ever published
+stayed in the document for ever.
+
+The two backends silently disagreed about the same write:
+
+| backend | write | a retracted lane |
+|---|---|---|
+| `RestFirebase` (hosted REST) | `PATCH` + `updateMask.fieldPaths=p2pOffers` | **removed** |
+| `AdminFirebase` (service account) | `set(fields, {merge: true})` | **kept** |
+
+and the machine runs on the second one. So the lane lease, the eviction, and the
+offer withdrawal were all *correct* and all *ineffective*: they removed the
+lane, and the document kept the offer.
+
+### How it was finally found
+
+By refusing to accept a measurement that made no sense. After the lease fix the
+live machine reported **3 lanes** while the document held **8 offers**, and the
+machine's own status and the machine's own published map — the same fact counted
+twice — disagreed. Every explanation that fit the code (two live instances, a
+failing write, a lost update) was checkable, and each was checked and wrong. The
+decisive experiment was to write the field *by hand* as the machine's own
+credential:
+
+- my own write, owner token, REST PATCH with an update mask → a retracted key
+  **disappeared** (replace)
+- the machine's write, seconds later → a key I had invented, `probeA`, with no
+  `ts` and a 9-character "sdp", was still there beside eight fresh real offers
+
+Only one difference existed between those two writes: which backend made them.
+
+### The fix, and the trap inside it
+
+`mergeFields` names the paths to replace; `merge: true` does not. The first
+version of this fix passed an array of field paths to `merge`:
+
+```ts
+set(fields, { merge: Object.keys(fields) })   // WRONG
+```
+
+It typechecked, it read correctly, and it **changed nothing**. The pinned SDK
+(`@google-cloud/firestore` 8.7.1) decides with
+
+```js
+const mergeLeaves = options && 'merge' in options && options.merge;  // an array is TRUTHY
+const mergePaths  = options && 'mergeFields' in options;              // false
+```
+
+so an array in `merge` selects the same leaf-level deep merge as `true`, and
+`SetOptions` in the `.d.ts` is a union of `{merge?: boolean}` and
+`{mergeFields?: Array<...>}` — an array was never a legal value there. Worse,
+the test I wrote to prove the fix **agreed with it**, because its fake Firestore
+implemented the semantics I believed rather than the ones the SDK has. Both the
+wrong fix and the lying test are now pinned: the fake reproduces the SDK's own
+branch (`'merge' in options && options.merge`, truthiness and all) and a test
+named for the trap asserts that an array in `merge` merges leaves and leaves
+nothing behind.
+
+This is the failure mode worth remembering: an instrument that has only ever
+agreed with the thing it measures is not an instrument.
+
+## The same class of bug, on the client
+
+The app wrote its report with `SetOptions(merge: true)` too, and its report
+**omits** `direct.failure` once a punch succeeds (`client_report.dart`, the
+`if (directFailure != null …)` line). Under a deep merge that failure was never
+removed, so a client that had recovered went on reporting the failure that had
+not happened since.
+
+That is not hypothetical: it is the contradiction this investigation opened
+with — reports reading `connected: true, path: "direct", ice: "connected"`
+alongside a stale `note` about channels that never opened. I could not tell
+whether a later attempt had succeeded, because the document was structurally
+incapable of showing a recovery. Both app writes now name their own lane path in
+`mergeFields` (`clientLaneWritePath` / `clientAnswerWritePath`), which replaces
+this client's entry and leaves every other client's lane alone.
+
 ## Why the symptom was so uninformative
 
 The screen said "not reachable", which points at the network, and the machine's

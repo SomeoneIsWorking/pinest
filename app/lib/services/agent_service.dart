@@ -238,10 +238,20 @@ class AgentService extends ChangeNotifier {
     // report written to the flat field would let the last writer speak for all
     // of them (and cost the others their lanes, since a lane exists while a
     // report does).
-    await _db
-        .collection('users')
-        .doc(uid)
-        .set(clientLaneFields(await _clientId.ensure(), payload), SetOptions(merge: true));
+    //
+    // `mergeFields` names THIS client's own lane, so the entry is replaced
+    // whole while every other client's lane is left alone. `merge: true` would
+    // deep-merge into it, and the report OMITS fields that no longer apply -
+    // `direct.failure` is written when a punch fails and simply left out once it
+    // succeeds. Under a deep merge that failure is then never removed, so a
+    // client that has recovered keeps reporting the failure that has not
+    // happened since, and the machine's own diagnostics - the summary shown to
+    // the user - contradict the live state beside them (I-069).
+    final clientId = await _clientId.ensure();
+    await _db.collection('users').doc(uid).set(
+      clientLaneFields(clientId, payload),
+      SetOptions(mergeFields: clientLaneWritePath(clientId)),
+    );
   }
 
   /// Transient server messages the user must SEE: `notice` (something they
@@ -812,10 +822,13 @@ class AgentService extends ChangeNotifier {
     publishAnswer: (sdp, writtenAt, offerTs, laneId) {
       final uid = _boundUid;
       if (uid == null) throw StateError('no uid to publish an answer for');
-      return _db
-          .collection('users')
-          .doc(uid)
-          .set(laneAnswerFields(laneId, sdp, offerTs), SetOptions(merge: true));
+      return _db.collection('users').doc(uid).set(
+        laneAnswerFields(laneId, sdp, offerTs),
+        // This lane's answer only, replaced whole: `merge: true` would deep-merge
+        // into whatever was there, which for a map field means a key this write
+        // omits survives. See the report write above.
+        SetOptions(mergeFields: clientAnswerWritePath(laneId)),
+      );
     },
     open: (channel) => _dialChannel(channel),
     onChanged: () {
