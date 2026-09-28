@@ -499,6 +499,49 @@ Hosted discovery, Google authentication, and the browser transport are
 implemented. Gap: one real browser sign-in through the hosted RestImpl path
 remains unverified.
 
+Identity and discovery were separated on 2026-09-28 (I-070), after a Firestore
+quota exhaustion proved they had never needed to be the same thing. Verified
+with the quota at zero: Google's Identity Toolkit minted a real ID token and the
+shipping verifier resolved it to the owner's uid, while every Firestore call was
+being refused. Identity is therefore always Google, and Firestore is optional
+discovery (`discovery: "none"`), not an identity system; a machine with discovery
+off constructs no Firestore client at all, so no quota can apply to a path that
+does not exist. The app already presented a Google ID token to the socket, so
+no client credential changed.
+
+Four distinct defects were found and fixed on the way, all of the same shape - a
+metered or failing side-channel deciding something it had no business deciding:
+
+- Pairing a machine cost every session, because the registry is bound to the
+  first authenticated owner. Google is the owner on every path, so the strict
+  refusal is restored with nothing special-cased, and all 32 sessions survived.
+- A presence write that fails became an unhandled rejection that killed the
+  host; Google's default is also to retry a failing call for 600 seconds, which
+  is why an exhausted quota read as a hung machine rather than an error. The
+  retry budget is now 3 attempts over 8 seconds.
+- The load verdict was recorded after the last statement of bootstrap, which was
+  a presence write. An exhausted quota left the record reading `pending` for a
+  quarter of an hour while the host served a phone perfectly: a status that can
+  lag a working host without bound is worse than none, because it is confidently
+  wrong. The initial publish is no longer awaited.
+- When this app's own Firebase read was refused, it reported "Supervisor
+  offline" - naming as the broken end the one part that was demonstrably fine.
+  It now says `This app cannot reach Firebase`, with Google's own words, and
+  states that what it knows about the machine is unknown rather than evidence.
+
+Verified live end to end on 2026-09-28, both directions: a real Google ID token
+over a real `*.trycloudflare.com` name to the URL the machine actually publishes
+was ACCEPTED, and tampered and empty tokens were refused; against an unreachable
+host the drill exits 2 and prints SKIP rather than a verdict. The published
+discovery document was read back at 54s old with a diallable URL, so the app's
+own path works, and the live host process holds zero Firestore connections when
+discovery is off.
+
+Remaining gap: the tunnel hostname is regenerated whenever the tunnel process
+restarts, so a paired client must be re-paired after a restart. A stable
+endpoint (Tailscale, or a named Cloudflare tunnel on a domain) removes that, and
+is a purchase decision for the owner, not a code change.
+
 ### S12 — Android APK delivery
 
 Evidence: the documented release path publishes an installable per-commit Android APK with signing
@@ -1012,10 +1055,20 @@ Evidence: Node suite (`npm test`) passes with 296 tests and 0 failures; `npm run
 
 ## Current focus
 
-S15 is the current focus: the direct transport is proven on this machine in both
-directions and now rebuilds its own discovery watch after an outage (I-063);
-what remains is the one piece a local run cannot supply - a real phone on
-another network, and meanwhile the tunnel that carries it. The session-view work
-in front of it still awaits one thing only a person can give: eyes on a real
-fullscreen terminal (I-061). The context-budget fix behind both awaits
-observation that it changes behaviour.
+Remote control is working from a phone on another network, which was the goal of
+I-070 and closes the gap S15 was blocked on: identity is Google, the tunnel
+carries the traffic, and the app's own discovery path is proven against the
+document the machine publishes.
+
+The one open item is durability of the endpoint. A `trycloudflare.com` hostname
+is regenerated on every tunnel restart, so a paired client needs re-pairing
+after one; that is an operational annoyance, not a fault, and it disappears with
+a stable endpoint (Tailscale, or a named Cloudflare tunnel on a domain). That is
+an owner decision because it costs money, so it has not been made here. It is
+also the only thing standing between this product and no dependency on a metered
+service at all, since `discovery: "none"` already removes Firestore completely.
+
+Below that, S15's remaining work is the one piece a local run cannot supply: the
+direct transport seen on a real phone from another network. The session-view work
+awaits one thing only a person can give: eyes on a real fullscreen terminal
+(I-061).
