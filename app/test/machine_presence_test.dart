@@ -135,4 +135,50 @@ void main() {
     expect(presence.detail, contains('cannot publish itself'));
     expect(presence.detail, contains('cannot read your answer'));
   });
+
+  // The failure that belongs to NEITHER end until the app speaks: its own
+  // report was refused, so the machine never heard from it and has nothing to
+  // complain about. Measured live — the discovery maps reached the entry count
+  // the deployed rules allow, every client write came back
+  // PERMISSION_DENIED, and this screen said only "not reachable".
+  test('a refused report of THIS app is named, and does not blame the machine', () {
+    final presence = describeMachinePresence(
+      connected: false,
+      machinePublishing: true,
+      machineSeenAt: now.millisecondsSinceEpoch,
+      reason: 'the machine published no tunnel URL; a direct connection is being attempted',
+      clientReportError: 'PERMISSION_DENIED: Missing or insufficient permissions.',
+      now: now,
+    );
+    expect(presence.detail, contains('could not write its own report'));
+    expect(presence.detail, contains('PERMISSION_DENIED'));
+    // The machine is publishing and healthy here; saying it "cannot be found"
+    // sends the user to debug the wrong end of a one-sided failure.
+    expect(presence.headline, isNot('Machine cannot be found'));
+    expect(presence.headline, 'This app cannot be seen');
+  });
+
+  test('a refused report is shown even with no other explanation', () {
+    final presence = describeMachinePresence(
+      connected: false,
+      machinePublishing: false,
+      machineSeenAt: 0,
+      reason: '',
+      clientReportError: 'PERMISSION_DENIED',
+      now: now,
+    );
+    expect(presence.detail, contains('PERMISSION_DENIED'));
+  });
+
+  test('an app that has never failed a report is not accused of one', () {
+    final presence = describeMachinePresence(
+      connected: false,
+      machinePublishing: true,
+      machineSeenAt: now.millisecondsSinceEpoch,
+      reason: 'no endpoint',
+      clientReportError: null,
+      now: now,
+    );
+    expect(presence.detail, isNot(contains('could not write its own report')));
+  });
 }

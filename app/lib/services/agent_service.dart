@@ -216,6 +216,19 @@ class AgentService extends ChangeNotifier {
   /// how a metered path gets exhausted twice, so it is part of the status.
   String? get machineSignalingMode => _signalingMode;
 
+  /// Why THIS app's last report was refused, in its own words.
+  ///
+  /// The failure belongs to neither end until the app says it: the machine
+  /// cannot see a report that was never written, so it has nothing to complain
+  /// about, and without this the only description of the state is a machine
+  /// that is publishing and a client that never answers. Measured live: the
+  /// discovery maps had reached the entry count the rules allow, every write
+  /// came back `PERMISSION_DENIED`, and the screen said "not reachable".
+  String? get clientReportError {
+    final failure = _clientReport.lastFailure?.trim();
+    return failure == null || failure.isEmpty ? null : failure;
+  }
+
   Future<void> _writeClientReport(Map<String, dynamic> payload) async {
     final uid = _boundUid;
     if (uid == null) {
