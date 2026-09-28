@@ -181,4 +181,58 @@ void main() {
     );
     expect(presence.detail, isNot(contains('could not write its own report')));
   });
+
+// ── The app's OWN Firebase failure is not news about the machine ────────────
+//
+// Measured live: an exhausted quota stopped this app reading the machine list,
+// so it had no document, so the machine looked absent — and the headline said
+// "Supervisor offline", naming as the broken end the one part that was fine.
+// The app is the end that can know this about itself, so it must say so.
+
+  test('a failed read on this side is not reported as a dead machine', () {
+    final presence = describeMachinePresence(
+      connected: false,
+      machinePublishing: false,
+      machineSeenAt: 0,
+      reason: 'the machine\'s updates stopped reaching this app',
+      discoveryError: 'FirebaseException: 8 RESOURCE_EXHAUSTED: Quota exceeded.',
+    );
+    expect(presence.headline, 'This app cannot reach Firebase');
+    expect(presence.headline, isNot('Supervisor offline'));
+    expect(presence.detail, contains('RESOURCE_EXHAUSTED'));
+    expect(presence.detail, contains('not evidence that it is down'));
+  });
+
+  test('a self-failure outranks a machine-side refusal: nothing it knows is usable', () {
+    final presence = describeMachinePresence(
+      connected: false,
+      machinePublishing: false,
+      machineSeenAt: 0,
+      reason: 'stale',
+      machinePresenceError: 'the machine could not publish itself',
+      discoveryError: 'permission denied',
+    );
+    expect(presence.headline, 'This app cannot reach Firebase');
+  });
+
+  test('with no self-failure the machine-side headlines are unchanged', () {
+    final offline = describeMachinePresence(
+      connected: false, machinePublishing: false, machineSeenAt: 0, reason: 'nothing heard',
+    );
+    expect(offline.headline, 'Supervisor offline');
+
+    final publishing = describeMachinePresence(
+      connected: false, machinePublishing: true, machineSeenAt: DateTime.now().millisecondsSinceEpoch,
+      reason: 'no socket',
+    );
+    expect(publishing.headline, 'Machine online, not reachable');
+  });
+
+  test('a blank self-failure is not a self-failure', () {
+    final presence = describeMachinePresence(
+      connected: false, machinePublishing: false, machineSeenAt: 0, reason: 'x',
+      discoveryError: '   ',
+    );
+    expect(presence.headline, 'Supervisor offline');
+  });
 }
