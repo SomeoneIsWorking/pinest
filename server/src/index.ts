@@ -689,7 +689,7 @@ async function bootstrap(): Promise<void> {
   void publishCurrentPresence(true).catch((e) => debug("[remote-code] initial presence publish failed:", (e as Error).message));
 
     // Footer
-    getFooter().startTimer(3000);
+    getFooter().startTimer();
 
     // Offline on exit
     const shutdown = async (): Promise<void> => {
