@@ -203,6 +203,21 @@ void main() {
     expect(presence.detail, contains('not evidence that it is down'));
   });
 
+  test('a lookup that WORKED and found nothing is not a Firebase failure', () {
+    // The app said "This app cannot reach Firebase" when the read had SUCCEEDED
+    // and simply returned nothing. That names the wrong end and sends the reader
+    // to debug a service that was working perfectly.
+    final presence = describeMachinePresence(
+      connected: false,
+      machinePublishing: false,
+      machineSeenAt: 0,
+      reason: 'the machine has not published anywhere this app can see',
+    );
+    expect(presence.headline, isNot('This app cannot reach Firebase'));
+    expect(presence.headline, 'Supervisor offline');
+    expect(presence.detail, contains('has not published'));
+  });
+
   test('a self-failure outranks a machine-side refusal: nothing it knows is usable', () {
     final presence = describeMachinePresence(
       connected: false,

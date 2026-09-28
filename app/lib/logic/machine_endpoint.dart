@@ -19,8 +19,21 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
-/// Freshness: a record older than this is a machine that stopped saying so.
-const Duration endpointFreshness = Duration(seconds: 90);
+/// How old a record may be before it is read as unusable.
+///
+/// Effectively unbounded, and that is deliberate. The host writes here only when
+/// its address CHANGES, to keep the cost at a handful of writes a month rather
+/// than a heartbeat that spends a monthly budget in a day - so a record that is
+/// a day old is exactly what a healthy machine looks like here. Requiring
+/// freshness rejected every real record: the app reported "has not published"
+/// for a machine that was running, and the only reason was that it had been
+/// running too long.
+///
+/// A dead machine leaves a record behind, and that is not a problem to solve by
+/// refusing to look: dialling a dead address fails, and a failed dial says "cannot
+/// reach", which is true. Refusing to try would say "not found" instead, which
+/// is not - the machine was found.
+const Duration endpointFreshness = Duration(days: 30);
 
 /// The project's Realtime Database, derived from the project id the app already
 /// has. Every project gets the region-less host.
@@ -49,6 +62,7 @@ class MachineEndpoint {
   /// Whether this record is recent enough to believe. An old one is not a
   /// machine that is down — it is a machine that stopped saying, which is
   /// indistinguishable from one that cannot be found.
+  /// Whether this record is old enough to be unreadable. See [endpointFreshness].
   bool get fresh =>
       DateTime.now().difference(publishedAt).abs() < endpointFreshness;
 }

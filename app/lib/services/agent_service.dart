@@ -434,8 +434,12 @@ class AgentService extends ChangeNotifier implements MachineLocatorSink {
   }
 
   @override
-  void onMissing(String why, {required bool fromRealtimeDatabase}) {
-    if (fromRealtimeDatabase) _discoveryError = why;
+  void onMissing(String why,
+      {required bool fromRealtimeDatabase, required bool lookupFailed}) {
+    // Only a failed lookup may say this app cannot reach Firebase. A lookup that
+    // worked and found nothing is an answer about the machine, and dressing it
+    // up as a service failure sends the reader to debug the wrong thing.
+    if (lookupFailed) _discoveryError = why;
     _note(why);
     _transitionToDisconnected(forgetEndpoint: true);
   }
