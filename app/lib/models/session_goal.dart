@@ -14,13 +14,15 @@ class SessionGoal {
   /// Set when the host has stopped re-prompting — the bound is spent, or the
   /// session could not be told. The banner says so rather than leaving a goal
   /// that looks alive and is not.
-  final bool exhausted;
+  /// Why the goal could not be reached just now, when it could not. Reported,
+  /// never terminal: the next turn end retries.
+  final String? stuck;
 
   const SessionGoal({
     required this.text,
     required this.setAt,
     this.continuations = 0,
-    this.exhausted = false,
+    this.stuck,
   });
 
   DateTime? get setAtTime =>
@@ -40,9 +42,11 @@ class SessionGoal {
       continuations: (raw['continuations'] as num?)?.toInt() ??
           ((raw['state'] as Map?)?['continuations'] as num?)?.toInt() ??
           0,
-      exhausted: (raw['exhausted'] as bool?) ??
-          ((raw['state'] as Map?)?['exhausted'] as bool?) ??
-          false,
+      stuck: (raw['stuck'] as String?) ??
+          ((raw['state'] as Map?)?['stuck'] as String?),
+      // `exhausted` was the old bound's verdict and is read only to be dropped:
+      // a host that still publishes it is a host whose goals are not stopped, so
+      // the client must not go on showing them as stopped.
     );
   }
 }

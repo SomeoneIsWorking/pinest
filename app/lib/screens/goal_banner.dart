@@ -51,20 +51,19 @@ class GoalBanner extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(fontSize: 13, color: scheme.onSecondaryContainer),
                     ),
-                    // A goal that is being re-prompted, and one that has stopped
-                    // being re-prompted, both have to be visible. A goal which
-                    // looks alive and is not is the failure this whole thing
-                    // existed to fix, so it must not look that way here.
-                    if (goal.exhausted || goal.continuations > 0)
+                    // A goal keeps going until it is achieved, so there is no
+                    // stopped state to show: it either is being continued, or
+                    // the host is retrying right now and says why. The count is
+                    // how much work it has caused, not a countdown to a stop.
+                    if (goal.stuck != null || goal.continuations > 0)
                       Text(
-                        goal.exhausted
-                            ? 'Stopped after ${goal.continuations} continuation'
-                                '${goal.continuations == 1 ? '' : 's'} — clear it, or it will not resume'
+                        goal.stuck != null
+                            ? 'Retrying — ${goal.stuck}'
                             : 'Continues itself · ${goal.continuations}',
                         style: TextStyle(
                           fontSize: 11,
                           fontStyle: FontStyle.italic,
-                          color: goal.exhausted
+                          color: goal.stuck != null
                               ? scheme.error
                               : scheme.onSecondaryContainer.withAlpha(160),
                         ),
