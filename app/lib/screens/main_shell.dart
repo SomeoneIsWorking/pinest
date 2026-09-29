@@ -502,6 +502,16 @@ class _SessionTab extends StatelessWidget {
             height: 8,
             decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
           ),
+          // A goal is marked on the tab itself, not only in the chat header of
+          // the session you happen to be looking at: a goal set on any other
+          // session was otherwise invisible until you opened that tab.
+          if (session.goal != null) ...[
+            const SizedBox(width: 6),
+            Tooltip(
+              message: session.goal!.text,
+              child: const Icon(Icons.flag, size: 13, color: Colors.amber),
+            ),
+          ],
           const SizedBox(width: 8),
           if (session.isHost)
             const Padding(
