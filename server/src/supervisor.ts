@@ -45,11 +45,12 @@ import { reportThinkingLevel, resolveThinkingLevel } from "./thinking.ts";
 import { dispatchSessionCommand } from "./session-command-handler.ts";
 import { GoalKeeper } from "./goal-keeper.ts";
 import { normaliseAdopted, rearmSessionTools } from "./reload-adoption.ts";
-import { normalizeGoal } from "./session-goal.ts";
 import type { SessionRegistry } from "./registry.ts";
 import { SessionModelService } from "./session-models.ts";
 import { SessionOverlay, type OverlayTarget } from "./session-overlay.ts";
 import type { SessionSnapshot, SessionRow, UserImage } from "./protocol.ts";
+import type { SessionGoal } from "./session-goal.ts";
+import { goalFieldFor, identityFieldsFor } from "./session-identity.ts";
 
 function isPinestExtension(path: string, resolvedPath?: string): boolean {
   const normPath = (path || "").replace(/\\/g, "/").toLowerCase();
@@ -192,7 +193,6 @@ export interface SupervisorOptions {
   } | null;
 }
 
-
 export class Supervisor {
   static activeSpawning = false;
   ownerUid: string;
@@ -290,7 +290,7 @@ export class Supervisor {
     });
     this.subagents = bound.service;
     this.goalKeeper = new GoalKeeper({
-      goalOf: (id) => normalizeGoal(this.registry?.get(id)?.goal),
+      goalOf: (id) => this.goalFor(id),
       persist: (id, goal) => this.persistRow(id, { goal }),
       publish: (id, patch) => this.callbacks.upsertSession(id, patch),
       agentFor: (id) => this.sessions.get(id) as unknown as
@@ -302,9 +302,7 @@ export class Supervisor {
 
     this.subagentToolSet = bound.tools;
   }
-
-  /** The subagent tree's answers, delegated: the rules live in the tree, so a
-   * caller holds a supervisor and not a second copy of them. */
+  /** The tree's rules live in the tree, so a caller gets them, not a copy. */
   levelOf(sessionId: string): number {
     return this.tree.levelOf(sessionId);
   }
@@ -312,7 +310,10 @@ export class Supervisor {
   subagentIds(): string[] {
     return this.tree.subagentIds();
   }
-
+  /** The objective, from the durable row: a LiveSession carries none. */
+  goalFor(id: string): SessionGoal | null {
+    return goalFieldFor(this.registry?.get(id));
+  }
   /** [parentSessionId]'s subagents that are still working: the cap's unit. */
   runningChildrenOf(parentSessionId: string): string[] {
     return this.tree.runningChildrenOf(parentSessionId);
@@ -416,7 +417,6 @@ export class Supervisor {
     return opts;
   }
 
-
   private persistRow(id: string, patch: Partial<SessionRow>): void {
     if (!this.registry) return;
     const s = this.sessions.get(id);
@@ -501,18 +501,17 @@ export class Supervisor {
       name, cwd, model: s.model, modelName: s.modelName,
       ...(s.thinkingLevel ? { thinkingLevel: s.thinkingLevel } : {}),
       status: "idle", isInteractive: false, createdAt: Date.now(),
-      // The objective this session already works toward, so resuming or
-      // respawning it shows the goal on its own tab again.
-      goal: normalizeGoal(this.registry?.get(id)?.goal),
-      // A subagent's identity travels in its FIRST broadcast, not after a
-      // second call marks it: a client that saw the row before the mark would
-      // show a stranger session.
-      ...(s.parentSessionId ? { parentSessionId: s.parentSessionId, subagent: s.subagent } : {}),
+      goal: goalFieldFor(this.registry?.get(id)),
+      // Identity in the FIRST broadcast: a client that saw the row first
+      // would show a stranger.
+      ...(s.parentSessionId
+        ? identityFieldsFor({ parentSessionId: s.parentSessionId, subagent: s.subagent })
+        : {}),
     });
     this.persistRow(id, {
       status: "idle", model: s.model, modelName: s.modelName,
       ...(s.thinkingLevel ? { thinkingLevel: s.thinkingLevel } : {}),
-      ...(s.parentSessionId ? { parentSessionId: s.parentSessionId, subagent: s.subagent } : {}),
+      ...(s.parentSessionId ? identityFieldsFor({ parentSessionId: s.parentSessionId, subagent: s.subagent }) : {}),
     });
     this.wire(id, s);
     debug(`[remote-code] Spawned session ${id} in ${cwd}`);
@@ -562,10 +561,12 @@ export class Supervisor {
       } catch { /* best effort */ }
     }
 
+    const resumedRow = this.registry?.get(id);
     this.callbacks.upsertSession(id, {
       name, cwd, model: s.model, modelName: s.modelName,
       status: "idle", isInteractive: false, resumed: true,
-      goal: normalizeGoal(this.registry?.get(id)?.goal),
+      ...identityFieldsFor(resumedRow),
+      goal: goalFieldFor(resumedRow),
     });
     this.persistRow(id, { status: "idle", model: s.model, modelName: s.modelName });
     this.wire(id, s);
@@ -1010,7 +1011,6 @@ export class Supervisor {
   private async models(s: LiveSession) {
     return this.modelService.list(s);
   }
-
 
   /** Undelivered pending messages for a session — read from the AGENT's own
    * queue, with the last mirrored snapshot as fallback for a parked session

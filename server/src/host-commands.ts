@@ -204,7 +204,7 @@ export async function showSessionsFlow(
         modelName: hostSnap?.modelName,
         thinking: thinkingOf(undefined, hostSnap),
         pending: hostSnap?.pendingMessages?.length,
-        goal: hostSnap?.goal?.text ?? null,
+        goal: supervisor?.goalFor?.(sessionId)?.text ?? null,
       },
       ...liveSessions.map(([id, s]: [string, any]) => ({
         id,
@@ -216,7 +216,7 @@ export async function showSessionsFlow(
         modelName: s.modelName,
         thinking: thinkingOf(s.session, sessions.get(id)),
         pending: sessions.get(id)?.pendingMessages?.length ?? s.pending?.length,
-        goal: sessions.get(id)?.goal?.text ?? null,
+        goal: supervisor?.goalFor?.(id)?.text ?? null,
         ...(s.parentSessionId
           ? {
               parentSessionId: s.parentSessionId,

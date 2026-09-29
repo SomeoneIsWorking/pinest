@@ -26,7 +26,25 @@ const child = (id: string, parentSessionId: string): SubagentTreeSession => ({
   id, parentSessionId, name: id, cwd: "/w", model: "m",
 });
 
-test("a top-level session is level 1 and its subagents are level 2, 3, and no deeper", () => {
+test("levels are counted honestly, with no ceiling to stop the count", () => {
+  // The tree was three levels deep because a cap said so. A cap on nesting is
+  // the same thing as a cap on continuations: work stops, and the justification
+  // is never as good as asking. So the level is now simply the truth about how
+  // deep the session sits, and nothing is refused for being deep.
+  const deep = treeOver({
+    live: [
+      { id: "root", name: "root", cwd: "/w" },
+      child("a", "root"),
+      child("b", "a"),
+      child("c", "b"),
+      child("d", "c"),
+      child("e", "d"),
+    ],
+  });
+  assert.equal(deep.levelOf("e"), 6, "depth is counted, not clipped");
+});
+
+test("a top-level session is level 1 and its subagents are level 2, 3, and deeper still", () => {
   const tree = treeOver({
     live: [
       { id: "root", name: "root", cwd: "/w" },
@@ -38,8 +56,8 @@ test("a top-level session is level 1 and its subagents are level 2, 3, and no de
 
   assert.equal(tree.levelOf("root"), 1);
   assert.equal(tree.levelOf("a"), 2);
-  assert.equal(tree.levelOf("b"), MAX_SUBAGENT_LEVEL);
-  assert.equal(tree.levelOf("c"), MAX_SUBAGENT_LEVEL, "the walk stops at the last level rather than counting past it");
+  assert.equal(tree.levelOf("b"), 3);
+  assert.equal(tree.levelOf("c"), 4, "the walk counts past where it used to stop");
 });
 
 test("the host session sits at the top of the tree even though it is not in the live map", () => {

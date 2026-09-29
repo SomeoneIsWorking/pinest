@@ -60,6 +60,10 @@ export interface SessionSummary {
    * because a goal set on one session has to be visible from the list, not only
    * after opening that session and looking for its banner. */
   goal?: string | null;
+  /** Its place in the tree, drawn: `│  ├─ `, `│  └─ `, `   ├─ `, or "". Set
+   * from the whole set, because whether a branch continues is a fact about the
+   * rows BELOW it - a lone row cannot know it is the last of its parent's. */
+  treePrefix?: string;
 }
 
 export interface SessionsViewOptions {
@@ -120,7 +124,9 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
   let mode: "list" | "confirm" = "list";
   let confirming: SessionSummary | null = null;
   /** The sessions the footer and the list are showing right now. */
-  let shown = sessions;
+  // Drawn here rather than by the caller: the connectors depend on the WHOLE set,
+  // and a filtered list changes which row is last under its parent.
+  let shown = drawTree(sessions);
 
   const rows = (): number => opts.rows ?? terminalRows(opts.tui);
 
@@ -163,7 +169,7 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
    * row. */
   const applyFilter = (): void => {
     const keep = view.getSelectedItem()?.value;
-    shown = filter.length === 0 ? sessions : sessions.filter((s) => matches(s, filter));
+    shown = drawTree(filter.length === 0 ? sessions : sessions.filter((s) => matches(s, filter)));
     view = list();
     const index = shown.findIndex((s) => s.id === keep);
     view.setSelectedIndex(index >= 0 ? index : 0);
@@ -273,7 +279,7 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
           confirming = null;
           mode = "list";
           sessions = sessions.filter((s) => s.id !== target.id);
-          shown = sessions.filter((s) => filter.length === 0 || matches(s, filter));
+          shown = drawTree(sessions.filter((s) => filter.length === 0 || matches(s, filter)));
           view = list();
           feedback = `Killed "${target.name}"`;
           void Promise.resolve(onKill?.(target)).catch((error: unknown) => {
@@ -420,6 +426,36 @@ export function createSessionsView(opts: SessionsViewOptions): SessionsViewCompo
 
 }
 
+/**
+ * Give every row its place in the tree, drawn with connectors.
+ *
+ * Indentation alone was not enough and the screenshot proved it: a flat two
+ * spaces per level, fifty rows deep in the list, with no way to see where one
+ * parent's children stop and the next parent begins. A vertical bar carries
+ * that, and the corner glyph says "last one here" out loud.
+ */
+export function drawTree(sessions: SessionSummary[]): SessionSummary[] {
+  const byParent = new Map<string, SessionSummary[]>();
+  for (const s of sessions) {
+    if (!s.parentSessionId) continue;
+    const siblings = byParent.get(s.parentSessionId) ?? [];
+    siblings.push(s);
+    byParent.set(s.parentSessionId, siblings);
+  }
+  const drawn = new Map<string, string>();
+  const walk = (s: SessionSummary, prefix: string): void => {
+    const children = byParent.get(s.id) ?? [];
+    children.forEach((child, i) => {
+      const last = i === children.length - 1;
+      const branch = `${prefix}${last ? "└─ " : "├─ "}`;
+      drawn.set(child.id, branch);
+      walk(child, `${prefix}${last ? "   " : "│  "}`);
+    });
+  };
+  for (const s of sessions) if (!s.parentSessionId) walk(s, "");
+  return sessions.map((s) => ({ ...s, treePrefix: drawn.get(s.id) ?? "" }));
+}
+
 /** One list row: what it is, where it runs, and what it is doing. */
 export function toItem(s: SessionSummary): SelectItem {
   const glyph = s.status === "working" ? "⚡" : "○";
@@ -430,7 +466,7 @@ export function toItem(s: SessionSummary): SelectItem {
   const where = shortenPath(s.cwd);
   // A subagent is indented under its parent and says which run it is, so the
   // fan-out is visible in the terminal and not just in the app.
-  const indent = s.parentSessionId ? "  ".repeat(Math.max(0, (s.level ?? 2) - 1)) : "";
+  const indent = s.treePrefix ?? (s.parentSessionId ? "├─ " : "");
   const child = s.parentSessionId
     ? `subagent ${subagentRunLabel(s)} of ${s.parentName ?? s.parentSessionId}`
     : "";
@@ -440,7 +476,10 @@ export function toItem(s: SessionSummary): SelectItem {
   const goal = s.goal ? `  \u2192 ${s.goal}` : "";
   return {
     value: s.id,
-    label: `${glyph} ${indent}${s.name}${host}${goal}`,
+    // The tree prefix comes FIRST: it is the indentation, and the status glyph
+    // is part of the row's content. Putting the glyph first drew a subagent as
+    // "⚡    └─ name", hanging the status outside the branch it belongs to.
+    label: `${indent}${glyph} ${s.name}${host}${goal}`,
     description: [where, model, thinking, s.status, queued, child]
       .filter((part) => part.length > 0)
       .join("  ·  "),
