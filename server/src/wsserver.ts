@@ -42,6 +42,8 @@ interface AuthedSocket extends WebSocket {
    * while it is keeping up. Being behind briefly is normal; never draining is
    * the only thing that justifies ending the connection. */
   stalledSince?: number | null;
+  /** Set when a keepalive ping went out and is not yet answered. */
+  awaitingPong?: boolean;
   /** Frames are processed in the order they arrived, one at a time. A socket
    * that pipelines `auth` and `subscribe` was previously handled CONCURRENTLY:
    * the token check awaits a network round trip, and the subscribe behind it
@@ -143,6 +145,19 @@ export class WSServer {
   tunnelUrl: string | null = null;
   /** authenticated clients */
   clients: Set<AuthedSocket> = new Set();
+  /**
+   * Keeps authenticated links visibly alive, and finds a client that has gone
+   * without the socket noticing.
+   *
+   * The host used to ANSWER pings only. A client that is idle therefore carried
+   * no traffic in either direction, which an intermediary in the middle reads as
+   * a dead connection and closes — the app saw a loss, reconnected, went idle,
+   * and was closed again. The client now pings on a timer for exactly that
+   * reason; this is the other half, so a half-open link is noticed here rather
+   * than being held open until something is sent into it.
+   */
+  private keepAlive: NodeJS.Timeout | null = null;
+  keepAliveIntervalMs = 25_000;
   private handlers: { command?: CommandSink } = {};
   /** Answers a history request for the HTTP route. Injected by the composition
    * root because it must reuse the socket's own dispatch path. */
@@ -210,8 +225,28 @@ export class WSServer {
     return this.httpKey;
   }
 
+  /** Ping every authenticated client, and drop one that has stopped answering. */
+  private pingClients(): void {
+    for (const ws of this.clients) {
+      if (ws.readyState !== WebSocket.OPEN) continue;
+      if (ws.awaitingPong) {
+        // A ping went unanswered since the last sweep: the peer is gone even
+        // though the socket still claims to be open. Reconnecting is cheaper than
+        // a tab that looks connected and is not.
+        this.closeSocket(ws, 1001, "no answer to keepalive");
+        continue;
+      }
+      ws.awaitingPong = true;
+      this.send(ws, { type: "ping" });
+    }
+  }
+
   async start(): Promise<void> {
     this.stopped = false;
+    if (this.keepAlive === null) {
+      this.keepAlive = setInterval(() => this.pingClients(), this.keepAliveIntervalMs);
+      this.keepAlive.unref?.();
+    }
     return new Promise((resolve, reject) => {
       // HTTP and WS share one port: the app reaches one origin through the
       // tunnel, and everything it SENDS goes over HTTP while the socket stays
@@ -424,7 +459,10 @@ export class WSServer {
     // Liveness probe from the client: answered at the socket layer so it works
     // even while sessions are mid-turn.
     if (message.type === "ping") {
-      if (ws.authed) this.send(ws, { type: "pong" });
+      if (ws.authed) {
+        ws.awaitingPong = false;
+        this.send(ws, { type: "pong" });
+      }
       return;
     }
 

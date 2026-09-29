@@ -43,6 +43,8 @@ import { classifyCompactFailure } from "./compaction-outcome.ts";
 import { createMessageSubmitter, type MessageSubmitter } from "./submit.ts";
 import { reportThinkingLevel, resolveThinkingLevel } from "./thinking.ts";
 import { dispatchSessionCommand } from "./session-command-handler.ts";
+import { GoalKeeper } from "./goal-keeper.ts";
+import { normaliseAdopted, rearmSessionTools } from "./reload-adoption.ts";
 import { normalizeGoal } from "./session-goal.ts";
 import type { SessionRegistry } from "./registry.ts";
 import { SessionModelService } from "./session-models.ts";
@@ -151,6 +153,12 @@ export interface LiveSession {
   pendingImagesByText?: Record<string, UserImage[]>;
   /** True between a run's message_start and agent_end (submission gate). */
   turnStarted: boolean;
+  /**
+   * Set when the user stopped this turn, so the agent_end it produces is not
+   * mistaken for the model deciding it was done. Cancelling is the one
+   * instruction given deliberately; a goal must not talk over it.
+   */
+  turnCancelled: boolean;
   submitter: MessageSubmitter | null;
   /** The session that spawned this one, when it is a subagent. */
   parentSessionId?: string;
@@ -184,38 +192,6 @@ export interface SupervisorOptions {
   } | null;
 }
 
-/** Fill in fields a parked session may predate (a hot reload IS a version
- * change). Returns the names of the fields that had to be defaulted — the
- * caller logs them, so an older-build handoff is visible rather than silent. */
-export function normaliseAdopted(id: string, s: LiveSession, segmenterState?: StreamSegmenterState): string[] {
-  const missing: string[] = [];
-  const fix = <K extends keyof LiveSession>(key: K, value: LiveSession[K], ok: boolean): void => {
-    if (ok) return;
-    (s as any)[key] = value;
-    missing.push(String(key));
-  };
-  fix("pending", [], Array.isArray(s.pending));
-  fix("pendingSteering", [], Array.isArray(s.pendingSteering));
-  fix("name", s.name || id, typeof s.name === "string" && s.name.length > 0);
-  fix("cwd", s.cwd || process.cwd(), typeof s.cwd === "string" && s.cwd.length > 0);
-  fix("settleWaiters", [], Array.isArray(s.settleWaiters));
-  if (s.subagent?.status === "running" && typeof (s.session as any)?.isIdle === "boolean") {
-    // A run that was in flight when the runtime went away is NOT running any
-    // more; the badge would otherwise sit on "running" forever.
-    if ((s.session as any).isIdle) {
-      s.subagent = { ...s.subagent, status: "stopped", finishedAt: Date.now(), error: "stopped by a host reload" };
-    }
-  }
-  fix("status", s.status === "working" ? "working" : "idle", s.status === "idle" || s.status === "working");
-  // Rebuild the segmenter rather than carrying the parked instance: a reload
-  // that added a method to StreamSegmenter otherwise throws on every delta
-  // ("segmenter.onThinkingDelta is not a function") for the whole run.
-  if (!(s.segmenter instanceof StreamSegmenter)) {
-    s.segmenter = StreamSegmenter.fromState(segmenterState);
-    missing.push("segmenter");
-  }
-  return missing;
-}
 
 export class Supervisor {
   static activeSpawning = false;
@@ -245,6 +221,14 @@ export class Supervisor {
   readonly subagents: SubagentService;
   /** The `subagent` tool, bound to this supervisor's policy. */
   private readonly subagentToolSet: (preferredOwner?: string) => ToolDefinition[];
+
+  /**
+   * Who keeps a session working toward its objective. A goal set through
+   * `goal_set` used to re-prompt its session once and then nothing kept it
+   * alive, so a session with an objective stopped wherever a turn happened to
+   * end. The policy lives in goal-continuation.ts; the wiring is in goal-keeper.
+   */
+  private readonly goalKeeper: GoalKeeper;
   constructor(ownerUid: string, callbacks: SupervisorCallbacks, registry: SessionRegistry | null = null, opts: SupervisorOptions = {}) {
     this.ownerUid = ownerUid;
     this.callbacks = callbacks;
@@ -309,6 +293,14 @@ export class Supervisor {
       resolveOwner: (ctx, preferred) => this.toolCaller(ctx, preferred),
     });
     this.subagents = bound.service;
+    this.goalKeeper = new GoalKeeper({
+      goalOf: (id) => normalizeGoal(this.registry?.get(id)?.goal),
+      persist: (id, goal) => this.persistRow(id, { goal }),
+      publish: (id, patch) => this.callbacks.upsertSession(id, patch),
+      agentFor: (id) => this.sessions.get(id) as unknown as
+        { sendCustomMessage?: (...args: any[]) => unknown } | undefined,
+    });
+
     this.subagentToolSet = bound.tools;
   }
 
@@ -336,6 +328,23 @@ export class Supervisor {
   /** The `subagent` tool, bound to this supervisor. */
   subagentTools(preferredOwner?: string): ToolDefinition[] {
     return this.subagentToolSet(preferredOwner);
+  }
+
+  /** The host session is pi's own, so it registers itself as a goal's target. */
+  setHostGoalTarget(sessionId: string, agent: () => unknown): void {
+    this.goalKeeper.setHostTarget(sessionId, agent);
+  }
+
+  onHostTurnEnded(opts: { cancelled?: boolean } = {}): Promise<boolean> {
+    return this.goalKeeper.onHostTurnEnded(opts);
+  }
+
+  onHostGoalSet(): void {
+    this.goalKeeper.onHostGoalSet();
+  }
+
+  onHostGoalCleared(): void {
+    this.goalKeeper.onHostGoalCleared();
   }
 
   /** The registry row id of the session making a tool call. */
@@ -406,43 +415,6 @@ export class Supervisor {
     return opts;
   }
 
-  /** Adopted sessions keep tool definitions created by the PREVIOUS build,
-   * whose closures hold that build's bg manager — an orphan whose delivery
-   * code never updates (pre-reload tasks kept notifying the host session).
-   * Re-arm the definitions' execute closures onto THIS instance's manager —
-   * same object identity, then refresh the registry so the wrappers
-   * re-capture. Ownership is not re-armed because it was never captured: the
-   * tools read it from the live execution context. */
-  private rearmSessionTools(id: string, s: LiveSession): void {
-    const manager = this.callbacks.bgManager;
-    if (!manager) return;
-    const session = s.session as any;
-    const customTools = session?._customTools as ToolDefinition[] | undefined;
-    if (!Array.isArray(customTools) || customTools.length === 0) return;
-    // No identity is handed over: the re-armed tools resolve their owner from
-    // the live execution context, exactly like freshly created ones.
-    const fresh = [
-      createAutoBackgroundBashTool({ bgManager: manager, cwd: s.cwd }),
-      ...createBackgroundTools(manager),
-      // A session at the last level of the tree gets none: re-arming is where
-      // an adopted session would otherwise gain the tool back.
-      ...(this.levelOf(id) < MAX_SUBAGENT_LEVEL ? this.subagentTools() : []),
-    ];
-    const freshByName = new Map(fresh.map((tool) => [tool.name, tool]));
-    let reamed = 0;
-    for (const def of customTools) {
-      const replacement = freshByName.get(def.name);
-      if (!replacement) continue;
-      Object.assign(def, { execute: replacement.execute });
-      reamed += 1;
-    }
-    if (reamed > 0) {
-      try { session._refreshToolRegistry?.(); } catch (e) {
-        debug(`[remote-code] reload: tool registry refresh failed on ${s.name}:`, (e as Error).message);
-      }
-      debug(`[remote-code] reload: re-armed ${reamed} background tool(s) on adopted session ${s.name}`);
-    }
-  }
 
   private persistRow(id: string, patch: Partial<SessionRow>): void {
     if (!this.registry) return;
@@ -472,7 +444,7 @@ export class Supervisor {
     return {
       session, currentTurnId: null, unsub: null, cwd, status: "idle", name,
       model: null, modelName: null, segmenter: new StreamSegmenter(), _compacting: false,
-      pending: [], pendingSteering: [], turnStarted: false, submitter: null,
+      pending: [], pendingSteering: [], turnStarted: false, turnCancelled: false, submitter: null,
       settleWaiters: [],
       ...identity,
     };
@@ -695,6 +667,10 @@ export class Supervisor {
           persist: (id, goal) => this.persistRow(id, { goal }),
           publish: (id, goal) => this.callbacks.upsertSession(id, { goal }),
         }),
+        // The count belongs to the goal, so a new one starts at zero and a
+        // cleared one leaves nothing behind.
+        onGoalSet: (id) => this.goalKeeper.onGoalSet(id),
+        onGoalCleared: (id) => this.goalKeeper.onGoalCleared(id),
         setSpawningFlag: (spawning) => {
           Supervisor.activeSpawning = spawning;
         },
@@ -793,6 +769,7 @@ export class Supervisor {
       }
       if (event.type === "message_start") {
         s.turnStarted = true;
+        s.turnCancelled = false;
         if (event.message?.role === "user") {
           s.segmenter?.reset();
           this.callbacks.broadcast({ type: "stream", sessionId: id, text: "", segments: [], status: "working" });
@@ -887,6 +864,21 @@ export class Supervisor {
           }
         } catch { /* */ }
         debug(`[remote-code] session ${id} status: working -> idle (agent_end)`);
+        // A turn ending is not a goal being met. Re-prompt, bounded — see
+        // goal-continuation.ts for why the bound is not optional.
+        void this.goalKeeper.onTurnEnded(id, { cancelled: s.turnCancelled === true })
+          .then((continued) => {
+            if (continued) {
+              debug(`[remote-code] session ${id} goal continuing: turn ended under an unmet goal`);
+            }
+          })
+          .catch((e: unknown) => {
+            this.callbacks.broadcast({
+              type: "error",
+              sessionId: id,
+              message: `[pinest] could not continue this session's goal: ${(e as Error).message}`,
+            });
+          });
         // A waiter is answered by the event handler that is ATTACHED, whoever
         // built it: a subagent run parked across a reload settles when the
         // adopting instance sees the same agent_end.
@@ -1142,7 +1134,10 @@ export class Supervisor {
       // are missing. Normalise explicitly and say what was missing; the first
       // version spread `s.pendingSteering` straight into a snapshot and took
       // the whole host offline with "not iterable".
-      const missing = normaliseAdopted(id, s, stash.segmenterStates.get(id));
+      // The object itself, never a copy: normaliseAdopted REPAIRS the parked
+      // session in place, and handing it a spread left the real one still
+      // missing its fields — so adoption dropped a session it had just fixed.
+      const missing = normaliseAdopted(id, s as never, stash.segmenterStates.get(id));
       if (missing.length) {
         debug(`[remote-code] reload: parked session ${id} came from an older build — defaulted ${missing.join(", ")}`);
       }
@@ -1159,7 +1154,12 @@ export class Supervisor {
       s.status = working ? "working" : "idle";
       // A session still mid-run keeps its submission gate closed.
       this.wire(id, s, { resumeTurn: working });
-      this.rearmSessionTools(id, s);
+      rearmSessionTools(id, s, {
+        bgManager: this.callbacks.bgManager,
+        subagentTools: () => this.subagentToolSet(),
+        levelOf: (sid) => this.levelOf(sid),
+        debug: (m) => debug(m),
+      });
       // The new instance starts with an EMPTY snapshot map, so this must carry
       // the session's IDENTITY too. Reporting only status/model is what made
       // adopted sessions show up as "session" with a blank workspace.

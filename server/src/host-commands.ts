@@ -29,6 +29,10 @@ export interface HostCommandDeps {
   goal: () => SessionGoal | null;
   /** Where the host session's objective is stored and published. */
   goalSink: () => GoalSink;
+  /** A new objective starts a new continuation count. */
+  onGoalSet?: () => void;
+  /** Nothing outlives a cleared objective. */
+  onGoalCleared?: () => void;
   say: (ctx: ExtensionCommandContext | undefined, text: string) => void;
   captureUi: (ctx: ExtensionCommandContext) => void;
   broadcastState: () => void;
@@ -473,6 +477,7 @@ export function registerHostCommands(pi: ExtensionAPI, deps: () => HostCommandDe
       // One owner of what setting a goal means: the value is stored on this
       // session's row and published on its snapshot, then handed to the agent.
       const next = setSessionGoal(sessionId, objective, goalSink());
+      deps().onGoalSet?.();
       try {
         // A custom message, so pi's record and the app both show it as an
         // injected instruction rather than as the user's own words.
@@ -496,6 +501,7 @@ export function registerHostCommands(pi: ExtensionAPI, deps: () => HostCommandDe
         return;
       }
       clearSessionGoal(sessionId, goalSink());
+      deps().onGoalCleared?.();
       say(ctx, "[pinest] goal cleared");
       broadcastState();
     },
