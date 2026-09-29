@@ -166,6 +166,10 @@ export interface SubagentRun {
 }
 
 export type ServerMessage =
+  /** Keepalive from the host, so an idle link is visibly alive in both
+   * directions and a client that stops answering is noticed here rather than
+   * being held open until something is sent into it. */
+  | { type: "ping" }
   | { type: "authed" }
   | { type: "pong" }
   | {

@@ -10,7 +10,8 @@
 import "../support/isolate-config.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normaliseAdopted, type LiveSession } from "../src/supervisor.ts";
+import { type LiveSession } from "../src/supervisor.ts";
+import { normaliseAdopted } from "../src/reload-adoption.ts";
 import { StreamSegmenter, type StreamSegmenterState } from "../src/stream.ts";
 
 /** A session as an older build would have parked it — note that its segmenter
