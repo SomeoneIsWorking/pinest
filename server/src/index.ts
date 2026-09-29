@@ -876,8 +876,8 @@ const handleInteractiveCommand = createHostInteractiveCommandHandler({
   // its live snapshot, exactly like a spawned session's does.
   goalSink: hostGoalSink,
   onCancelled: () => { _hostTurnCancelled = true; },
-  onGoalSet: () => _supervisor?.onHostGoalSet(),
-  onGoalCleared: () => _supervisor?.onHostGoalCleared(),
+  onGoalSet: () => _supervisor?.goals.set(),
+  onGoalCleared: () => _supervisor?.goals.cleared(),
 });
 
 // ── Bridge Pi events → WebSocket ────────────────────────────────────────────
@@ -987,7 +987,7 @@ function bridge(pi: ExtensionAPI): void {
     _status = "idle";
     debug(`[remote-code] host status: working -> idle (agent_end)`);
     // A turn ending is not a goal being met.
-    void _supervisor?.onHostTurnEnded({ cancelled: _hostTurnCancelled })
+    void _supervisor?.goals.turnEnded(_hostTurnCancelled)
       .catch((e: unknown) => broadcast({
         type: "error", sessionId: _sessionId,
         message: `[pinest] could not continue the host goal: ${(e as Error).message}`,
