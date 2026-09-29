@@ -38,7 +38,17 @@ a drill in BOTH directions (`--negative`) before trusting its verdict.
 If the extension ever fails to LOAD, nothing of ours is running and it cannot
 recover itself — fix the source, then use pi's built-in `/reload` in the host
 TUI (`/pinest-reload` is our command; it does not exist then, and pi would send
-it to the model as text). The tell is the LISTENING SOCKET, and the check has to
+it to the model as text).
+
+`/pinest-restart` restarts the whole pi PROCESS in place, on the same terminal
+and the same argv, for when the extension is loaded but the host is wedged — a
+stuck bootstrap leaves the previous instance's listener bound, so clients connect
+and are then closed with "authentication timeout" while the record sits at
+`load: "pending"` (`server/src/bootstrap-deadline.ts` bounds and names each
+startup step so that case reports itself). It refuses while any session is
+working, because a restart interrupts a turn mid-flight; `--force` overrides.
+It does NOT exist when the extension failed to load — that case still needs the
+user's hands or pi's own `/reload`. The tell is the LISTENING SOCKET, and the check has to
 resolve the symlinks: `ls -l /proc/<pi-pid>/fd | grep -c 'socket:\['` = 0 is the
 tell. Plain `ls /proc/<pi-pid>/fd` lists fd NUMBERS and never contains the word
 "socket", so the obvious form of this check returns 0 for a perfectly healthy
