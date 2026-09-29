@@ -21,6 +21,7 @@ import '../logic/machine_locator.dart';
 import '../firebase_options.dart';
 import '../logic/command_id.dart';
 import 'client_reporter.dart';
+import 'keepalive.dart';
 import 'link_bridge.dart';
 import 'remote_fs.dart';
 import 'server_http.dart';
@@ -460,6 +461,9 @@ class AgentService extends ChangeNotifier implements MachineLocatorSink {
     _ws = socket;
     try {
       await _connectChannel(socket);
+      if (identical(_ws, socket)) {
+        _keepAlive.start(socket, stillCurrent: () => identical(_ws, socket));
+      }
     } catch (e) {
       // A dial can THROW instead of reporting through onError - a handshake
       // that never completes is now one of those. Uncaught, it left the app
@@ -507,6 +511,7 @@ class AgentService extends ChangeNotifier implements MachineLocatorSink {
   /// claiming it - otherwise the app shows "connected directly" over a tunnel
   /// and routes sends at a channel that is gone.
   void _noteChannelGone(ControlChannel socket) {
+    if (identical(_ws, socket)) _keepAlive.stop();
     if (socket.endpoint == null) {
       _direct.channelLost();
     }
@@ -514,6 +519,10 @@ class AgentService extends ChangeNotifier implements MachineLocatorSink {
 
   /// Set when the socket was lost with sends possibly unconfirmed.
   bool _resyncNeeded = false;
+
+  /// Keeps the live socket visibly alive; see keepalive.dart for why an idle
+  /// link has to be noisy.
+  final KeepAlive _keepAlive = KeepAlive();
 
   /// Forget an unconfirmed send because the user said so.
   ///

@@ -23,6 +23,10 @@ export interface SessionCommandHandlerContext {
   syncQueue: (id: string, s: LiveSession) => void;
   /** Where a session's objective is stored and published. */
   goalSink: () => GoalSink;
+  /** A new objective starts a new continuation count. */
+  onGoalSet?: (sessionId: string) => void;
+  /** Nothing may outlive a cleared objective. */
+  onGoalCleared?: (sessionId: string) => void;
   setSpawningFlag?: (spawning: boolean) => void;
 }
 
@@ -85,6 +89,9 @@ export async function dispatchSessionCommand(
         pendingSteering: [],
         pendingImagesByText: {},
       });
+      // Marked BEFORE the abort, because the abort ends the turn and the
+      // agent_end it raises is the proof that this stop was deliberate.
+      s.turnCancelled = true;
       await s.session.abort();
       if (parked.length > 0) {
         ctx.callbacks.broadcast({
@@ -222,6 +229,9 @@ export async function dispatchSessionCommand(
     case "goal_set": {
       const id = cmd.sessionId as string;
       const goal = setSessionGoal(id, cmd.text, ctx.goalSink());
+      // A new objective starts a new count: continuations belong to the goal
+      // they were spent on, so a fresh goal is not born already exhausted.
+      ctx.onGoalSet?.(id);
       // A CUSTOM message, not a user message: the objective is injected by the
       // harness, and the app must not draw it as something the human typed. It
       // reaches the agent of THIS session — the tab the user was looking at — as
@@ -259,6 +269,9 @@ export async function dispatchSessionCommand(
     }
     case "goal_clear": {
       clearSessionGoal(cmd.sessionId as string, ctx.goalSink());
+      // Nothing may outlive a cleared goal, including a continuation already in
+      // flight for it.
+      ctx.onGoalCleared?.(cmd.sessionId as string);
       ctx.callbacks.broadcast({
         type: "notice",
         sessionId: cmd.sessionId as string,

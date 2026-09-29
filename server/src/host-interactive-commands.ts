@@ -31,6 +31,11 @@ export interface HostInteractiveCommandDeps {
   querySessionHistory: (ctx: unknown) => Promise<any[]>;
   /** Where this session's objective is stored and published. */
   goalSink: () => GoalSink;
+  /** The user stopped this turn: a goal must not talk over that. */
+  onCancelled?: () => void;
+  /** A new objective starts a new continuation count; a cleared one takes none. */
+  onGoalSet?: () => void;
+  onGoalCleared?: () => void;
 }
 
 export function currentHostThinkingLevel(
@@ -137,6 +142,9 @@ export function createHostInteractiveCommandHandler(
       case "cancel": {
         const parked = deps.pending.park();
         deps.publisher.upsert(sessionId, HostPendingQueue.emptySnapshot());
+        // Marked BEFORE the abort, because the abort ends the turn and its
+        // agent_end is what the goal reads to decide whether to speak again.
+        deps.onCancelled?.();
         (ctx as any)?.abort?.();
         if (parked.length > 0) {
           deps.broadcast({ type: "queue_parked", sessionId, messages: parked });

@@ -85,9 +85,9 @@ import { imageBytesLimit, setImageBytesLimit } from "./config.ts";
 import { applyCompactThresholdCommand, reconcileStoredThreshold } from "./compaction-settings.ts";
 import { mergeRegistryRows } from "./state-message.ts";
 import { publishPresence } from "./presence.ts";
-import { publishEndpoint, realtimeDatabaseUrl } from "./endpoint-registry.ts";
 import { StatePublisher } from "./state-publisher.ts";
-import { recordFactoryEntry, recordLoadOutcome, recordTunnelUrl } from "./runtime-record.ts";
+import { recordFactoryEntry, recordLoadOutcome } from "./runtime-record.ts";
+import { createEndpointAnnouncer } from "./host-endpoint.ts";
 const REGISTRY_PATH = process.env.RC_REGISTRY_PATH
   || join(homedir(), ".pi", "agent", "remote-code", "sessions.json");
 
@@ -257,6 +257,9 @@ function uiNotify(message: string, level: "info" | "warning" | "error" = "info")
 
 let _tunnelStarting = false;
 
+/** The user stopped the host's turn: a goal must not talk over that. */
+let _hostTurnCancelled = false;
+
 function getFooter(): FooterManager {
   if (!_footer) {
     _footer = new FooterManager({
@@ -357,28 +360,11 @@ function broadcastState(): void {
  * machine showed nothing, so the reason existed nowhere. */
 let _presenceError: string | null = null;
 
-/** Say where this host can be reached. On CHANGE only: a quick tunnel renames
- * itself only when it restarts, so this is a handful of writes a month rather
- * than tens of thousands. A refusal is a line, never an interruption. */
-/** Say where this host is: to the runtime record AND to the lookup service.
- * One function because the two drifted and that was the bug: a recorded URL that
- * is never announced leaves the app dialling a hostname that died with the last
- * tunnel. Written on CHANGE, never on a heartbeat - a quick tunnel renames
- * itself only when it restarts, so this is a handful of writes a month. */
-function announceEndpoint(): Promise<void> {
-  recordTunnelUrl(_ws?.tunnelUrl ?? null);
-  return publishCurrentEndpoint();
-}
-
-function publishCurrentEndpoint(): Promise<void> {
-  if (!_ownerUid) return Promise.resolve();
-  const deps = {
-    ownerUid: _ownerUid, databaseUrl: realtimeDatabaseUrl(),
-    hostname: hostname(), online: true,
-  };
-  const doc = { url: _ws?.tunnelUrl ?? null, online: true, hostname: hostname(), ts: Date.now() };
-  return publishEndpoint(doc, deps).catch((e) => debug("[remote-code] endpoint publish failed:", (e as Error).message));
-}
+const _endpoints = createEndpointAnnouncer({
+  tunnelUrl: () => _ws?.tunnelUrl ?? null,
+  ownerUid: () => _ownerUid,
+  debug,
+});
 
 function publishCurrentPresence(online: boolean): Promise<void> {
   return publishPresence(
@@ -553,7 +539,7 @@ async function bootstrap(): Promise<void> {
   // A moved URL is only useful once the app can see it: re-announce, and
   // refresh the local state snapshot.
   _ws.tunnelUrlChanged = () => {
-    void announceEndpoint();
+    void _endpoints.announce();
     broadcastState();
   };
   _ws.setHistoryRunner(historyRunner);
@@ -625,7 +611,7 @@ async function bootstrap(): Promise<void> {
       // The FIRST url fires no `tunnelUrlChanged` - that is for re-registration
       // only - so the host went silent after every reload and the app kept the
       // previous, now-dead hostname.
-      void announceEndpoint();
+      void _endpoints.announce();
       return publishCurrentPresence(true);
     })
     .catch((e) => {
@@ -889,6 +875,9 @@ const handleInteractiveCommand = createHostInteractiveCommandHandler({
   // The host session's own objective: it lives on the host's registry row and
   // its live snapshot, exactly like a spawned session's does.
   goalSink: hostGoalSink,
+  onCancelled: () => { _hostTurnCancelled = true; },
+  onGoalSet: () => _supervisor?.onHostGoalSet(),
+  onGoalCleared: () => _supervisor?.onHostGoalCleared(),
 });
 
 // ── Bridge Pi events → WebSocket ────────────────────────────────────────────
@@ -924,6 +913,7 @@ function bridge(pi: ExtensionAPI): void {
   pi.on("message_start", (event: any, ctx?: ExtensionContext) => {
     if (ctx) _ctx = ctx;
     _turnStarted = true;
+    _hostTurnCancelled = false;
     if (event?.message?.role === "user") {
       segmenter.reset();
       _status = "working";
@@ -996,6 +986,12 @@ function bridge(pi: ExtensionAPI): void {
     if (_currentTurnId) _currentTurnId = null;
     _status = "idle";
     debug(`[remote-code] host status: working -> idle (agent_end)`);
+    // A turn ending is not a goal being met.
+    void _supervisor?.onHostTurnEnded({ cancelled: _hostTurnCancelled })
+      .catch((e: unknown) => broadcast({
+        type: "error", sessionId: _sessionId,
+        message: `[pinest] could not continue the host goal: ${(e as Error).message}`,
+      }));
     _pending.clear();
     if (Array.isArray(event?.messages)) {
       const last = event.messages[event.messages.length - 1];
@@ -1039,6 +1035,9 @@ function bridge(pi: ExtensionAPI): void {
     captureUi(ctx?.ui ? { ui: ctx.ui } : ctx);
     ensureDefaultModelPersisted(ctx);
     _ctx = ctx ?? null;
+    // pi's own session is not in the supervisor's map, so a goal set on the
+    // host tab has to register it as a target or nothing re-prompts it.
+    _supervisor?.setHostGoalTarget(_sessionId, () => pi);
     // Re-apply the user's stored auto-compact threshold to pi's own trigger.
     // Without this the intent lived only in pinest's config and pi kept
     // compacting at the provisioned value — why 300k read back as 400k.
