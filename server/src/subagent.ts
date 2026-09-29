@@ -23,22 +23,27 @@
 
 import debug from "./log.ts";
 
-/** How deep a subagent tree goes: 1 is a top-level session, 2 its subagents,
- * 3 their subagents. A session at the last level is given no `subagent` tool at
- * all, so the limit is structural rather than a check a stale tool definition
- * could slip past. */
-export const MAX_SUBAGENT_LEVEL = 3;
+/**
+ * There is no limit, and that is the decision.
+ *
+ * These were 3 levels deep, 4 per parent and 12 per machine, each with a
+ * rationalisation about fork bombs and context windows - and each one a place
+ * where work simply stops. The user was explicit: they did not ask for a
+ * subagent cap. The same answer as the goal continuations, for the same reason:
+ * a limit that halts real work is the user's decision to make, not this file's,
+ * and a plausible-sounding justification is not a substitute for asking.
+ *
+ * What replaces a cap is visibility, not silence. Live and total counts are
+ * reported wherever subagents are shown, so a runaway is something you can SEE
+ * and stop yourself, rather than a refusal that arrives as lost work.
+ */
+export const MAX_SUBAGENT_LEVEL = Number.POSITIVE_INFINITY;
 
-/** Concurrent subagents one session may have running, at any level of the
- * tree. Fan-out is useful; an unbounded fan-out from one turn is a fork bomb
- * wearing an agent's clothes. */
-export const DEFAULT_MAX_PER_PARENT = 4;
+/** Concurrent subagents one session may have running, at any level. */
+export const DEFAULT_MAX_PER_PARENT = Number.POSITIVE_INFINITY;
 
-/** Live subagents across the whole machine. Every one of them is a real pi
- * session with its own context window and provider connections, so this is a
- * machine-resource bound rather than a policy one: a tree that hits it is told
- * what the limit is, and the work that already finished is untouched. */
-export const DEFAULT_MAX_TOTAL = 12;
+/** Live subagents across the whole machine. */
+export const DEFAULT_MAX_TOTAL = Number.POSITIVE_INFINITY;
 
 /** The task text a subagent may be given. Long enough for a real brief, short
  * enough that the child's own context is not spent on the instruction. */

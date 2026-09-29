@@ -490,7 +490,7 @@ test("an empty or oversized task is refused by name, before anything is opened",
   assert.equal(host.spawned.length, 0, "a refusal opens no session");
 });
 
-test("a session at the last level of the tree may not fan out further", async () => {
+test("a deep session still fans out, because there is no level cap", async () => {
   const host = new FakeHost();
   const service = new SubagentService(host);
   const root = parentSession(host);
@@ -499,15 +499,17 @@ test("a session at the last level of the tree may not fan out further", async ()
 
   assert.equal(service.levelOf(root.id), 1);
   assert.equal(service.levelOf(child.id), 2);
-  assert.equal(service.levelOf(grandchild.id), MAX_SUBAGENT_LEVEL, "the tree is three levels deep");
+  assert.equal(service.levelOf(grandchild.id), 3);
   assert.equal(service.maySpawn(child.id), true, "a subagent may fan out");
-  assert.equal(service.maySpawn(grandchild.id), false);
+  assert.equal(service.maySpawn(grandchild.id), true,
+    "and so may one at the depth that used to be the last");
 
-  await assert.rejects(
-    () => service.run({ parentSessionId: grandchild.id, task: "one more level" }),
-    /level 3 of 3 does not spawn further subagents/,
-  );
-  assert.equal(host.spawned.length, 0);
+  // `run` settles when the CHILD finishes its turn, which a fake host never
+  // does - so the spawn is observed, not awaited. Awaiting it here hangs the
+  // suite, which is what a first attempt at this test did.
+  void service.run({ parentSessionId: grandchild.id, task: "one more level" }).catch(() => {});
+  await new Promise((r) => setImmediate(r));
+  assert.equal(host.spawned.length, 1, "depth is not a refusal");
 });
 
 test("fanning out past the per-session cap is refused, and says what the limit is", async () => {
