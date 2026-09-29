@@ -34,6 +34,9 @@ export interface RuntimeRecord {
   sourceFingerprint: string;
   /** How many times the extension factory has been entered in this process. */
   factoryEntries: number;
+  /** Factory entries that declined to run, kept apart from the total so a host
+   * being hammered with subagent spawns is still legible at a glance. */
+  skipped?: number;
   load: LoadOutcome;
   /** Why the load failed or was skipped. Present for failed/skipped. */
   reason?: string;
@@ -151,6 +154,28 @@ export function recordFactoryEntry(options: {
   outcome: LoadOutcome;
   reason?: string;
 }): void {
+  // A factory entry that DECLINED to run is not a statement about the host.
+  //
+  // It rewrote the record from `base()`, which carries no port and no tunnel, so
+  // every subagent spawn - the factory is re-entered for each one - published a
+  // record saying "pending" with the endpoint fields gone. That is the whole
+  // "host is up but nothing can reach it, and the record disagrees" class: the
+  // host was healthy and the file was being overwritten underneath it, thirteen
+  // times in two minutes while subagents spawned.
+  //
+  // So a skip is merged onto whatever the live record says, and only counted.
+  // Whoever is actually wiring the host is the only writer of its load state.
+  const existing = readRuntimeRecord();
+  if (options.outcome === "skipped" && existing) {
+    write({
+      ...existing,
+      at: new Date().toISOString(),
+      factoryEntries: (existing.factoryEntries ?? 0) + 1,
+      skipped: (existing.skipped ?? 0) + 1,
+      reason: options.reason ?? existing.reason,
+    });
+    return;
+  }
   const record = base();
   record.sourceFingerprint = sourceFingerprint(options.sourcesRoot);
   record.load = options.outcome;

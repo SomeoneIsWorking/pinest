@@ -548,19 +548,30 @@ test("a subagent is listed under its parent, named as its child, and shows how t
   assert.match(rendered, /subagent done of parser audit/, "a sub-subagent names ITS parent, not the top session");
   assert.match(rendered, /parser audit/, "the subagent itself is listed");
 
-  // Indentation is what makes the tree legible; the deepest row is the most
-  // indented. The frame's own border and pointer prefix are the same on every
-  // row, so the measure is the gap between the status glyph and the name.
+  // Indentation is what makes the tree legible, and it is now DRAWN rather than
+  // repeated spaces. So the measure is the prefix in front of the status glyph:
+  // a connector is not whitespace, and measuring the gap between glyph and name
+  // would call every level equal.
+  //
+  // Measured RELATIVELY. The frame owns its own gutter, so the absolute width of
+  // a top-level row is the frame's business; what this test owns is that depth
+  // is visible at all.
   const indentOf = (name: string): number => {
     const row = lines.find((l) => l.includes(name));
     assert.ok(row, `no row for ${name}`);
-    const match = new RegExp(`[⚡○](\\s+)${name}`).exec(row!);
+    const match = /([\s│├└─]*)(?:⚡|○)/.exec(row!);
     assert.ok(match, `${name} is not rendered as a row: ${JSON.stringify(row)}`);
     return match![1].length;
   };
-  assert.equal(indentOf("agent-0"), 1, "a top-level session sits right after its glyph");
-  assert.ok(indentOf("parser audit") > indentOf("agent-0"), "a child is indented past its parent");
-  assert.ok(indentOf("caller sweep") > indentOf("parser audit"), "a sub-subagent is indented past its child");
+  const root = indentOf("agent-0");
+  const child = indentOf("parser audit");
+  const grandchild = indentOf("caller sweep");
+  assert.ok(child > root, `a child is drawn further in than its parent (${child} vs ${root})`);
+  assert.ok(grandchild > child, `a sub-subagent is drawn further in (${grandchild} vs ${child})`);
+  // The nesting is DRAWN, not implied by spaces: a connector says which branch
+  // a row belongs to, and that is what makes fifty rows legible.
+  assert.match(rendered, /└─ ⚡ parser audit/, "a child is drawn on a connector");
+  assert.match(rendered, /└─ ○ caller sweep/, "and so is a sub-subagent");
 });
 
 test("the fan-out is reachable: a subagent row opens like any other session", () => {
