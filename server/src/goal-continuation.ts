@@ -24,8 +24,21 @@
 
 import { goalAppMessage, type SessionGoal } from "./session-goal.ts";
 
-/** How many times one goal may re-prompt its session before it says so and stops. */
-export const DEFAULT_MAX_CONTINUATIONS = 8;
+/**
+ * How many times one goal may re-prompt its session before it says so and stops.
+ *
+ * Three, not eight. Each continuation is a whole agent turn - a real model call,
+ * its tools, its subagents - so the count is a budget of WORK, not of chat lines.
+ * Eight was set by feel and measured wrong: with goals on several sessions, the
+ * host ran 7 cores trying to finish objectives that were never going to be
+ * finished by re-asking faster.
+ */
+export const DEFAULT_MAX_CONTINUATIONS = 3;
+
+/** The count as it is stored on the goal, so a reload does not reset it. */
+export function continuationsOf(goal: (SessionGoal & { continuations?: number }) | null): number {
+  return typeof goal?.continuations === "number" ? goal.continuations : 0;
+}
 
 export interface GoalContinuationState {
   /** Times this goal has re-prompted its session since it was set. */
@@ -91,7 +104,10 @@ export function createGoalContinuation(deps: GoalContinuationDeps): GoalContinua
       // Cancelling is the user saying stop. Re-prompting a cancelled turn would
       // override the one instruction that was given deliberately.
       if (opts.cancelled) return false;
-      const used = counts.get(sessionId) ?? 0;
+      // The stored count wins over the in-memory one: it outlives this instance,
+      // so a reload cannot hand a goal a fresh budget of continuations. That was
+      // the actual defect - the bound existed and was erased every reload.
+      const used = Math.max(counts.get(sessionId) ?? 0, continuationsOf(goal as never));
       if (used >= max) {
         const state = { continuations: used, exhausted: true };
         deps.onState?.(sessionId, state);
@@ -110,6 +126,8 @@ export function createGoalContinuation(deps: GoalContinuationDeps): GoalContinua
       return true;
     },
     onGoalSet(sessionId) {
+      // A NEW objective starts at zero, which is also what clears a previous
+      // goal's spend: the count belongs to the goal it was spent on.
       counts.set(sessionId, 0);
       // A new objective is a new chance: the session may have been reopened.
       undeliverable.delete(sessionId);

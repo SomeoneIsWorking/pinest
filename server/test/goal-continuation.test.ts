@@ -48,7 +48,7 @@ describe("a goal keeps its session working", () => {
   });
 
   test("it keeps going, turn after turn, until the goal is cleared", async () => {
-    const h = harness();
+    const h = harness({ max: 5 });
     for (let i = 0; i < 4; i += 1) await h.cont.onTurnEnded("s1");
     assert.equal(h.delivered.length, 4, "four turn-ends, four continuations");
     h.cont.onGoalCleared("s1");
@@ -83,8 +83,11 @@ describe("a goal keeps its session working", () => {
     assert.equal(await h.cont.onTurnEnded("s1"), true, "so the new goal still has its continuations");
   });
 
-  test("the bound is the documented one", () => {
-    assert.equal(DEFAULT_MAX_CONTINUATIONS, 8);
+  test("the bound is three, because a continuation is a whole agent turn", () => {
+    // Eight was set by feel and measured wrong: with goals on several sessions
+    // the host ran 7 cores. Each continuation is a real model call with its
+    // tools and its subagents, so the count is a budget of WORK.
+    assert.equal(DEFAULT_MAX_CONTINUATIONS, 3);
   });
 
   test("a delivery that fails stops the loop instead of retrying it forever", async () => {
@@ -112,5 +115,51 @@ describe("a goal keeps its session working", () => {
     await cont.onTurnEnded("a");
     assert.equal(await cont.onTurnEnded("b"), true, "session b was never touched by a's bound");
     assert.deepEqual(delivered, ["a", "b"]);
+  });
+});
+
+describe("the bound survives a reload", () => {
+  test("a count held only in memory is erased by the next reload — which is the defect", async () => {
+    // Measured: with the bound in memory only, reloading the extension handed
+    // EVERY goal a fresh budget, so a session with an objective was re-prompted
+    // 8 times per reload and the host ran 7 cores trying to finish work that
+    // re-asking faster cannot finish. The stored count has to win.
+    let stored: (SessionGoal & { continuations?: number }) | null = GOAL;
+    let relayed = 0;
+    const cont = createGoalContinuation({
+      goalOf: () => stored,
+      deliver: async () => { relayed += 1; },
+      maxContinuations: 3,
+    });
+    for (let i = 0; i < 3; i += 1) {
+      await cont.onTurnEnded("s1");
+      // what the host persists after each continuation
+      stored = { ...GOAL, continuations: relayed };
+    }
+    assert.equal(relayed, 3, "the bound was reached");
+
+    // A reload: a brand new policy instance, same durable goal.
+    const afterReload = createGoalContinuation({
+      goalOf: () => stored,
+      deliver: async () => { relayed += 1; },
+      maxContinuations: 3,
+    });
+    assert.equal(await afterReload.onTurnEnded("s1"), false,
+      "a reload must not hand an exhausted goal a fresh budget of continuations");
+    assert.equal(relayed, 3, "nothing was re-sent after the reload");
+  });
+
+  test("a goal with spend left keeps the remainder after a reload", async () => {
+    let stored: (SessionGoal & { continuations?: number }) | null = { ...GOAL, continuations: 2 };
+    let relayed = 0;
+    const afterReload = createGoalContinuation({
+      goalOf: () => stored,
+      deliver: async () => { relayed += 1; },
+      maxContinuations: 3,
+    });
+    assert.equal(await afterReload.onTurnEnded("s1"), true, "one continuation was still owed");
+    stored = { ...GOAL, continuations: 3 };
+    assert.equal(await afterReload.onTurnEnded("s1"), false, "and then the bound held");
+    assert.equal(relayed, 1);
   });
 });

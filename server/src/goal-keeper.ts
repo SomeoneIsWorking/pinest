@@ -44,7 +44,12 @@ export class GoalKeeper {
       // live goal as stopped or a stopped one as live.
       const goal = this.deps.goalOf(id);
       if (!goal) return;
-      this.deps.publish(id, { goal: { ...goal, ...state } });
+      // PERSISTED as well as published, and that is the part that matters: a
+      // count held only in memory is erased by the next reload, which handed every
+      // goal a fresh budget and is why the bound did not bound anything.
+      const next = { ...goal, ...state };
+      this.deps.persist(id, next as SessionGoal);
+      this.deps.publish(id, { goal: next });
     },
   });
 
