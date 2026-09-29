@@ -44,3 +44,80 @@ test("the app pings too, and it is the app's timer that started this", () => {
   assert.match(appSource, /stillCurrent != null && !stillCurrent\(\)/);
   assert.match(appSource, /stop\(\);\n\s*return;/, "and it stops itself when the channel is gone");
 });
+
+// The source audit above cannot see behaviour, and the behaviour was wrong: a
+// client that answered the host's ping correctly was closed with
+// "no answer to keepalive" after carrying 561 frames of real work. The host
+// sends `ping`, the client answers `pong`, and only an incoming `ping` cleared
+// the flag - so doing exactly what you were told counted as being dead. Incoming
+// `pong` was not even a recognised message type.
+//
+// So this drives a real socket through real sweeps and asserts the two cases
+// that matter: a client that answers SURVIVES, and a client that goes silent
+// does not.
+import { WebSocket } from "ws";
+import { WSServer } from "../src/wsserver.ts";
+
+const OWNER = "uid-under-test";
+
+async function connected(options: { answer: boolean }): Promise<{
+  ws: WebSocket; server: WSServer; closed: Promise<{ code: number }>;
+}> {
+  const server = new WSServer({ expectedUid: OWNER });
+  server.keepAliveIntervalMs = 60;
+  server.setVerifyFn(async () => ({ uid: OWNER, expiresAt: Date.now() + 60_000 }));
+  await server.start();
+  const ws = new WebSocket(`ws://127.0.0.1:${server.port}/`);
+  const closed = new Promise<{ code: number; reason: string }>((resolve) => {
+    ws.on("close", (code, reason) => resolve({ code, reason: reason.toString() }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    ws.on("open", resolve);
+    ws.on("error", reject);
+  });
+  // The answerer listens BEFORE the first sweep can fire. Attaching it after the
+  // auth round trip misses a ping, and a client that missed one deserves to be
+  // dropped - so that would have tested the harness, not the behaviour.
+  if (options.answer) {
+    ws.on("message", (raw) => {
+      const type = (JSON.parse(raw.toString()) as { type?: string }).type;
+      if (type === "ping") ws.send(JSON.stringify({ type: "pong" }));
+    });
+  }
+  ws.send(JSON.stringify({ type: "auth", token: "t" }));
+  await new Promise<void>((r) => setTimeout(r, 80));
+  return { ws, server, closed };
+}
+
+test("a client that answers the ping with a pong is NOT dropped", async () => {
+  // The defect, end to end: 60ms sweeps over ~500ms is several rounds of the
+  // 25s production sweep, and the connection must survive every one.
+  const { ws, server, closed } = await connected({ answer: true });
+  try {
+    const raced = await Promise.race([
+      closed,
+      new Promise<null>((r) => setTimeout(() => r(null), 500)),
+    ]);
+    assert.equal(raced, null,
+      `a client answering every ping was closed: ${JSON.stringify(raced)}`);
+  } finally {
+    ws.close();
+    await server.stop();
+  }
+});
+
+test("a client that goes silent IS dropped", async () => {
+  // The other half, so the fix above is not just "never disconnect anyone".
+  const { ws, server, closed } = await connected({ answer: false });
+  try {
+    const result = await Promise.race([
+      closed,
+      new Promise<null>((r) => setTimeout(() => r(null), 2000)),
+    ]);
+    assert.ok(result, "a silent client must eventually be noticed");
+    assert.equal((result as { code: number }).code, 1001);
+  } finally {
+    ws.close();
+    await server.stop();
+  }
+});

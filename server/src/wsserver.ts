@@ -388,6 +388,13 @@ export class WSServer {
       return;
     }
 
+    // ANY frame from an authenticated client proves it is there, which is the
+    // whole question the sweep is asking. Judging it by one frame type closed a
+    // healthy connection carrying 561 frames of work: the host sent `ping`, the
+    // client answered `pong`, and only an incoming `ping` cleared the flag - so a
+    // client doing exactly what it was told was declared dead a sweep later.
+    if (ws.authed) ws.awaitingPong = false;
+
     if (message.type === "subscribe") {
       if (!ws.authed) {
         this.closeSocket(ws, 1008, "subscribe before authentication");
@@ -453,6 +460,15 @@ export class WSServer {
       } catch (error) {
         debug("[remote-code] WS command handler failed:", (error as Error).message);
       }
+      return;
+    }
+
+    // A `pong` is the answer to the `ping` this host sends, so it must be a
+    // recognised liveness answer rather than an unknown type: it used to fall
+    // through to the close below, and a client that answered correctly was
+    // disconnected for it.
+    if (message.type === "pong") {
+      if (ws.authed) ws.awaitingPong = false;
       return;
     }
 
