@@ -222,12 +222,8 @@ export class Supervisor {
   /** The `subagent` tool, bound to this supervisor's policy. */
   private readonly subagentToolSet: (preferredOwner?: string) => ToolDefinition[];
 
-  /**
-   * Who keeps a session working toward its objective. A goal set through
-   * `goal_set` used to re-prompt its session once and then nothing kept it
-   * alive, so a session with an objective stopped wherever a turn happened to
-   * end. The policy lives in goal-continuation.ts; the wiring is in goal-keeper.
-   */
+  /** Who keeps a session working toward its objective. Policy in
+   * goal-continuation.ts, wiring in goal-keeper. */
   private readonly goalKeeper: GoalKeeper;
   constructor(ownerUid: string, callbacks: SupervisorCallbacks, registry: SessionRegistry | null = null, opts: SupervisorOptions = {}) {
     this.ownerUid = ownerUid;
@@ -299,6 +295,9 @@ export class Supervisor {
       publish: (id, patch) => this.callbacks.upsertSession(id, patch),
       agentFor: (id) => this.sessions.get(id) as unknown as
         { sendCustomMessage?: (...args: any[]) => unknown } | undefined,
+      sessionsOf: () => Object.fromEntries(
+        [...this.sessions].map(([id, s]) => [id, s.status as string]),
+      ),
     });
 
     this.subagentToolSet = bound.tools;
@@ -330,21 +329,23 @@ export class Supervisor {
     return this.subagentToolSet(preferredOwner);
   }
 
-  /** The host session is pi's own, so it registers itself as a goal's target. */
+  /** pi's own session is not in the map, so it registers as a goal's target. */
   setHostGoalTarget(sessionId: string, agent: () => unknown): void {
     this.goalKeeper.setHostTarget(sessionId, agent);
   }
 
-  onHostTurnEnded(opts: { cancelled?: boolean } = {}): Promise<boolean> {
-    return this.goalKeeper.onHostTurnEnded(opts);
-  }
+  /** The host goal's three doors; grouped so composition reads as one thing. */
+  goals = {
+    turnEnded: (cancelled: boolean) => this.goalKeeper.onHostTurnEnded({ cancelled }),
+    set: () => this.goalKeeper.onHostGoalSet(),
+    cleared: () => this.goalKeeper.onHostGoalCleared(),
+  };
 
-  onHostGoalSet(): void {
-    this.goalKeeper.onHostGoalSet();
-  }
-
-  onHostGoalCleared(): void {
-    this.goalKeeper.onHostGoalCleared();
+  /** Continue sessions left idle under a goal at boot: no turn ended. */
+  async resumeUnmetGoals(): Promise<string[]> {
+    return this.goalKeeper.resumeUnmetGoals(
+      (id) => this.sessions.has(id) || this.goalKeeper.isHost(id),
+    );
   }
 
   /** The registry row id of the session making a tool call. */
@@ -864,8 +865,7 @@ export class Supervisor {
           }
         } catch { /* */ }
         debug(`[remote-code] session ${id} status: working -> idle (agent_end)`);
-        // A turn ending is not a goal being met. Re-prompt, bounded — see
-        // goal-continuation.ts for why the bound is not optional.
+        // A turn ending is not a goal being met.
         void this.goalKeeper.onTurnEnded(id, { cancelled: s.turnCancelled === true })
           .then((continued) => {
             if (continued) {

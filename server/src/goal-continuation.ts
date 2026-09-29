@@ -25,15 +25,19 @@
 import { goalAppMessage, type SessionGoal } from "./session-goal.ts";
 
 /**
- * How many times one goal may re-prompt its session before it says so and stops.
+ * A runaway guard, NOT a work budget.
  *
- * Three, not eight. Each continuation is a whole agent turn - a real model call,
- * its tools, its subagents - so the count is a budget of WORK, not of chat lines.
- * Eight was set by feel and measured wrong: with goals on several sessions, the
- * host ran 7 cores trying to finish objectives that were never going to be
- * finished by re-asking faster.
+ * It used to be a work budget - 8, then 3 - and it stopped exactly the thing it
+ * was added to enable: sessions with an objective sat idle because the goal had
+ * "spent" its three turns, and the user was right that a goal set deliberately
+ * should keep working. A continuation is as expensive as the work is worth, and
+ * that is the user's call, not this file's.
+ *
+ * So it is only high enough to catch a loop that cannot be working: the count is
+ * persisted, so a reload cannot reset it, and this bound exists for the case
+ * where every turn ends the same way forever.
  */
-export const DEFAULT_MAX_CONTINUATIONS = 3;
+export const DEFAULT_MAX_CONTINUATIONS = 2000;
 
 /** The count as it is stored on the goal, so a reload does not reset it. */
 export function continuationsOf(goal: (SessionGoal & { continuations?: number }) | null): number {

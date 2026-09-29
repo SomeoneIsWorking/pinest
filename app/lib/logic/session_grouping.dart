@@ -75,8 +75,14 @@ List<Session> subagentsOf(Iterable<Session> sessions, String parentId) => [
 /// a fan-out of four replaced the tabs you were working in. A subagent is work
 /// that session did, not work you chose to switch to, so it belongs to its
 /// parent — see [subagentsOf], which is where they live now.
+///
+/// Membership by PARENT, never by level. A level is a position in a tree, and an
+/// orphan has no parent to be placed under, so the tree builder gave it level 1
+/// and a filter on level put every subagent whose parent had been closed or
+/// despawned straight back into the tab bar. What a session IS does not depend
+/// on what still exists around it.
 List<SessionTreeRow> topLevelRows(List<SessionTreeRow> rows) =>
-    rows.where((r) => r.level == 1).toList();
+    rows.where((r) => r.session.parentSessionId == null).toList();
 
 /// Whether [sessionId] is inside [ancestorId]'s subtree, [ancestorId] included.
 ///

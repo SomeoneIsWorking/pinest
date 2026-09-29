@@ -11,6 +11,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createGoalContinuation, DEFAULT_MAX_CONTINUATIONS } from "../src/goal-continuation.ts";
+import { createGoalKeeper } from "../src/goal-keeper.ts";
 import type { SessionGoal } from "../src/session-goal.ts";
 
 const GOAL: SessionGoal = { text: "ship the thing and prove it", setAt: 1_000 };
@@ -83,11 +84,15 @@ describe("a goal keeps its session working", () => {
     assert.equal(await h.cont.onTurnEnded("s1"), true, "so the new goal still has its continuations");
   });
 
-  test("the bound is three, because a continuation is a whole agent turn", () => {
-    // Eight was set by feel and measured wrong: with goals on several sessions
-    // the host ran 7 cores. Each continuation is a real model call with its
-    // tools and its subagents, so the count is a budget of WORK.
-    assert.equal(DEFAULT_MAX_CONTINUATIONS, 3);
+  test("the bound is a runaway guard, not a budget on the work", () => {
+    // It was 8, then 3, and both stopped exactly what it was added to enable:
+    // sessions with an objective sat idle because the goal had "spent" its
+    // turns, and the user was right that a goal set deliberately keeps working.
+    // What a continuation costs is the user's call, not this file's.
+    assert.ok(
+      DEFAULT_MAX_CONTINUATIONS >= 2000,
+      "high enough that no real objective is ever cut short by a count",
+    );
   });
 
   test("a delivery that fails stops the loop instead of retrying it forever", async () => {
@@ -161,5 +166,51 @@ describe("the bound survives a reload", () => {
     stored = { ...GOAL, continuations: 3 };
     assert.equal(await afterReload.onTurnEnded("s1"), false, "and then the bound held");
     assert.equal(relayed, 1);
+  });
+});
+
+describe("a host that comes up continues the goals it inherited", () => {
+  // The missing case, and the reason five sessions sat dead after a restart:
+  // continuation fires when a TURN ENDS, so it cannot help a session that was
+  // already idle when the host started. No turn ever ended, so no work happened,
+  // and a goal that had stopped working entirely looked like a healthy idle tab.
+  test("an idle session with a goal is continued at boot; a working one is not", async () => {
+    const goals: Record<string, SessionGoal | null> = {
+      idleWithGoal: GOAL,
+      workingWithGoal: GOAL,
+      idleNoGoal: null,
+    };
+    const statuses: Record<string, string> = {
+      idleWithGoal: "idle",
+      workingWithGoal: "working",
+      idleNoGoal: "idle",
+    };
+    const told: string[] = [];
+    const keeper = createGoalKeeper({
+      goalOf: (id) => goals[id] ?? null,
+      persist: () => {},
+      publish: () => {},
+      agentFor: (id) => ({ sendCustomMessage: async () => { told.push(id); } }),
+      sessionsOf: () => statuses,
+    });
+
+    const resumed = await keeper.resumeUnmetGoals((id) => id in goals);
+    assert.deepEqual(resumed, ["idleWithGoal"], "exactly the idle session with an unmet goal");
+    assert.deepEqual(told, ["idleWithGoal"], "and it was actually told to carry on");
+  });
+
+  test("the host session is included even though it is never in the session map", async () => {
+    const told: string[] = [];
+    const keeper = createGoalKeeper({
+      goalOf: (id) => (id === "host" ? GOAL : null),
+      persist: () => {},
+      publish: () => {},
+      agentFor: (id) => ({ sendCustomMessage: async () => { told.push(id); } }),
+      sessionsOf: () => ({}), // pi's own session: not here
+    });
+    keeper.setHostTarget("host", () => ({ sendCustomMessage: async () => { told.push("host"); } }));
+    const resumed = await keeper.resumeUnmetGoals((id) => keeper.isHost(id));
+    assert.deepEqual(resumed, ["host"], "a goal on the host tab is the most common one there is");
+    assert.deepEqual(told, ["host"], "and it was told through the host agent");
   });
 });

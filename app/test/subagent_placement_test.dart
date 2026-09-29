@@ -26,6 +26,18 @@ void main() {
       expect(topLevelRows(rows).map((r) => r.session.id), ['a', 'd']);
     });
 
+    test('an ORPHANED subagent is still not a tab', () {
+      // The rule is "is it a subagent", not "where does the tree place it". An
+      // orphan — a subagent whose parent was closed or despawned — has no parent
+      // to nest under, so the tree gave it level 1, and a filter on level put it
+      // right back in the tab bar. This is what the user saw.
+      final rows = buildSessionTree([s('orphan', parent: 'gone'), s('a')]);
+      expect(topLevelRows(rows).map((r) => r.session.id), ['a'],
+          reason: 'a subagent stays out of the tabs even with no parent left');
+      expect(rows.firstWhere((r) => r.session.id == 'orphan').level, 1,
+          reason: 'the tree really does call it level 1, which is why level was the wrong test');
+    });
+
     test('a session with no subagents still has one tab', () {
       final rows = buildSessionTree([s('a')]);
       expect(topLevelRows(rows), hasLength(1));

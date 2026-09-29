@@ -25,6 +25,12 @@ export interface GoalKeeperDeps {
   publish: (sessionId: string, patch: { goal: SessionGoal & GoalContinuationState }) => void;
   /** The agent session for an id, or undefined when there is none. */
   agentFor: (sessionId: string) => { sendCustomMessage?: (...args: any[]) => unknown } | undefined;
+  /** Every session this host can see, with the status it holds. */
+  sessionsOf: () => Record<string, string>;
+}
+
+export function createGoalKeeper(deps: GoalKeeperDeps): GoalKeeper {
+  return new GoalKeeper(deps);
 }
 
 export class GoalKeeper {
@@ -81,6 +87,41 @@ export class GoalKeeper {
   onHostTurnEnded(opts: { cancelled?: boolean } = {}): Promise<boolean> {
     if (!this.hostSessionId) return Promise.resolve(false);
     return this.continuation.onTurnEnded(this.hostSessionId, opts);
+  }
+
+  /**
+   * Continue every live session that has an unmet goal and is not already
+   * working.
+   *
+   * The missing case, and the reason sessions sat dead after a host restart:
+   * continuation fires when a TURN ENDS, so it cannot help a session that was
+   * already idle when the host came up. Five sessions with live goals, no
+   * turn ever ending, no work happening — a goal that had stopped working
+   * entirely, which is the exact complaint that started all of this.
+   */
+  async resumeUnmetGoals(isLive: (sessionId: string) => boolean): Promise<string[]> {
+    const resumed: string[] = [];
+    // The host is added explicitly: pi's own session is never in `sessionsOf`,
+    // so iterating that map alone skipped the single most common goal there is
+    // and the test caught exactly that.
+    const candidates: Record<string, string | undefined> = { ...this.deps.sessionsOf() };
+    if (this.hostSessionId) candidates[this.hostSessionId] = undefined;
+    for (const [id, session] of Object.entries(candidates)) {
+      if (!isLive(id) || !this.deps.goalOf(id)) continue;
+      if (session === "working") continue;
+      try {
+        if (await this.continuation.onTurnEnded(id)) resumed.push(id);
+      } catch {
+        // Reported by the continuation's own caller path; a session that cannot
+        // be told must not stop the others from being told.
+      }
+    }
+    return resumed;
+  }
+
+  /** Whether this id is the host session, which is never in the sessions map. */
+  isHost(sessionId: string): boolean {
+    return this.hostSessionId === sessionId;
   }
 
   onGoalSet(sessionId: string): void {
