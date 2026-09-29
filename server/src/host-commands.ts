@@ -4,6 +4,7 @@ import { loadConfig, saveConfig } from "./config.ts";
 import { PROVIDERS } from "./tunnel.ts";
 import { createAttachView } from "./attach-view.ts";
 import { createSessionsView, orderSessionsByParent, type SessionSummary } from "./sessions-view.ts";
+import { planHostRestart, spawnRelauncher } from "./host-restart.ts";
 import { resolvePathInput, deriveSessionName, statSyncSafe } from "./logic.ts";
 import { DEFAULT_MODEL } from "./product-defaults.ts";
 import { reauthenticateRemoteOwner } from "./owner-runtime.ts";
@@ -460,6 +461,56 @@ export function registerHostCommands(pi: ExtensionAPI, deps: () => HostCommandDe
         debug(`[remote-code] ${msg}`);
         say(ctx, msg);
       }
+    },
+  });
+
+  // ── /pinest-restart — replace THIS process, so a host that cannot load ────
+  // itself can still be brought back without the user leaving their desk.
+  pi.registerCommand("pinest-restart", {
+    description: "PiNest: restart the pi host process in place, keeping the same terminal and session",
+    handler: async (args: string, ctx: ExtensionCommandContext) => {
+      const { sessions, say, captureUi, renderFooter } = deps();
+      captureUi(ctx);
+      const force = /(^|\s)--force(\s|$)/.test(args ?? "");
+
+      // pi runs an extension command the moment it is sent, even mid-stream, so
+      // the moment is checked here rather than reported optimistically.
+      if (typeof (ctx as { isIdle?: () => boolean }).isIdle === "function" && !ctx.isIdle()) {
+        say(ctx, "[pinest] this turn is still running; a restart now would cut it off. Try again when it settles, or pass --force.");
+        return;
+      }
+
+      const working = [...sessions.values()]
+        .filter((s: any) => s?.status === "working")
+        .map((s: any) => String(s?.id ?? "unknown"));
+      const plan = planHostRestart({ workingSessionIds: working, force });
+      if (plan.refusal) {
+        say(ctx, `[pinest] restart refused: ${plan.refusal}`);
+        return;
+      }
+
+      const relauncherPid = spawnRelauncher(plan.command);
+      if (relauncherPid === null) {
+        // The whole point of this command is the user not having to do it by
+        // hand, so a failure here must leave the host RUNNING.
+        say(ctx, "[pinest] restart could not start a relauncher; staying up. Restart pi by hand if this persists.");
+        debug("[remote-code] host restart: relauncher did not start");
+        return;
+      }
+
+      say(ctx, `[pinest] restarting pi (relauncher pid ${relauncherPid})…`);
+      debug(`[remote-code] host restart: relauncher ${relauncherPid} waiting on pid ${process.pid}`);
+      try {
+        // The tunnel and the listener go with the process; announce the outage
+        // first so a client shows "reconnecting" rather than "your host is gone".
+        await deps().publishCurrentPresence(false).catch(() => {});
+      } catch { /* presence is best effort; the restart is the point */ }
+      renderFooter();
+      setTimeout(() => {
+        const shutdown = (ctx as { shutdown?: () => void }).shutdown;
+        if (typeof shutdown === "function") shutdown.call(ctx);
+        else process.exit(0);
+      }, 250);
     },
   });
 
