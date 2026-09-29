@@ -25,7 +25,7 @@ cited), `partial`, `blocked`, `missing`. One current focus at the bottom.
 | S8 | Remote clients create, list, resume, rename, and delete sessions across project directories | partial | S2, S6 | G1, G2 |
 | S9 | Remote clients stream conversations, steer or queue input, paste images, inspect tools, and stop runs | partial | S1, S6 | G1 |
 | S10 | Clients show model/context usage and expose automatic and manual compaction controls | partial | S5, S6 | G1, G4 |
-| S11 | The authenticated web client connects to the owner's advertised host over the internet | partial | S5b, S7 | G1, G6 |
+| S11 | The authenticated web client connects to the owner's advertised host over the internet | verified | S5b, S7 | G1, G6 |
 | S12 | An installable, attested Android APK is published for the mobile client | verified | S6, S7 | G1, G6 |
 | S13 | The mobile client is distributed through Google Play | missing | S6, S7 | G1 |
 | S14 | History transport is bounded and images load on demand | verified | S6, S9 | G1, G6 |
@@ -34,10 +34,10 @@ cited), `partial`, `blocked`, `missing`. One current focus at the bottom.
 | S17 | A compaction with nothing to compact is a no-op, and is not re-attempted | verified | S5, S10 | G4 |
 | S18 | Concurrent notices are stacked, deduplicated, and bounded | verified | S6 | G1 |
 | S19 | A session states it has no context budget, so agents do not invent one and stop | partial | S1, S5 | G1, G4 |
-| S20 | The objective belongs to the session it was set for, and shows only on that tab | verified | S1, S8 | G1, G2 |
+| S20 | The objective belongs to the session it was set for, and shows on its tab and in the terminal list | verified | S1, S8 | G1, G2 |
 | S21 | Instructions the harness injects are never shown as the user's own words | verified | S6, S9 | G1 |
 | S22 | The host terminal lists its sessions, opens any of them, and prompts it from there | partial | S1, S8, S9 | G1, G2 |
-| S23 | An agent can fan work out to subagents, and both clients show and drive them | verified | S1, S2, S8 | G1, G2 |
+| S23 | An agent can fan work out to subagents, uncapped, and both clients show and drive them | verified | S1, S2, S8 | G1, G2 |
 Atomic work and findings live in `docs/issues/`.
 
 ### S23 — Subagent fan-out
@@ -1054,6 +1054,40 @@ PiNest natively owns background process execution, auto-backgrounding, and UI ma
 Evidence: Node suite (`npm test`) passes with 296 tests and 0 failures; `npm run typecheck` and `tools/check_structure.py` pass clean; Flutter test suite passes with 74/74 tests; Flutter analyze clean (0 issues).
 
 ## Current focus
+
+A goal now runs until it is achieved, and nothing in the product stops work
+early. Every limit that used to do that is gone: goal continuations had a cap
+(8, then 3, then 2000) and an `undeliverable` latch that permanently killed a
+goal on one failed prompt - which killed two real goals at boot, because a
+session still restoring is momentarily undeliverable. Subagent fan-out had three
+caps (3 levels, 4 per parent, 12 per machine). All of them are removed rather
+than retuned, because a limit that halts real work is the owner's decision and
+not the implementation's. Counts are still reported wherever subagents are shown,
+so a runaway is visible and stoppable rather than arriving as lost work.
+
+Three defects found by measuring the running host rather than reasoning about it,
+each of which had been misdiagnosed at least once:
+
+  * Keepalive closed HEALTHY clients. The host sent `ping` and set
+    `awaitingPong`, and only an incoming `ping` cleared it, so a client that
+    answered with `pong` was declared dead one sweep later; incoming `pong` was
+    not a recognised message type at all. Any frame from an authenticated client
+    now proves liveness. Measured end to end: idle 140s, 5 pings answered, 1578
+    frames, still open (`scratch/keepalive.mts`).
+  * Every subagent spawn re-entered the extension factory, and that declined
+    entry rewrote the runtime record from `base()` - no port, no tunnel, load
+    "pending" - so a healthy host advertised itself as unreachable. Thirteen
+    times in two minutes. A declined entry now merges and only counts.
+  * A RESUMED subagent's live snapshot omitted `parentSessionId`, so it rendered
+    as a root session and appeared in the app's tab bar. Identity is now read
+    from the durable row by one owner for both the spawn and resume paths.
+
+Earlier in the same session, two diagnostics reported as evidence were invalid:
+one never sent the `auth` frame the host authenticates on, and one answered
+nothing when the host pinged. Both failures were correct behaviour by the host,
+and both were read as host bugs. A keepalive test that only greps the source
+cannot catch either class, so the two behavioural tests added here drive a real
+socket, and were confirmed to fail when the fix is reverted.
 
 Remote control is working from a phone on another network, which was the goal of
 I-070 and closes the gap S15 was blocked on: identity is Google, the tunnel
