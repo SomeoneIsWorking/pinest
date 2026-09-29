@@ -87,6 +87,7 @@ import { mergeRegistryRows } from "./state-message.ts";
 import { publishPresence } from "./presence.ts";
 import { StatePublisher } from "./state-publisher.ts";
 import { recordFactoryEntry, recordLoadOutcome } from "./runtime-record.ts";
+import { withinBootstrapDeadline } from "./bootstrap-deadline.ts";
 import { createEndpointAnnouncer } from "./host-endpoint.ts";
 const REGISTRY_PATH = process.env.RC_REGISTRY_PATH
   || join(homedir(), ".pi", "agent", "remote-code", "sessions.json");
@@ -554,16 +555,15 @@ async function bootstrap(): Promise<void> {
         renderFooter();
       });
   };
-  await sessions.restorePersisted();
-  // Do not admit commands while durable sessions are still being restored:
-  // an early session_resume could otherwise open the same pi transcript twice.
-  await _ws.start();
+  // Restore first: an early session_resume could open one transcript twice.
+  await withinBootstrapDeadline("sessions.restorePersisted()", sessions.restorePersisted());
+  await withinBootstrapDeadline("ws.start()", _ws.start());
   // The direct transport bridges to the listening port, so it can only start
   // once that port is real.
   void startDirectTransport();
 
-  // Presence: publish IMMEDIATELY (url may be null until the tunnel lands)
-  // and republish when it does. The tunnel runs in the BACKGROUND — a slow
+  // Presence: publish IMMEDIATELY (url may be null until the tunnel lands) and
+  // republish when it does. The tunnel runs in the BACKGROUND — a slow
   // or dead network must never block the registry/presence work below it.
   // Heartbeat: keep the URL doc fresh and automatically recover/reconnect
   // the tunnel if it was dropped, killed, or failed to start initially.
