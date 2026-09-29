@@ -56,6 +56,10 @@ export interface SessionSummary {
   subagent?: { status: "running" | "completed" | "failed" | "stopped" };
   /** How deep in the subagent tree this session sits (1 = top level). */
   level?: number;
+  /** The objective this session is working toward, when it has one. Shown here
+   * because a goal set on one session has to be visible from the list, not only
+   * after opening that session and looking for its banner. */
+  goal?: string | null;
 }
 
 export interface SessionsViewOptions {
@@ -430,9 +434,13 @@ export function toItem(s: SessionSummary): SelectItem {
   const child = s.parentSessionId
     ? `subagent ${subagentRunLabel(s)} of ${s.parentName ?? s.parentSessionId}`
     : "";
+  // The goal goes on the LABEL, not the description: a description is the tail of
+  // a one-line row and gets cut off on a narrow terminal, which is exactly how a
+  // goal goes missing while the list still looks complete.
+  const goal = s.goal ? `  \u2192 ${s.goal}` : "";
   return {
     value: s.id,
-    label: `${glyph} ${indent}${s.name}${host}`,
+    label: `${glyph} ${indent}${s.name}${host}${goal}`,
     description: [where, model, thinking, s.status, queued, child]
       .filter((part) => part.length > 0)
       .join("  ·  "),
