@@ -25,19 +25,19 @@
 import { goalAppMessage, type SessionGoal } from "./session-goal.ts";
 
 /**
- * A runaway guard, NOT a work budget.
+ * There is deliberately no cap.
  *
- * It used to be a work budget - 8, then 3 - and it stopped exactly the thing it
- * was added to enable: sessions with an objective sat idle because the goal had
- * "spent" its three turns, and the user was right that a goal set deliberately
- * should keep working. A continuation is as expensive as the work is worth, and
- * that is the user's call, not this file's.
+ * There was one three times: 8, then 3, then 2000 as a "runaway guard". Every
+ * one of them was a way for a goal to stop while still unmet, which is the one
+ * thing a goal must never do - and the user, who sets these goals deliberately
+ * and knows what they cost, asked for exactly that: no cap, and no agent stops
+ * until its goal is achieved.
  *
- * So it is only high enough to catch a loop that cannot be working: the count is
- * persisted, so a reload cannot reset it, and this bound exists for the case
- * where every turn ends the same way forever.
+ * So the count below is not a budget. It is a report of how much work the goal
+ * has caused, shown in the client, and nothing more. A goal ends when the work
+ * ends: the user clears it, the turn is cancelled, or the objective is met.
  */
-export const DEFAULT_MAX_CONTINUATIONS = 2000;
+export const GOAL_CONTINUATIONS_ARE_UNBOUNDED = true as const;
 
 /** The count as it is stored on the goal, so a reload does not reset it. */
 export function continuationsOf(goal: (SessionGoal & { continuations?: number }) | null): number {
@@ -45,10 +45,13 @@ export function continuationsOf(goal: (SessionGoal & { continuations?: number })
 }
 
 export interface GoalContinuationState {
-  /** Times this goal has re-prompted its session since it was set. */
+  /** Times this goal has re-prompted its session since it was set. A report of
+   * work caused, never a budget: nothing consumes it and nothing stops on it. */
   continuations: number;
-  /** Set once the bound is reached, so the UI can say why it stopped. */
-  exhausted: boolean;
+  /** Why the goal could not be reached just now, when it could not. This is an
+   * observation, not a verdict - the next turn end tries again, and a goal with
+   * a stuck reason here is still a live goal. */
+  stuck: string | null;
 }
 
 export interface GoalContinuationDeps {
@@ -63,7 +66,6 @@ export interface GoalContinuationDeps {
   resetFor?: (sessionId: string) => void;
   /** Report the count, so a session that is being kept working says so. */
   onState?: (sessionId: string, state: GoalContinuationState) => void;
-  maxContinuations?: number;
   /** Injectable for tests: when continuations are spent. */
   now?: () => number;
 }
@@ -80,19 +82,25 @@ export interface GoalContinuation {
 }
 
 export function createGoalContinuation(deps: GoalContinuationDeps): GoalContinuation {
-  const max = deps.maxContinuations ?? DEFAULT_MAX_CONTINUATIONS;
   const counts = new Map<string, number>();
+  /** Why a goal could not be reached, for the client to show. Never terminal. */
+  const stuckReasons = new Map<string, string>();
   /**
-   * Sessions whose goal could not be delivered to. A session that cannot be
-   * told is not a session to keep re-prompting: without this the count is the
-   * only brake, so a broken delivery was retried on every turn until the bound
-   * ran out — eight failures per goal, forever, one per turn. The comment above
-   * promised otherwise; this is what makes it true.
+   * Nothing is remembered about a failed delivery.
+   *
+   * There used to be an `undeliverable` set: a session whose prompt could not be
+   * delivered was never retried, ever, until a new goal was set. It was there to
+   * stop a broken delivery burning a whole budget, and it did - by killing the
+   * goal outright. It killed two real goals here at boot, because a session
+   * still restoring is momentarily undeliverable, and "momentarily" was recorded
+   * as "forever".
+   *
+   * So a failed delivery now counts as nothing and is retried on the next turn
+   * end. Nothing about a goal can make it stop.
    */
-  const undeliverable = new Set<string>();
 
   const publish = (sessionId: string): GoalContinuationState => {
-    const state = { continuations: counts.get(sessionId) ?? 0, exhausted: false };
+    const state = { continuations: counts.get(sessionId) ?? 0, stuck: null };
     deps.onState?.(sessionId, state);
     return state;
   };
@@ -101,32 +109,31 @@ export function createGoalContinuation(deps: GoalContinuationDeps): GoalContinua
     async onTurnEnded(sessionId, opts = {}) {
       const goal = deps.goalOf(sessionId);
       if (!goal) return false;
-      if (undeliverable.has(sessionId)) {
-        deps.onState?.(sessionId, { continuations: counts.get(sessionId) ?? 0, exhausted: true });
-        return false;
-      }
       // Cancelling is the user saying stop. Re-prompting a cancelled turn would
-      // override the one instruction that was given deliberately.
+      // override the one instruction that was given deliberately. This is the
+      // only thing that ends a turn without a continuation, and it is the user's
+      // own word doing it.
       if (opts.cancelled) return false;
-      // The stored count wins over the in-memory one: it outlives this instance,
-      // so a reload cannot hand a goal a fresh budget of continuations. That was
-      // the actual defect - the bound existed and was erased every reload.
+      // The stored count wins over the in-memory one so a reload cannot lose the
+      // record of work a goal has already caused. It no longer decides anything:
+      // there is no bound for it to decide.
+      // `exhausted` was the old latch's verdict and is deliberately not read:
+      // it is in the stored goal on every session that hit it, and honouring it
+      // would keep exactly the goals this change exists to rescue dead.
       const used = Math.max(counts.get(sessionId) ?? 0, continuationsOf(goal as never));
-      if (used >= max) {
-        const state = { continuations: used, exhausted: true };
-        deps.onState?.(sessionId, state);
-        return false;
-      }
-      const next = used + 1;
-      counts.set(sessionId, next);
       try {
         await deps.deliver(sessionId, goalAppMessage(goal));
       } catch (e) {
-        undeliverable.add(sessionId);
-        deps.onState?.(sessionId, { continuations: next, exhausted: true });
+        // The goal stays live and the count does not move: this continuation did
+        // not happen, so it is not reported as one. The next turn end retries.
+        stuckReasons.set(sessionId, (e as Error).message);
+        deps.onState?.(sessionId, { continuations: used, stuck: (e as Error).message });
         throw e;
       }
-      deps.onState?.(sessionId, { continuations: next, exhausted: next >= max });
+      const next = used + 1;
+      counts.set(sessionId, next);
+      stuckReasons.delete(sessionId);
+      deps.onState?.(sessionId, { continuations: next, stuck: null });
       return true;
     },
     onGoalSet(sessionId) {
@@ -134,17 +141,16 @@ export function createGoalContinuation(deps: GoalContinuationDeps): GoalContinua
       // goal's spend: the count belongs to the goal it was spent on.
       counts.set(sessionId, 0);
       // A new objective is a new chance: the session may have been reopened.
-      undeliverable.delete(sessionId);
       publish(sessionId);
     },
     onGoalCleared(sessionId) {
       counts.delete(sessionId);
-      undeliverable.delete(sessionId);
-      deps.onState?.(sessionId, { continuations: 0, exhausted: false });
+      stuckReasons.delete(sessionId);
+      deps.onState?.(sessionId, { continuations: 0, stuck: null });
     },
     stateFor(sessionId) {
       const continuations = counts.get(sessionId) ?? 0;
-      return { continuations, exhausted: continuations >= max };
+      return { continuations, stuck: stuckReasons.get(sessionId) ?? null };
     },
   };
 }
