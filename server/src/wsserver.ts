@@ -14,6 +14,7 @@ import { createAccessKey, createHttpApi } from "./http-api.ts";
 import debug from "./log.ts";
 import { startTunnel as startProviderTunnel, type SpawnedAttempt, type StartTunnelResult } from "./tunnel.ts";
 import { commandFromFrame } from "./command-validation.ts";
+import { LocalAgentAccess } from "./local-agents.ts";
 import { isRecord } from "./protocol.ts";
 import type { ServerMessage, ClientCommand, CommandSink } from "./protocol.ts";
 
@@ -27,6 +28,9 @@ type VerifyFn = (token: string) => Promise<VerifiedToken | null>;
 
 interface AuthedSocket extends WebSocket {
   authed: boolean;
+  /** Arrived on the local-agent Unix socket, the only place `auth_local` is
+   * accepted. Tunnel, direct transport and HTTP all reach the TCP port. */
+  local?: boolean;
   /**
    * Sessions this socket asked to follow, or null for "no preference".
    *
@@ -139,6 +143,10 @@ export class WSServer {
   private expectedUid: string;
   private wss: WebSocketServer | null = null;
   private httpServer: Server | null = null;
+  /** Local-agent listener on a Unix socket; null when not serving agents. */
+  private agentServer: Server | null = null;
+  private agentWss: WebSocketServer | null = null;
+  private localAccess: LocalAgentAccess | null = null;
   /** Processes from tunnel attempts that have not resolved yet. */
   private tunnelAttempts: SpawnedAttempt[] = [];
   tunnel: StartTunnelResult | null = null;
@@ -293,6 +301,56 @@ export class WSServer {
     });
   }
 
+  /**
+   * Serve local agents from the user's state directory. Auxiliary to remote
+   * control: a failure is logged and remote control still comes up.
+   */
+  async serveLocalAgents(): Promise<void> {
+    try {
+      await this.startLocalAgents(LocalAgentAccess.open());
+    } catch (error) {
+      debug(`[remote-code] local agents unavailable: ${(error as Error).message}`);
+    }
+  }
+
+  /**
+   * Serve local agents on ``access``'s Unix socket.
+   *
+   * Returns false (and serves nothing) when another live host already owns the
+   * socket. The socket is 0600 and never forwarded, so a token presented on it
+   * comes from this machine's user.
+   */
+  async startLocalAgents(access: LocalAgentAccess): Promise<boolean> {
+    if (!(await access.claimSocketPath())) {
+      debug("[remote-code] local agents: another host serves", access.socketPath);
+      return false;
+    }
+    const server = createServer((_request, response) => {
+      response.writeHead(426).end();
+    });
+    const wss = new WebSocketServer({ server, maxPayload: MAX_PAYLOAD_BYTES });
+    wss.on("connection", (ws) => {
+      (ws as AuthedSocket).local = true;
+      this.onConnection(ws as AuthedSocket);
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(access.socketPath, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+    access.restrictSocket();
+    server.on("error", (error: Error) => {
+      debug("[remote-code] local agent server error:", error.message);
+    });
+    this.agentServer = server;
+    this.agentWss = wss;
+    this.localAccess = access;
+    debug("[remote-code] local agents on", access.socketPath);
+    return true;
+  }
+
   private onConnection(ws: AuthedSocket): void {
     ws.authed = false;
     ws.authAttempted = false;
@@ -367,6 +425,20 @@ export class WSServer {
     }
     if (!isRecord(message) || typeof message.type !== "string") {
       this.closeSocket(ws, 1008, "invalid message envelope");
+      return;
+    }
+
+    if (message.type === "auth_local") {
+      if (ws.authAttempted) {
+        this.closeSocket(ws, 1008, "authentication already attempted");
+        return;
+      }
+      ws.authAttempted = true;
+      if (!ws.local || !this.localAccess?.accepts(message.token)) {
+        this.rejectAuthentication(ws);
+        return;
+      }
+      this.admit(ws, this.expectedUid, null);
       return;
     }
 
@@ -517,14 +589,20 @@ export class WSServer {
       return;
     }
 
+    this.admit(ws, verified.uid, verified.expiresAt);
+  }
+
+  /** Make ``ws`` an authenticated client and send it the first snapshot.
+   * ``expiresAt`` null means the credential does not expire (local agents). */
+  private admit(ws: AuthedSocket, uid: string, expiresAt: number | null): void {
     clearTimeout(ws.authDeadline);
     ws.authDeadline = undefined;
     this.unauthenticatedClients.delete(ws);
     ws.authed = true;
-    ws.authenticatedUid = verified.uid;
+    ws.authenticatedUid = uid;
     this.clients.add(ws);
-    this.scheduleTokenExpiry(ws, verified.expiresAt);
-    debug("[remote-code] WS client authed");
+    if (expiresAt !== null) this.scheduleTokenExpiry(ws, expiresAt);
+    debug(`[remote-code] WS client authed${ws.local ? " (local agent)" : ""}`);
     this.send(ws, { type: "authed" });
     try {
       const state = this.stateProvider?.();
@@ -810,6 +888,16 @@ export class WSServer {
 
   stop(): void {
     this.httpServer?.close();
+    this.agentServer?.close();
+    this.agentServer = null;
+    for (const ws of [...(this.agentWss?.clients ?? [])] as AuthedSocket[]) {
+      this.forgetSocket(ws);
+      try { ws.terminate(); } catch { /* already closed */ }
+    }
+    try { this.agentWss?.close(); } catch { /* */ }
+    this.agentWss = null;
+    this.localAccess?.releaseSocket();
+    this.localAccess = null;
     this.stopped = true;
     for (const attempt of this.tunnelAttempts) {
       attempt.kill();

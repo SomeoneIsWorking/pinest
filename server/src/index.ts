@@ -558,6 +558,7 @@ async function bootstrap(): Promise<void> {
   // Restore first: an early session_resume could open one transcript twice.
   await withinBootstrapDeadline("sessions.restorePersisted()", sessions.restorePersisted());
   await withinBootstrapDeadline("ws.start()", _ws.start());
+  await withinBootstrapDeadline("ws.serveLocalAgents()", _ws.serveLocalAgents());
   // The direct transport bridges to the listening port, so it can only start
   // once that port is real.
   void startDirectTransport();

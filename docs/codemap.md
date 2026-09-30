@@ -12,6 +12,7 @@ Goals/status/work live in the other `docs/` registries, not here.
 | WS protocol contract (message/command unions) — keep in sync with the app fork | `server` | `server/src/protocol.ts` |
 | Untrusted client-command parsing, limits, target authorization, exhaustive dispatch, lifecycle-ID reservations | `server` | `server/src/command-validation.ts` |
 | Authenticated WS admission, token-expiry/resource policy, outbound backpressure, per-connect snapshot | `server` | `server/src/wsserver.ts` |
+| Local-agent credential (0600 token) and Unix-socket ownership | `server` | `server/src/local-agents.ts`; served by `WSServer.startLocalAgents` |
 | Tunnel executable resolution, provider lifecycle, provider-specific public-endpoint validation | `server` | `server/src/tunnel.ts` |
 | Firebase backends (HOSTED zero-config + ADMIN self-host), owner identity verification, discovery-doc read/merge with the single value encoding | `server` | `server/src/auth.ts` |
 | Private atomic hosted refresh-credential storage | `server` | `server/src/auth-cache.ts` |
