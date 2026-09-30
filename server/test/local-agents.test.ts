@@ -156,3 +156,37 @@ test("a second host leaves a live socket alone and reclaims a stale one", async 
   writeFileSync(stale.socketPath, "");
   assert.equal(await second.startLocalAgents(stale), true);
 });
+
+test("the agent client connects, sees state, and its commands reach the dispatcher", async (t) => {
+  const { LocalAgentClient } = await import("../src/local-agent-client.ts");
+  const directory = stateDir();
+  const server = await startServer();
+  const received: ClientCommand[] = [];
+  server.on("command", (command) => { received.push(command); });
+  server.setStateProvider(() => ({
+    type: "state", online: true, hostname: "test",
+    sessions: [{ id: "agent:one", status: "working", pendingMessages: [] }],
+    registry: [],
+  }));
+  await server.startLocalAgents(LocalAgentAccess.open(directory));
+  const client = await LocalAgentClient.connect(directory);
+  t.after(() => {
+    client.close();
+    server.stop();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  assert.equal(client.session("agent:one")?.status, "working");
+  client.send({ type: "user_message", sessionId: "agent:one", text: "go", deliverAs: "steer" });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(received.map((command) => command.type), ["user_message"]);
+});
+
+test("the agent client refuses a host it has no token for", async () => {
+  const { LocalAgentClient } = await import("../src/local-agent-client.ts");
+  const directory = stateDir();
+  try {
+    await assert.rejects(LocalAgentClient.connect(directory), /no local-agent token/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

@@ -38,12 +38,12 @@ cited), `partial`, `blocked`, `missing`. One current focus at the bottom.
 | S21 | Instructions the harness injects are never shown as the user's own words | verified | S6, S9 | G1 |
 | S22 | The host terminal lists its sessions, opens any of them, and prompts it from there | partial | S1, S8, S9 | G1, G2 |
 | S23 | An agent can fan work out to subagents, uncapped, and both clients show and drive them | verified | S1, S2, S8 | G1, G2 |
-| S24 | Local agents of this machine's user drive the host's sessions over a private Unix socket, so many agents share one pi process | partial | S1, S7 | G1, G6 |
+| S24 | Local agents of this machine's user drive the host's sessions over a private Unix socket, so many agents share one pi process | verified | S1, S7 | G1, G6 |
 Atomic work and findings live in `docs/issues/`.
 
 ### S24 — Local agents
 
-Partial. `server/src/local-agents.ts` keeps a 256-bit token in
+Verified. `server/src/local-agents.ts` keeps a 256-bit token in
 `<state-dir>/local-agent-token` (0600) and the host serves
 `<state-dir>/agents.sock` (0600, Unix socket), where `auth_local` with that
 token admits a client to the ordinary command path. The socket is the
@@ -53,7 +53,10 @@ would not keep tunnel traffic out. Evidence: `server/test/local-agents.test.ts`
 (file and socket modes, spawn command reaches the dispatcher, wrong token
 refused, the right token refused on the TCP port -- shown failing when the
 `ws.local` check is removed -- and live/stale socket ownership between hosts).
-Gap: not yet exercised by a real client against a running host.
+`server/src/agent-cli.ts` drives it: live smoke on a headless host (systemd user
+unit `pinest-host`, 103 restored idle sessions, 389 MB) spawned `agent:smoke`
+on `opencode/space-bunny-free`, `wait` returned its reply `ok`, `status` showed
+it idle, `stop` closed it.
 
 ### S23 — Subagent fan-out
 
