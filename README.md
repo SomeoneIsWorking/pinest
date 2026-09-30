@@ -84,6 +84,12 @@ protocol does not add application-level end-to-end encryption across the tunnel
 provider. See the complete [security model](docs/security.md) and
 [vulnerability-reporting policy](SECURITY.md).
 
+Local agents (programs run by the same user on the host machine) connect to
+`~/.pi/agent/remote-code/agents.sock` and authenticate with
+`{"type":"auth_local","token":...}` using the token in
+`~/.pi/agent/remote-code/local-agent-token`. Both files are 0600, and the socket
+is never forwarded by the tunnel or the direct transport.
+
 ## Development
 
 Server changes must pass:
