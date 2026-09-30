@@ -90,6 +90,27 @@ Local agents (programs run by the same user on the host machine) connect to
 `~/.pi/agent/remote-code/local-agent-token`. Both files are 0600, and the socket
 is never forwarded by the tunnel or the direct transport.
 
+`server/src/agent-cli.ts` (link it onto PATH as `pinest-agent`) runs many agents as
+sessions of one host process, named `agent:<NAME>`:
+
+```sh
+pinest-agent spawn NAME --cwd DIR --model opencode/space-bunny-free --brief task.md
+pinest-agent status [NAME]      # all agents, or one with its last tools and reply
+pinest-agent send NAME "text"   # steers a working agent, prompts an idle one; --follow-up queues
+pinest-agent tail NAME -n 20    # recent transcript
+pinest-agent wait NAME --timeout 1800   # 0 when idle, 2 on timeout
+pinest-agent stop NAME          # cancel and close the session
+```
+
+A headless host for agents runs as a user service; its stdin is a FIFO held
+open so RPC mode never sees end-of-file:
+
+```sh
+systemd-run --user --unit=pinest-host --property=Restart=on-failure \
+  --working-directory="$HOME" -E PATH="$PATH" /bin/sh -c \
+  'f="$XDG_RUNTIME_DIR/pinest-host.stdin"; rm -f "$f"; mkfifo -m 600 "$f"; exec pi --mode rpc 0<>"$f"'
+```
+
 ## Development
 
 Server changes must pass:
