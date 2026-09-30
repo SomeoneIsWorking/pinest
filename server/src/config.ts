@@ -16,6 +16,12 @@ function realUserConfigPath(): string {
 
 const CONFIG_PATH = process.env.RC_CONFIG_PATH || realUserConfigPath();
 
+/** The host's private state directory: the config's own, so a test that
+ * redirects the config also redirects everything stored beside it. */
+export function stateDirectory(): string {
+  return dirname(CONFIG_PATH);
+}
+
 export interface Config {
   tunnelProvider: string; // "cloudflared" | "ngrok" | "tailscale" | "off"
   /** Auto-compact sessions at this many context tokens (0/undefined = off). */
