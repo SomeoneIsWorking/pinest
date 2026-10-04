@@ -103,7 +103,6 @@ export function ownerFromContext(ctx: unknown, preferred?: string): string {
 }
 
 /** The identity a background task is owned by.
- *
  * Deliberately a required, non-optional string: the leak this type prevents was
  * a task created with `sessionId: undefined`, which every routing decision then
  * read as "the host's". Callers cannot forget it — they must obtain it from the
@@ -113,6 +112,21 @@ export function requireSessionId(sessionId: string | undefined, what: string): s
     throw new Error(`${what} has no owning session id; refusing to create an unowned task`);
   }
   return sessionId;
+}
+
+/**
+ * The environment a session's command runs with.
+ *
+ * `PINEST_SESSION_ID` is how a command knows who ran it. Without it, anything
+ * that asks the host to do something on this session's behalf — `pinest-agent
+ * spawn`, above all — has no way to say so, and the work it starts lands in the
+ * host as a session of its own with no parent: an operator's fan-out showing up
+ * in the app's tab bar as strangers. The value is the same id the task is owned
+ * by, taken from one place, so a command cannot be told a different one than
+ * the task it runs in.
+ */
+export function toolEnvFor(sessionId: string): NodeJS.ProcessEnv {
+  return { ...process.env, PINEST_SESSION_ID: sessionId };
 }
 
 export class BackgroundProcessManager {
@@ -306,7 +320,7 @@ export class BackgroundProcessManager {
       {
         cwd,
         detached: process.platform !== "win32",
-        env: process.env,
+        env: toolEnvFor(sessionId),
         stdio: [commandFromStdin ? "pipe" : "ignore", "pipe", "pipe"],
         windowsHide: true,
       }
@@ -461,7 +475,7 @@ export class BackgroundProcessManager {
       {
         cwd,
         detached: process.platform !== "win32",
-        env: process.env,
+        env: toolEnvFor(sessionId),
         stdio: [commandFromStdin ? "pipe" : "ignore", "pipe", "pipe"],
         windowsHide: true,
       }
