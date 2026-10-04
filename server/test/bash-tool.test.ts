@@ -9,6 +9,7 @@ import {
   escapeXml,
   stripAnsi,
   toolEnvFor,
+  createDefaultBackgroundManager,
 } from "../src/bash-tool.ts";
 
 test("stripAnsi strips terminal escape sequences", () => {
@@ -260,4 +261,33 @@ test("a session's commands are told which session ran them", async () => {
   const result = await manager.executeCommand("echo \"$PINEST_SESSION_ID\"", { sessionId: "agent-session" });
   assert.match(result.outputText, /agent-session/);
   manager.dispose();
+});
+
+test("a manager that survived a reload runs the CURRENT build's code", async () => {
+  // The manager is stashed on globalThis so a reload cannot orphan its
+  // in-flight tasks, which means the object outlives the module that defined
+  // its methods. Arming it must therefore also hand it the current methods —
+  // otherwise a change inside one (what environment a command is given) waits
+  // for the next process start, and a long-lived host runs the old code.
+  const deps = {
+    getPi: () => ({ sessionManager: { getSessionId: () => "host-pi-file-id" } }),
+    getSessionId: () => "host-app",
+    broadcast: () => {},
+    autoBgTimeoutMs: 5000,
+  };
+  const first = createDefaultBackgroundManager(deps);
+  // Stand in for the previous build: same object, the methods it defined.
+  Object.setPrototypeOf(first, {
+    ...Object.getPrototypeOf(first),
+    startTask() { throw new Error("pre-reload startTask ran"); },
+    executeCommand() { throw new Error("pre-reload executeCommand ran"); },
+  });
+  (globalThis as Record<symbol, unknown>)[Symbol.for("pinest.background-manager")] = first;
+
+  const second = createDefaultBackgroundManager(deps);
+  assert.equal(second, first, "the surviving manager is re-armed, not replaced");
+  const result = await second.executeCommand('echo "[$PINEST_SESSION_ID]"', { sessionId: "host-app" });
+  assert.match(result.outputText, /\[host-app\]/, "the re-armed manager is the current code");
+  second.dispose();
+  delete (globalThis as Record<symbol, unknown>)[Symbol.for("pinest.background-manager")];
 });
