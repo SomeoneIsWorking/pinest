@@ -36,6 +36,9 @@ import {
   type SettledRun,
   type SubagentRun,
 } from "./subagent.ts";
+import { runAfterNewWork, runAfterTurn } from "./subagent-run.ts";
+import { buildSessionOptions } from "./session-factory.ts";
+import { createRowPersister } from "./session-persistence.ts";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { StreamSegmenter, type StreamSegmenterState } from "./stream.ts";
 import { submitUserMessage } from "./session-submit.ts";
@@ -50,14 +53,7 @@ import { SessionModelService } from "./session-models.ts";
 import { SessionOverlay, type OverlayTarget } from "./session-overlay.ts";
 import type { SessionSnapshot, SessionRow, UserImage } from "./protocol.ts";
 import type { SessionGoal } from "./session-goal.ts";
-import { goalFieldFor, identityFieldsFor } from "./session-identity.ts";
-
-function isPinestExtension(path: string, resolvedPath?: string): boolean {
-  const normPath = (path || "").replace(/\\/g, "/").toLowerCase();
-  const normResolved = (resolvedPath || "").replace(/\\/g, "/").toLowerCase();
-  return normPath.includes("/pinest/") || normPath.endsWith("/pinest")
-    || normResolved.includes("/pinest/") || normResolved.endsWith("/pinest");
-}
+import { goalFieldFor, identityFieldsFor, isPinestExtension } from "./session-identity.ts";
 
 /** Where live sessions are parked across an extension re-import (hot reload).
  * globalThis survives the re-import; module-level state does not. */
@@ -103,6 +99,15 @@ export interface SpawnCommand {
    * the `subagent` tool is handed to this session at all.
    */
   parent?: { sessionId: string; task: string };
+  /**
+   * The same thing as `parent`, named the way a CLIENT names it: the session
+   * this spawn belongs under, and the objective it was given. `spawn` derives
+   * `parent` from these, so a socket-spawned child (a local agent) is the same
+   * kind of thing as a tool-spawned one instead of a top-level session that
+   * happens to be running an agent.
+   */
+  parentSessionId?: string | null;
+  task?: string | null;
 }
 
 export interface ResumeCommand {
@@ -225,12 +230,18 @@ export class Supervisor {
   /** Who keeps a session working toward its objective. Policy in
    * goal-continuation.ts, wiring in goal-keeper. */
   private readonly goalKeeper: GoalKeeper;
+  /** The durable-row writer. Storage rules live in session-persistence.ts. */
+  private readonly persist: (id: string, patch: Partial<SessionRow>) => void;
   constructor(ownerUid: string, callbacks: SupervisorCallbacks, registry: SessionRegistry | null = null, opts: SupervisorOptions = {}) {
     this.ownerUid = ownerUid;
     this.callbacks = callbacks;
     this.registry = registry;
     this.agentDir = opts.agentDir;
     this.opts = opts;
+    this.persist = createRowPersister({
+      registry: () => this.registry ?? undefined,
+      live: (id) => this.sessions.get(id),
+    });
     this.modelService = new SessionModelService(this.agentDir);
     this.overlay = new SessionOverlay({
       live: () => this.sessions as Map<string, OverlayTarget>,
@@ -280,12 +291,7 @@ export class Supervisor {
         return awaitTurnEnd(live);
       },
       tree: this.tree,
-      markRun: (id, run) => {
-        const child = this.sessions.get(id);
-        if (child) child.subagent = run;
-        this.callbacks.upsertSession(id, { subagent: run });
-        this.persistRow(id, { subagent: run });
-      },
+      markRun: (id, run) => this.markRun(id, run),
       resolveOwner: (ctx, preferred) => this.toolCaller(ctx, preferred),
     });
     this.subagents = bound.service;
@@ -305,6 +311,18 @@ export class Supervisor {
   /** The tree's rules live in the tree, so a caller gets them, not a copy. */
   levelOf(sessionId: string): number {
     return this.tree.levelOf(sessionId);
+  }
+
+  /** A child session's run takes the verdict of the turn it was working on, and
+   * starts again when it is given new work. The rules are [subagent-run]; this
+   * is where a decided run is written — the live session, the clients and the
+   * durable row together, so no two of them can disagree. */
+  private markRun(id: string, next: SubagentRun | null): void {
+    if (!next) return;
+    const child = this.sessions.get(id);
+    if (child) child.subagent = next;
+    this.callbacks.upsertSession(id, { subagent: next });
+    this.persistRow(id, { subagent: next });
   }
 
   subagentIds(): string[] {
@@ -358,6 +376,7 @@ export class Supervisor {
     return this.callbacks.bgManager;
   }
 
+  /** Session options for one session: the factories own how they are built. */
   private async createSessionOpts(
     cwd: string,
     sessionManager?: SessionManager,
@@ -366,73 +385,19 @@ export class Supervisor {
     cwd: string; agentDir?: string; sessionManager?: SessionManager; resourceLoader?: ResourceLoader;
     modelRuntime?: ModelRuntime; customTools?: any[];
   }> {
-    const agentDir = this.agentDir ?? getAgentDir();
-    const settingsManager = SettingsManager.create(cwd, agentDir);
-    const resourceLoader = new DefaultResourceLoader({
+    return await buildSessionOptions({
       cwd,
-      agentDir,
-      settingsManager,
-      // Spawned sessions deliberately exclude pinest itself, so the image cap
-      // travels as its own inline extension or these sessions would be the ones
-      // a too-large screenshot could still poison (413 on every later request).
-      // The context-budget statement rides along for the same reason: spawned
-      // sessions are where agents invented a budget and stopped.
-      extensionFactories: [imageBudgetExtension(imageBytesLimit), contextBudgetExtension()],
-      extensionsOverride: (base) => ({
-        ...base,
-        extensions: base.extensions.filter((ext) => !isPinestExtension(ext.path, ext.resolvedPath)),
-      }),
-    });
-    await resourceLoader.reload();
-    const modelRuntime = await ModelRuntime.create({
-      authPath: join(agentDir, "auth.json"),
-      modelsPath: join(agentDir, "models.json"),
-    });
-    const extRes = resourceLoader.getExtensions();
-    for (const { name, config } of extRes.runtime.pendingProviderRegistrations) {
-      try { modelRuntime.registerProvider(name, config); } catch { /* */ }
-    }
-    for (const { provider } of extRes.runtime.pendingNativeProviderRegistrations) {
-      try { modelRuntime.registerNativeProvider(provider); } catch { /* */ }
-    }
-    await modelRuntime.refresh({ allowNetwork: false });
-    const opts: {
-      cwd: string; agentDir?: string; sessionManager?: SessionManager; resourceLoader?: ResourceLoader;
-      modelRuntime?: ModelRuntime; customTools?: any[];
-    } = { cwd, resourceLoader, modelRuntime };
-    if (this.agentDir) opts.agentDir = this.agentDir;
-    if (sessionManager) opts.sessionManager = sessionManager;
-    if (this.callbacks.bgManager) {
-      opts.customTools = [
-        createAutoBackgroundBashTool({ bgManager: this.callbacks.bgManager, cwd }),
-        ...createBackgroundTools(this.callbacks.bgManager),
-      ];
-    }
-    // A session at the LAST level of the tree is given no `subagent` tool at
-    // all, so the depth rule holds for a session that never asks; the service
-    // refuses it again by name, for a definition that predates the rule.
-    if ((session.level ?? 1) < MAX_SUBAGENT_LEVEL) {
-      opts.customTools = [...(opts.customTools ?? []), ...this.subagentTools()];
-    }
-    return opts;
+      agentDir: this.agentDir ?? getAgentDir(),
+      sessionManager,
+      level: session.level,
+      bgManager: this.callbacks.bgManager,
+      subagentTools: () => this.subagentTools(),
+      maxImageBytes: imageBytesLimit,
+    }) as any;
   }
 
   private persistRow(id: string, patch: Partial<SessionRow>): void {
-    if (!this.registry) return;
-    const s = this.sessions.get(id);
-    const sm = (s?.session as any)?.sessionManager;
-    this.registry.upsert({
-      id,
-      name: s?.name,
-      cwd: s?.cwd,
-      model: s?.model,
-      modelName: s?.modelName,
-      status: s?.status === "working" ? "running" : "idle",
-      piSessionPath: sm?.getSessionFile?.() ?? sm?.sessionFile ?? null,
-      isInteractive: false,
-      isHost: false,
-      ...patch,
-    });
+    this.persist(id, patch);
   }
 
   /** A live session's starting state, in one place. */
@@ -453,8 +418,17 @@ export class Supervisor {
 
   async spawn(cmd: SpawnCommand): Promise<string> {
     const id = cmd.sessionId || randomUUID();
-    const cwd = cmd.cwd ?? process.cwd();
-    const parent = cmd.parent;
+    // A spawn that names a parent IS a subagent, whichever door it came in
+    // through. The task is the objective line the app shows; a spawn with a
+    // parent and no task still names its parent, because the tree placement is
+    // the fact and the objective is only its label.
+    const parent = cmd.parent ?? (cmd.parentSessionId
+      ? { sessionId: cmd.parentSessionId, task: (cmd.task ?? "").trim() }
+      : undefined);
+    // A child works where its parent works, unless it was told otherwise: a
+    // spawn with no cwd that inherited the host's process cwd put a subagent in
+    // a directory its parent has never seen.
+    const cwd = cmd.cwd ?? (parent ? this.tree.find(parent.sessionId)?.cwd : undefined) ?? process.cwd();
     let isDirectory = false;
     try { isDirectory = statSync(cwd).isDirectory(); } catch { /* checked below */ }
     if (!isDirectory) throw new Error(`workspace directory does not exist: ${cwd}`);
@@ -618,6 +592,11 @@ export class Supervisor {
     const s = this.sessions.get(id);
     if (!s) {
       return null;
+    }
+    // A child session that finished its last run and is being given new work
+    // starts a new one, so the badge describes what it is doing now.
+    if (s.parentSessionId && s.subagent) {
+      this.markRun(id, runAfterNewWork(s.subagent, text, Date.now()));
     }
     return submitUserMessage(
       s,
@@ -885,11 +864,15 @@ export class Supervisor {
         // adopting instance sees the same agent_end.
         const lastMessage = Array.isArray(event.messages) ? event.messages[event.messages.length - 1] : undefined;
         const failed = lastMessage?.role === "assistant" && (lastMessage.stopReason === "error" || !!lastMessage.errorMessage);
-        settleTurn(s, {
+        const settledRun: SettledRun = {
           ok: !failed,
           summary: extractText(lastMessage?.content) || extractText(lastMessage),
           ...(failed ? { error: lastMessage?.errorMessage || "provider error" } : {}),
-        });
+        };
+        settleTurn(s, settledRun);
+        if (s.parentSessionId && s.subagent) {
+          this.markRun(id, runAfterTurn(s.subagent, settledRun, Date.now()));
+        }
         if (Array.isArray(event.messages)) {
           const last = event.messages[event.messages.length - 1];
           if (last?.role === "assistant" && (last.stopReason === "error" || last.errorMessage)) {

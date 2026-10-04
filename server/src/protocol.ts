@@ -290,7 +290,20 @@ export type ClientCommand =
   | { type: "thinking_set"; sessionId?: string; level: string }
   | { type: "session_compact"; sessionId?: string; customInstructions?: string }
   | { type: "session_new"; sessionId?: string }
-  | { type: "session_spawn"; sessionId?: string; cwd?: string; name?: string; model?: string }
+  | {
+      type: "session_spawn";
+      sessionId?: string; cwd?: string; name?: string; model?: string;
+      /**
+       * The session this one is a SUBAGENT of, and the one-line objective it
+       * was given. A spawn that names neither is an ordinary top-level session
+       * the user drives; a spawn that names both is a child in the tree, under
+       * its parent, with a run to reach a verdict — which is what a local agent
+       * (`pinest-agent spawn`) is, and what it was NOT before: an operator
+       * session's fan-out used to land in the tab bar as strangers.
+       */
+      parentSessionId?: string | null;
+      task?: string | null;
+    }
   | { type: "session_despawn"; sessionId: string }
   | { type: "session_list" }
   | { type: "session_resume"; sessionId: string }

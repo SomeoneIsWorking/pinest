@@ -1,5 +1,5 @@
 ---
-id: 70
+id: 74
 title: Session rows outlive the process that owned them
 status: open
 symptom: The app's session list grows without bound: sessions whose pi process died stay listed as idle forever (89 stale rows on 2026-10-04, next to one live host session).

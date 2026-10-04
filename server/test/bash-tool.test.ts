@@ -8,6 +8,7 @@ import {
   formatTaskNotificationXml,
   escapeXml,
   stripAnsi,
+  toolEnvFor,
 } from "../src/bash-tool.ts";
 
 test("stripAnsi strips terminal escape sequences", () => {
@@ -247,5 +248,16 @@ test("the same command without the flag is still reported exactly once", async (
   }
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.deepEqual(deliveries, [result.task!.id], "the default is still to report");
+  manager.dispose();
+});
+
+test("a session's commands are told which session ran them", async () => {
+  // The id is how a command that drives the host on this session's behalf
+  // (pinest-agent spawn) can say who it is acting for; without it the work
+  // lands in the host as a session with no parent.
+  assert.equal(toolEnvFor("host-app").PINEST_SESSION_ID, "host-app");
+  const manager = new BackgroundProcessManager({ autoBgTimeoutMs: 5000, hostSessionId: "host-app" });
+  const result = await manager.executeCommand("echo \"$PINEST_SESSION_ID\"", { sessionId: "agent-session" });
+  assert.match(result.outputText, /agent-session/);
   manager.dispose();
 });

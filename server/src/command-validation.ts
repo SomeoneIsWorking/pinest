@@ -1,9 +1,13 @@
 import type { ClientCommand, UserImage } from "./protocol.ts";
+import { MAX_TASK_CHARS } from "./subagent.ts";
 
 export const COMMAND_LIMITS = {
   sessionIdCharacters: 128,
   commandIdCharacters: 128,
   nameCharacters: 200,
+  /** The objective on a spawn that names a parent. The same bound a
+   * subagent tool call gets, because it is the same field. */
+  taskCharacters: MAX_TASK_CHARS,
   modelFieldCharacters: 256,
   pathBytes: 4096,
   messageTextBytes: 512 * 1024,
@@ -115,12 +119,24 @@ function optionalString(
 }
 
 function sessionId(command: Record<string, unknown>, required: boolean): string | undefined {
-  const value = optionalString(command, "sessionId", {
+  return sessionIdField(command, "sessionId", required);
+}
+
+/** A session id under any field name. The character rule is the one rule: an
+ * id that cannot be a session id cannot be a PARENT's id either, and a second
+ * copy of the pattern is a second place for the two to disagree. */
+function sessionIdField(
+  command: Record<string, unknown>,
+  field: string,
+  required: boolean,
+): string | undefined {
+  const value = optionalString(command, field, {
     maxCharacters: COMMAND_LIMITS.sessionIdCharacters,
+    allowNull: true,
   });
   if (required && value === undefined) fail("sessionId is required");
   if (value !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value)) {
-    fail("sessionId contains unsupported characters");
+    fail(`${field} contains unsupported characters`);
   }
   return value;
 }
@@ -366,11 +382,18 @@ export function parseClientCommand(input: unknown): ClientCommand {
       return { type: "thinking_set", sessionId: sessionId(command, false), level };
     }
     case "session_spawn":
-      rejectUnknownFields(command, ["type", "sessionId", "cwd", "name", "model"]);
+      rejectUnknownFields(command, ["type", "sessionId", "cwd", "name", "model", "parentSessionId", "task"]);
       return {
         type: "session_spawn",
         sessionId: sessionId(command, false),
         cwd: pathField(command, "cwd", { required: false, allowNull: true }),
+        parentSessionId: sessionIdField(command, "parentSessionId", false),
+        task: optionalString(command, "task", {
+          maxCharacters: COMMAND_LIMITS.taskCharacters,
+          trim: true,
+          allowNull: true,
+          emptyAsUndefined: true,
+        }),
         name: optionalString(command, "name", {
           maxCharacters: COMMAND_LIMITS.nameCharacters,
           trim: true,
@@ -700,6 +723,20 @@ export async function dispatchClientCommand(
   switch (command.type) {
     case "session_spawn": {
       const sessionIdValue = command.sessionId ?? deps.newSessionId();
+      // A parent is a CLAIM about the tree, so it is checked rather than
+      // believed: a spawn that named an unknown session would attach a child to
+      // nothing, and every client would then show it at the top level — the
+      // exact defect the parent field exists to remove, arriving by another
+      // route.
+      const parentSessionId = command.parentSessionId ?? undefined;
+      if (parentSessionId !== undefined) {
+        if (parentSessionId === sessionIdValue) {
+          fail(`session ${sessionIdValue} cannot be its own parent`);
+        }
+        if (!deps.isRegistered(parentSessionId)) {
+          fail(`parent session ${parentSessionId} is not a known session`);
+        }
+      }
       await sessionIdReservations.run(sessionIdValue, {
         hostSessionId: deps.hostSessionId,
         isInUse: deps.isSessionIdInUse,

@@ -28,7 +28,12 @@ Goals/status/work live in the other `docs/` registries, not here.
 | Putting a session on a model and a thinking level, and reporting what it actually holds | `server` | `server/src/session-models.ts` (`SessionModelService.applyModelTo`, `applyThinkingTo`, `inheritFrom`) |
 | What "default" means for a thinking level, on a model that can think and one that cannot | `server` | `server/src/thinking.ts` (`resolveThinkingLevel`, `reportThinkingLevel`) |
 | Subagent tree facts: who spawned whom, a session's level, and what a re-opened row must remember it was | `server` | `server/src/subagent-tree.ts` (`SubagentTree`) |
-| The registry row id of a tool call (a spawned session's pi session id is not its row id) | `server` | `server/src/session-identity.ts` (`rowIdForToolContext`) |
+| A child session's run across its life: the verdict its turn produced, and the new run that later work starts | `server` | `server/src/subagent-run.ts` (`runAfterTurn`, `runAfterNewWork`) |
+| Naming a parent on a spawn (a local agent becomes a subagent of the session that started it), and the parent a client may name | `server` | `parent` derivation in `Supervisor.spawn`, `server/src/supervisor.ts`; the `parentSessionId`/`task` fields in `server/src/protocol.ts`; validation in `server/src/command-validation.ts` (`sessionIdField`, the dispatch check) |
+| The session id a session's own commands run with, so a command can act for it | `server` | `toolEnvFor` in `server/src/bash-tool.ts`; `parentFromEnvironment` in `server/src/agent-cli.ts` |
+| Durable row assembly from a live session (one writer, so no caller forgets a field) | `server` | `server/src/session-persistence.ts` (`createRowPersister`) |
+| The options one session is created with (resource loader, model runtime, tool set by tree level) | `server` | `server/src/session-factory.ts` (`buildSessionOptions`) |
+| The registry row id of a tool call (a spawned session's pi session id is not its row id) | `server` | `server/src/session-identity.ts` (`rowIdForToolContext`, `isPinestExtension`) |
 | Sessions in tree order for the host list, and the subagent's row label | `server` | `server/src/sessions-view.ts` (`orderSessionsByParent`, `toItem`, `subagentRunLabel`) |
 | One subagent run as the clients see it (task, verdict, report) | `app` | `app/lib/models/subagent_run.dart` |
 | Sessions in tree order for the app's drawer and tabs | `app` | `app/lib/logic/session_grouping.dart` (`buildSessionTree`, `subagentsOf`) |
