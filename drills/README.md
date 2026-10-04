@@ -11,6 +11,7 @@ git so the next session can re-run them; their output goes to `scratch/logs/`.
 | `reload-midrun.mjs` | A reload landing MID-RUN hands the in-flight run to the re-imported instance: it keeps streaming onto the new instance, finishes, and still accepts input. Uses a local fake SSE model server — no tokens spent, deterministic timing. | nothing external |
 | `subagent-fanout.mjs` | A `subagent` tool call actually fans out: a second real `AgentSession` is opened, its own turn is what the tool waits for, the report returns to the parent as the tool result, and `running → completed` is published to the clients. The child must end up on its parent's model and thinking level, read back from the child's own session. `--negative` gives the same request to a model with no such tool and must fail; `--no-inherit` gives the parent a model that exists nowhere and must fail on the child running on the default. | nothing external |
 
+| `session-gc.mts` | The session list holds no rows whose process is gone: it deletes every listed session except this host's own, THROUGH the real client command (`session_delete` on the authenticated local-agent socket) rather than by editing `sessions.json` under the process that owns it. Session history is kept. Dry run without `--apply`. | a running PiNest host (`agents.sock` + its local-agent token). |
 | `paired-e2e.mts` | A host is reachable and correct from the public internet: a real WebSocket through a real tunnel name to the host's own port, presenting a real Google ID token (I-070). Resolves the name through the same PUBLIC_RESOLVERS the shipping tunnel uses and dials that address, because this host's own resolver returns NXDOMAIN for healthy `*.trycloudflare.com` names — a local-resolver failure must never be read as a dead tunnel. Exits 2 and prints SKIP when the host is unreachable. | the host's current public tunnel URL, and a signed-in machine (`~/.pi/agent/remote-code/auth.json`). |
 
 Each must be run in BOTH directions before their results are trusted:
@@ -24,6 +25,8 @@ node drills/compact-clear.mjs --negative   # pre-fix silent path — must fail o
 node drills/subagent-fanout.mjs              # must PASS
 node drills/subagent-fanout.mjs --negative   # a model with no subagent tool — must fail on the missing fan-out
 node drills/subagent-fanout.mjs --no-inherit # a child that cannot inherit — must fail on the wrong model
+node drills/session-gc.mts                   # dry run: lists the stale rows it would delete
+node drills/session-gc.mts --apply           # deletes them; history is kept
 ```
 
 `--negative` exists because a drill that has only ever seen the passing class
