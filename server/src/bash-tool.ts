@@ -825,6 +825,16 @@ export function createDefaultBackgroundManager(
   deps: DefaultBackgroundManagerDeps
 ): BackgroundProcessManager {
   const arm = (mgr: BackgroundProcessManager): BackgroundProcessManager => {
+    // A manager that survived a reload must stay the SAME object — its
+    // in-flight tasks are the ones a reload must not orphan — but its methods
+    // are the ones the PREVIOUS build defined. Re-pointing the delivery
+    // callbacks is not enough: a change inside a method (how a command is
+    // spawned, what environment it is handed) would then take effect only at
+    // the next process start. That is how a live host kept running commands
+    // without the session id the current build passes them, for as long as it
+    // stayed up. Adopting the current prototype is what makes "the reload
+    // applied" true of the code, not only of the wiring.
+    Object.setPrototypeOf(mgr, BackgroundProcessManager.prototype);
     /** Where a task with no session id really ran. */
     const routeOrphan = (task: BackgroundTask): OrphanRoute => {
       const supervisor = deps.getSupervisor?.();
