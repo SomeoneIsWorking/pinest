@@ -77,3 +77,20 @@ export function identityFieldsFor(
     ...(row.subagent ? { subagent: row.subagent } : {}),
   };
 }
+
+/**
+ * Whether an extension path IS pinest.
+ *
+ * A spawned session must not load pinest inside itself: the image cap and the
+ * context-budget statement travel as their own inline extensions precisely so
+ * these sessions cannot re-enter the host's own machinery. Matched on the path
+ * in both forms pi reports, because a relative path and a resolved one name the
+ * same extension and a filter that only understood one of them let the other
+ * through.
+ */
+export function isPinestExtension(path: string, resolvedPath?: string): boolean {
+  const normPath = (path || "").replace(/\\/g, "/").toLowerCase();
+  const normResolved = (resolvedPath || "").replace(/\\/g, "/").toLowerCase();
+  return normPath.includes("/pinest/") || normPath.endsWith("/pinest")
+    || normResolved.includes("/pinest/") || normResolved.endsWith("/pinest");
+}

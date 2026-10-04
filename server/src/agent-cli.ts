@@ -3,10 +3,16 @@
  * `pinest-agent`: drive the host's sessions from another agent on this machine.
  *
  * Every agent is one session in the host's single pi process, so a fan-out of
- * ten agents costs one process, not ten. Sessions are named `agent:<NAME>`;
- * they appear in the app like any other session.
+ * ten agents costs one process, not ten. Sessions are named `agent:<NAME>`.
  *
- *   node server/src/agent-cli.ts spawn NAME --cwd DIR [--model P/ID] (--brief FILE | --message TEXT)
+ * An agent spawned from inside a session is that session's SUBAGENT: it is
+ * recorded under its parent, with the brief as its task, and it reaches a
+ * verdict when its turn ends — so the app files it under the session that asked
+ * for it instead of listing it as a top-level session of its own. The parent
+ * comes from `PINEST_SESSION_ID`, which the host puts in the environment of the
+ * commands a session runs; `--parent` names one explicitly.
+ *
+ *   node server/src/agent-cli.ts spawn NAME --cwd DIR [--model P/ID] (--brief FILE | --message TEXT) [--parent ID] [--task TEXT]
  *   node server/src/agent-cli.ts send NAME TEXT [--follow-up]
  *   node server/src/agent-cli.ts status [NAME]
  *   node server/src/agent-cli.ts tail NAME [-n N]
@@ -19,12 +25,27 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { LocalAgentClient } from "./local-agent-client.ts";
+import { MAX_TASK_CHARS } from "./subagent.ts";
 import type { ClientCommand, HistoryItem, SessionSnapshot } from "./protocol.ts";
 
 const AGENT_PREFIX = "agent:";
 const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u;
 const SPAWN_TIMEOUT_MS = 60_000;
 const TEXT_PREVIEW_CHARS = 600;
+
+/** The session whose tool call is running this CLI, when the host said so. */
+function parentFromEnvironment(): string | undefined {
+  const id = process.env.PINEST_SESSION_ID?.trim();
+  return id && id.length > 0 ? id : undefined;
+}
+
+/** The objective line the app shows for the run. The brief stays the brief:
+ * this is its label, and a brief measured in files would spend a row on text
+ * nobody reads. */
+function objectiveFrom(brief: string): string {
+  const firstLine = brief.split("\n").find((line) => line.trim())?.trim() ?? "";
+  return firstLine.slice(0, MAX_TASK_CHARS);
+}
 
 function sessionIdOf(name: string | undefined): string {
   if (!name || !NAME_PATTERN.test(name)) throw new Error(`invalid agent name: ${JSON.stringify(name)}`);
@@ -42,6 +63,7 @@ function describe(session: SessionSnapshot): string {
     session.status.padEnd(8),
     (session.model ?? "-").padEnd(28),
     pending ? `${pending} queued ` : "",
+    session.parentSessionId ? `under ${session.parentSessionId} ` : "",
     session.cwd ?? "",
   ].join(" ");
 }
@@ -59,22 +81,32 @@ function printItem(item: HistoryItem): void {
 async function spawn(client: LocalAgentClient, id: string, args: string[]): Promise<void> {
   const { values } = parseArgs({
     args,
-    options: { cwd: { type: "string" }, model: { type: "string" }, brief: { type: "string" }, message: { type: "string" } },
+    options: {
+      cwd: { type: "string" }, model: { type: "string" }, brief: { type: "string" },
+      message: { type: "string" }, parent: { type: "string" }, task: { type: "string" },
+    },
   });
   if (!values.cwd) throw new Error("spawn needs --cwd DIR");
   if (!!values.brief === !!values.message) throw new Error("spawn needs exactly one of --brief FILE or --message TEXT");
   if (client.session(id)) throw new Error(`${id} is already running; stop it first`);
   const text = values.brief ? readFileSync(values.brief, "utf8") : values.message!;
+  const parent = values.parent ?? parentFromEnvironment();
+  // Checked here as well as by the host: a parent that is not in the state this
+  // client can see is a mistake worth naming before a session is opened.
+  if (parent && !client.session(parent)) {
+    throw new Error(`--parent ${parent} is not a session on this host; spawn it as a top-level agent instead`);
+  }
   client.send({
     type: "session_spawn",
     sessionId: id,
     cwd: resolve(values.cwd),
     name: id,
     ...(values.model ? { model: values.model } : {}),
+    ...(parent ? { parentSessionId: parent, task: values.task ?? objectiveFrom(text) } : {}),
   } as ClientCommand);
   await client.untilState(() => !!client.session(id), SPAWN_TIMEOUT_MS);
   client.send({ type: "user_message", sessionId: id, text } as ClientCommand);
-  console.log(`spawned ${id} in ${resolve(values.cwd)}`);
+  console.log(`spawned ${id} in ${resolve(values.cwd)}${parent ? ` under ${parent}` : ""}`);
 }
 
 async function send(client: LocalAgentClient, id: string, args: string[]): Promise<void> {

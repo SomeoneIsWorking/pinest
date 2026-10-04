@@ -93,6 +93,21 @@ turn. See `docs/issues/0070-subagent-fan-out.md` for both, and for the gaps
 (no client control of the limits; not yet qualified against a deployed app on a
 phone).
 
+**The second door into a child session.** `pinest-agent spawn` (what the
+piagent/swarm fan-out uses) opens a child too, and it used to open a
+TOP-LEVEL one: the socket connection is anonymous and the host exported no
+session id, so the spawn could not name a parent and the row recorded none. 121
+such `agent:*` rows existed by 2026-10-04, each shown in the app as an ordinary
+session with no banner, no task and no verdict — which is what made the tree
+behave "randomly": it depended on which door opened the child. Now every
+command a session runs carries `PINEST_SESSION_ID`, `session_spawn` accepts
+`parentSessionId` + `task` (parent must be a registered session and not itself),
+and the host derives from them the same parent the tool path uses — so the child
+inherits the parent's model, thinking level and workspace and is recorded under
+it in the durable row and in the first broadcast. A child's run takes the
+verdict of the turn that ended it and starts again when it is given new work.
+See `docs/issues/0075-local-agents-were-spawned-with-no-parent-so-a-fa.md`.
+
 Model and thinking inheritance is verified by 8 further tests
 (`server/test/session-model-inheritance.test.ts`) and by the drill against a
 parent on a model the machine does not default to, with a `--no-inherit`

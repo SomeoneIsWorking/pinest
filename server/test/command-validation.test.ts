@@ -455,3 +455,52 @@ test("a command frame is the one way a command reaches a sink", () => {
     /unsupported command type "command"/,
   );
 });
+
+test("a spawn may name the parent it is a subagent of", async () => {
+  const spawned: unknown[] = [];
+  const deps = dispatcherDeps({ spawn: (command) => { spawned.push(command); } });
+  await dispatchClientCommand(
+    { type: "session_spawn", sessionId: "agent:one", cwd: "/repo", parentSessionId: "host", task: "fix the build" },
+    deps,
+  );
+  assert.deepEqual(spawned, [{
+    type: "session_spawn",
+    sessionId: "agent:one",
+    cwd: "/repo",
+    name: undefined,
+    parentSessionId: "host",
+    task: "fix the build",
+    model: undefined,
+  }]);
+});
+
+test("a spawn naming an unknown or impossible parent is refused by name", async () => {
+  let spawns = 0;
+  const deps = dispatcherDeps({ spawn: () => { spawns += 1; } });
+  await assert.rejects(
+    () => dispatchClientCommand(
+      { type: "session_spawn", sessionId: "agent:one", parentSessionId: "nobody" },
+      deps,
+    ),
+    /parent session nobody is not a known session/,
+  );
+  await assert.rejects(
+    () => dispatchClientCommand(
+      { type: "session_spawn", sessionId: "agent:one", parentSessionId: "agent:one" },
+      deps,
+    ),
+    /cannot be its own parent/,
+  );
+  assert.equal(spawns, 0, "a refused spawn must not open a session");
+});
+
+test("a spawn's task is bounded by the subagent task bound", () => {
+  const atLimit = "x".repeat(COMMAND_LIMITS.taskCharacters);
+  assert.equal(
+    (parseClientCommand({ type: "session_spawn", parentSessionId: "host", task: atLimit }) as { task: string }).task.length,
+    atLimit.length,
+  );
+  rejects({ type: "session_spawn", parentSessionId: "host", task: `${atLimit}x` }, /task must be at most/);
+  // The parent field is a session id, so it obeys the session-id rule.
+  rejects({ type: "session_spawn", parentSessionId: "not a session" }, /parentSessionId contains unsupported characters/);
+});
