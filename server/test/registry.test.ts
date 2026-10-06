@@ -192,6 +192,15 @@ test("close: marks closed, keeps the row and piSessionPath", () => {
   assert.equal(r.get("c1").piSessionPath, "/pi/c1.jsonl");
 });
 
+test("holds: an open row holds its id, a closed row releases it", () => {
+  const r = fresh();
+  assert.equal(r.holds("a"), false);
+  r.upsert({ id: "a", status: "idle" });
+  assert.equal(r.holds("a"), true);
+  r.close("a");
+  assert.equal(r.holds("a"), false);
+});
+
 test("close: unknown id → null, no throw", () => {
   assert.equal(fresh().close("nope"), null);
 });

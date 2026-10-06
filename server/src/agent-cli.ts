@@ -96,6 +96,10 @@ async function spawn(client: LocalAgentClient, id: string, args: string[]): Prom
   if (parent && !client.session(parent)) {
     throw new Error(`--parent ${parent} is not a session on this host; spawn it as a top-level agent instead`);
   }
+  const answer = client.next(
+    (frame) => (frame.type === "state" && !!client.session(id)) || (frame.type === "error" && frame.sessionId === id),
+    SPAWN_TIMEOUT_MS,
+  );
   client.send({
     type: "session_spawn",
     sessionId: id,
@@ -104,7 +108,8 @@ async function spawn(client: LocalAgentClient, id: string, args: string[]): Prom
     ...(values.model ? { model: values.model } : {}),
     ...(parent ? { parentSessionId: parent, task: values.task ?? objectiveFrom(text) } : {}),
   } as ClientCommand);
-  await client.untilState(() => !!client.session(id), SPAWN_TIMEOUT_MS);
+  const frame = await answer;
+  if (frame.type === "error") throw new Error(`the host refused ${id}: ${frame.message}`);
   client.send({ type: "user_message", sessionId: id, text } as ClientCommand);
   console.log(`spawned ${id} in ${resolve(values.cwd)}${parent ? ` under ${parent}` : ""}`);
 }
