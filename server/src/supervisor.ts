@@ -432,6 +432,8 @@ export class Supervisor {
     let isDirectory = false;
     try { isDirectory = statSync(cwd).isDirectory(); } catch { /* checked below */ }
     if (!isDirectory) throw new Error(`workspace directory does not exist: ${cwd}`);
+    // A closed session's row is retired so the new one starts clean; its history file stays.
+    if (this.registry?.get(id)?.status === "closed") this.registry.remove(id);
     Supervisor.activeSpawning = true;
     let session: AgentSession;
     try {

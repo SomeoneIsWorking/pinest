@@ -230,6 +230,12 @@ export class SessionRegistry {
     return this.get(entry.id) as SessionRow;
   }
 
+  /** Whether a session still owns this id. A closed row's id may be taken by a new session. */
+  holds(id: string): boolean {
+    const row = this.get(id);
+    return !!row && row.status !== "closed";
+  }
+
   /** Mark a session closed (history stays resumable via piSessionPath). */
   close(id: string): SessionRow | null {
     const existing = this.get(id);

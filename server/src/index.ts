@@ -785,7 +785,7 @@ async function dispatchCommand(command: ClientCommand): Promise<void> {
       isLiveSpawned: (id) => !!_supervisor?.sessions.has(id),
       isRegistered: (id) => !!_registry?.get(id),
       isRegisteredHost: (id) => !!_registry?.get(id)?.isHost,
-      isSessionIdInUse: (id) => _publisher.has(id) || !!_supervisor?.sessions.has(id) || !!_registry?.get(id),
+      isSessionIdInUse: (id) => _publisher.has(id) || !!_supervisor?.sessions.has(id) || !!_registry?.holds(id),
       newSessionId: randomUUID,
       host: handleInteractiveCommand,
       spawned: async (cmd) => {
