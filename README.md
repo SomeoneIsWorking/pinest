@@ -137,3 +137,5 @@ says which install command to run when there is none.
 The web client deploys locally with `app/deploy.sh`; pushes affecting `app/`
 build, sign, attest, and publish an immutable per-commit Android release through
 CI.
+
+Built with AI assistance (Claude and other LLMs).
